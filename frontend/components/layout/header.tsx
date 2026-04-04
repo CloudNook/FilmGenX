@@ -1,6 +1,7 @@
 'use client';
 
-import { Bell, Search, HelpCircle } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { Bell, Search, HelpCircle, LogOut, User, Settings } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
@@ -12,7 +13,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { currentUser } from '@/lib/mock-data';
+import { useAuth } from '@/lib/auth';
 
 interface HeaderProps {
   title?: string;
@@ -21,6 +22,18 @@ interface HeaderProps {
 }
 
 export function Header({ title, showSearch = true, breadcrumbs }: HeaderProps) {
+  const { user, logout } = useAuth();
+  const router = useRouter();
+
+  const handleLogout = () => {
+    logout();
+    router.push('/login');
+  };
+
+  const displayName = user?.username || '未登录';
+  const displayEmail = user?.email || '';
+  const avatarFallback = displayName.slice(0, 2);
+
   return (
     <header className="flex h-16 items-center justify-between border-b border-border bg-card px-6">
       {/* Left Section */}
@@ -82,27 +95,35 @@ export function Header({ title, showSearch = true, breadcrumbs }: HeaderProps) {
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" className="flex items-center gap-2 pl-2 pr-3">
               <Avatar className="h-8 w-8">
-                <AvatarImage src={currentUser.avatar} alt={currentUser.name} />
+                <AvatarImage src={user?.avatar_url || undefined} alt={displayName} />
                 <AvatarFallback className="bg-primary text-primary-foreground text-sm">
-                  {currentUser.name.slice(0, 2)}
+                  {avatarFallback}
                 </AvatarFallback>
               </Avatar>
-              <span className="text-sm font-medium text-foreground">{currentUser.name}</span>
+              <span className="text-sm font-medium text-foreground">{displayName}</span>
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-56">
             <DropdownMenuLabel>
               <div className="flex flex-col">
-                <span>{currentUser.name}</span>
-                <span className="text-xs font-normal text-muted-foreground">{currentUser.email}</span>
+                <span>{displayName}</span>
+                <span className="text-xs font-normal text-muted-foreground">{displayEmail}</span>
               </div>
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
-            <DropdownMenuItem>个人资料</DropdownMenuItem>
-            <DropdownMenuItem>账户设置</DropdownMenuItem>
-            <DropdownMenuItem>使用帮助</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => router.push('/settings')}>
+              <User className="mr-2 h-4 w-4" />
+              个人资料
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => router.push('/settings')}>
+              <Settings className="mr-2 h-4 w-4" />
+              账户设置
+            </DropdownMenuItem>
             <DropdownMenuSeparator />
-            <DropdownMenuItem className="text-destructive">退出登录</DropdownMenuItem>
+            <DropdownMenuItem className="text-destructive" onClick={handleLogout}>
+              <LogOut className="mr-2 h-4 w-4" />
+              退出登录
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>

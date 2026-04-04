@@ -1,0 +1,845 @@
+/**
+ * FilmGenX API 客户端。
+ *
+ * 统一封装 fetch 请求，自动附加 Authorization header。
+ * 后端 base URL 从环境变量 NEXT_PUBLIC_API_URL 读取，默认 http://localhost:8000/api/v1。
+ */
+
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
+
+// ---------------------------------------------------------------------------
+// Token 管理（localStorage）
+// ---------------------------------------------------------------------------
+
+const TOKEN_KEY = 'filmgenx_token';
+
+export function getToken(): string | null {
+  if (typeof window === 'undefined') return null;
+  return localStorage.getItem(TOKEN_KEY);
+}
+
+export function setToken(token: string): void {
+  localStorage.setItem(TOKEN_KEY, token);
+}
+
+export function removeToken(): void {
+  localStorage.removeItem(TOKEN_KEY);
+}
+
+// ---------------------------------------------------------------------------
+// 通用请求函数
+// ---------------------------------------------------------------------------
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type BodyValue = Record<string, any> | undefined;
+
+interface RequestOptions extends Omit<RequestInit, 'body'> {
+  body?: BodyValue;
+  /** 是否跳过附加 Authorization header */
+  noAuth?: boolean;
+}
+
+async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const { body, noAuth = false, headers: customHeaders, ...rest } = options;
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(customHeaders as Record<string, string>),
+  };
+
+  // 自动附加 Bearer token
+  if (!noAuth) {
+    const token = getToken();
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+  }
+
+  const res = await fetch(`${BASE_URL}${path}`, {
+    ...rest,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  // 处理 401：token 过期 → 清除
+  if (res.status === 401 && typeof window !== 'undefined') {
+    removeToken();
+    throw new Error('登录已过期，请重新登录');
+  }
+
+  if (!res.ok) {
+    let detail = `请求失败 (${res.status})`;
+    try {
+      const errBody = await res.json();
+      detail = errBody.detail || detail;
+    } catch {
+      // ignore
+    }
+    throw new Error(detail);
+  }
+
+  // 204 No Content
+  if (res.status === 204) return undefined as T;
+
+  return res.json();
+}
+
+// ---------------------------------------------------------------------------
+// Auth API
+// ---------------------------------------------------------------------------
+
+export interface TokenResponse {
+  access_token: string;
+  token_type: string;
+}
+
+export interface UserResponse {
+  id: number;
+  email: string;
+  username: string;
+  is_active: boolean;
+  is_superuser: boolean;
+  avatar_url: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export const authApi = {
+  register(email: string, username: string, password: string) {
+    return request<TokenResponse>('/auth/register', {
+      method: 'POST',
+      body: { email, username, password },
+      noAuth: true,
+    });
+  },
+
+  login(email: string, password: string) {
+    return request<TokenResponse>('/auth/login', {
+      method: 'POST',
+      body: { email, password },
+      noAuth: true,
+    });
+  },
+
+  getMe() {
+    return request<UserResponse>('/auth/me', { method: 'GET' });
+  },
+
+  updateMe(data: { username?: string; avatar_url?: string }) {
+    return request<UserResponse>('/auth/me', {
+      method: 'PATCH',
+      body: data,
+    });
+  },
+
+  uploadAvatar(file: File) {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const token = getToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    return fetch(`${BASE_URL}/auth/me/avatar`, {
+      method: 'POST',
+      headers,
+      body: formData,
+    }).then(async (res) => {
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: '上传失败' }));
+        throw new Error(err.detail || '上传失败');
+      }
+      return res.json() as Promise<UserResponse>;
+    });
+  },
+};
+
+// ---------------------------------------------------------------------------
+// 通用分页响应
+// ---------------------------------------------------------------------------
+
+export interface PageResponse<T> {
+  items: T[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+// ---------------------------------------------------------------------------
+// Projects API
+// ---------------------------------------------------------------------------
+
+export interface ProjectResponse {
+  id: number;
+  owner_id: number;
+  name: string;
+  description: string | null;
+  novel_title: string;
+  cover_image_url: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectCreate {
+  name: string;
+  description?: string;
+  novel_title: string;
+  cover_image_url?: string;
+}
+
+export interface ProjectUpdate {
+  name?: string;
+  description?: string;
+  cover_image_url?: string;
+  status?: 'active' | 'archived';
+}
+
+export const projectsApi = {
+  list(page = 1, pageSize = 20) {
+    return request<PageResponse<ProjectResponse>>(
+      `/projects?page=${page}&page_size=${pageSize}`,
+      { method: 'GET' },
+    );
+  },
+
+  create(data: ProjectCreate) {
+    return request<ProjectResponse>('/projects', {
+      method: 'POST',
+      body: data,
+    });
+  },
+
+  get(projectId: number) {
+    return request<ProjectResponse>(`/projects/${projectId}`, { method: 'GET' });
+  },
+
+  update(projectId: number, data: ProjectUpdate) {
+    return request<ProjectResponse>(`/projects/${projectId}`, {
+      method: 'PATCH',
+      body: data,
+    });
+  },
+
+  delete(projectId: number) {
+    return request<void>(`/projects/${projectId}`, { method: 'DELETE' });
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Scenes (Episodes) API
+// ---------------------------------------------------------------------------
+
+export interface SceneResponse {
+  id: number;
+  project_id: number;
+  scene_code: string;
+  title: string;
+  novel_chapter_start: string | null;
+  novel_chapter_end: string | null;
+  novel_excerpt: string | null;
+  scene_types: string[];
+  priority: string;
+  score_dramatic_tension: number | null;
+  score_visual_potential: number | null;
+  score_emotional_resonance: number | null;
+  score_narrative_importance: number | null;
+  score_audience_familiarity: number | null;
+  score_total: number | null;
+  character_ids: number[];
+  estimated_duration_sec: number | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SceneCreate {
+  scene_code: string;
+  title: string;
+  novel_chapter_start?: string;
+  novel_chapter_end?: string;
+  novel_excerpt?: string;
+  scene_types?: string[];
+  priority?: string;
+  scores?: {
+    dramatic_tension?: number;
+    visual_potential?: number;
+    emotional_resonance?: number;
+    narrative_importance?: number;
+    audience_familiarity?: number;
+  };
+  character_ids?: number[];
+  estimated_duration_sec?: number;
+}
+
+export interface SceneUpdate {
+  title?: string;
+  novel_chapter_start?: string;
+  novel_chapter_end?: string;
+  novel_excerpt?: string;
+  scene_types?: string[];
+  priority?: string;
+  scores?: {
+    dramatic_tension?: number;
+    visual_potential?: number;
+    emotional_resonance?: number;
+    narrative_importance?: number;
+    audience_familiarity?: number;
+  };
+  character_ids?: number[];
+  estimated_duration_sec?: number;
+  status?: string;
+}
+
+export const scenesApi = {
+  list(projectId: number, page = 1, pageSize = 20, status?: string, priority?: string) {
+    const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    if (status) params.set('status', status);
+    if (priority) params.set('priority', priority);
+    return request<PageResponse<SceneResponse>>(
+      `/projects/${projectId}/scenes?${params}`,
+      { method: 'GET' },
+    );
+  },
+
+  create(projectId: number, data: SceneCreate) {
+    return request<SceneResponse>(`/projects/${projectId}/scenes`, {
+      method: 'POST',
+      body: data,
+    });
+  },
+
+  get(projectId: number, sceneId: number) {
+    return request<SceneResponse>(
+      `/projects/${projectId}/scenes/${sceneId}`,
+      { method: 'GET' },
+    );
+  },
+
+  update(projectId: number, sceneId: number, data: SceneUpdate) {
+    return request<SceneResponse>(
+      `/projects/${projectId}/scenes/${sceneId}`,
+      { method: 'PATCH', body: data },
+    );
+  },
+
+  delete(projectId: number, sceneId: number) {
+    return request<void>(
+      `/projects/${projectId}/scenes/${sceneId}`,
+      { method: 'DELETE' },
+    );
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Conversations API
+// ---------------------------------------------------------------------------
+
+export interface MessageResponse {
+  id: number;
+  conversation_id: number;
+  role: string;
+  type: string;
+  content: string;
+  outline_data: Record<string, unknown> | null;
+  seq: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConversationResponse {
+  id: number;
+  project_id: number;
+  title: string;
+  status: string;
+  latest_outline: Record<string, unknown> | null;
+  scene_id: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConversationDetailResponse extends ConversationResponse {
+  messages: MessageResponse[];
+}
+
+export interface EpisodeOutline {
+  title: string;
+  episode_code: string;
+  synopsis: string;
+  theme: string;
+  novel_chapter_start: string;
+  novel_chapter_end: string;
+  novel_excerpt: string;
+  scene_types: string[];
+  priority: string;
+  estimated_duration_sec: number;
+  scores: {
+    dramatic_tension: number;
+    visual_potential: number;
+    emotional_resonance: number;
+    narrative_importance: number;
+    audience_familiarity: number;
+  };
+  characters: string[];
+  storyboard_style_notes: string;
+  storyboard_shot_count: number;
+  version: number;
+  generated_at?: string;
+}
+
+export interface LLMConfig {
+  model: string;
+  temperature?: number;
+}
+
+export const conversationsApi = {
+  list(projectId: number, page = 1, pageSize = 20) {
+    return request<PageResponse<ConversationResponse>>(
+      `/projects/${projectId}/conversations?page=${page}&page_size=${pageSize}`,
+      { method: 'GET' },
+    );
+  },
+
+  create(projectId: number, title = '新对话') {
+    return request<ConversationResponse>(
+      `/projects/${projectId}/conversations`,
+      { method: 'POST', body: { title } },
+    );
+  },
+
+  get(projectId: number, conversationId: number) {
+    return request<ConversationDetailResponse>(
+      `/projects/${projectId}/conversations/${conversationId}`,
+      { method: 'GET' },
+    );
+  },
+
+  update(projectId: number, conversationId: number, data: { title?: string; status?: string; latest_outline?: EpisodeOutline }) {
+    return request<ConversationResponse>(
+      `/projects/${projectId}/conversations/${conversationId}`,
+      { method: 'PATCH', body: data },
+    );
+  },
+
+  delete(projectId: number, conversationId: number) {
+    return request<void>(
+      `/projects/${projectId}/conversations/${conversationId}`,
+      { method: 'DELETE' },
+    );
+  },
+
+  /** 流式聊天，返回 Response 对象供前端读取 SSE */
+  chat(projectId: number, conversationId: number, content: string, llmConfig: LLMConfig, systemPrompt = '') {
+    const token = getToken();
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    return fetch(
+      `${BASE_URL}/projects/${projectId}/conversations/${conversationId}/chat`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ content, llm_config: llmConfig, system_prompt: systemPrompt }),
+      },
+    );
+  },
+
+  /** 流式总结，返回 Response 对象供前端读取 SSE */
+  summarize(projectId: number, conversationId: number, llmConfig: LLMConfig, systemPrompt = '') {
+    const token = getToken();
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    return fetch(
+      `${BASE_URL}/projects/${projectId}/conversations/${conversationId}/summarize`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ llm_config: llmConfig, system_prompt: systemPrompt }),
+      },
+    );
+  },
+
+  /** 确认大纲，创建 Scene 并触发分镜生成 */
+  confirm(projectId: number, conversationId: number, outline: EpisodeOutline, llmConfig: LLMConfig, systemPrompt = '', shotCount?: number) {
+    return request<{ scene_id: number; task_id: number; celery_task_id: string }>(
+      `/projects/${projectId}/conversations/${conversationId}/confirm`,
+      {
+        method: 'POST',
+        body: { outline, llm_config: llmConfig, system_prompt: systemPrompt, shot_count: shotCount },
+      },
+    );
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Characters API
+// ---------------------------------------------------------------------------
+
+export interface CharacterVersionResponse {
+  id: number;
+  character_id: number;
+  version_code: string;
+  label: string;
+  applicable_chapter_start: string | null;
+  applicable_chapter_end: string | null;
+  age_description: string | null;
+  height_cm: number | null;
+  build_description: string | null;
+  face_description: string | null;
+  hair_description: string | null;
+  costumes: Record<string, unknown> | null;
+  dou_qi_color: string | null;
+  dou_qi_level: string | null;
+  key_features: string[];
+  reference_image_urls: string[];
+  base_image_prompt: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CharacterResponse {
+  id: number;
+  project_id: number;
+  char_code: string;
+  name: string;
+  name_aliases: string[];
+  consistent_features: Record<string, unknown> | null;
+  expression_guide: Record<string, unknown> | null;
+  action_guide: Record<string, unknown> | null;
+  relationships: Record<string, unknown> | null;
+  role_description: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CharacterDetailResponse extends CharacterResponse {
+  versions: CharacterVersionResponse[];
+}
+
+export const charactersApi = {
+  list(projectId: number, page = 1, pageSize = 50) {
+    return request<PageResponse<CharacterResponse>>(
+      `/projects/${projectId}/characters?page=${page}&page_size=${pageSize}`,
+      { method: 'GET' },
+    );
+  },
+
+  create(projectId: number, data: { char_code: string; name: string; [key: string]: unknown }) {
+    return request<CharacterResponse>(
+      `/projects/${projectId}/characters`,
+      { method: 'POST', body: data },
+    );
+  },
+
+  get(projectId: number, characterId: number) {
+    return request<CharacterDetailResponse>(
+      `/projects/${projectId}/characters/${characterId}`,
+      { method: 'GET' },
+    );
+  },
+
+  update(projectId: number, characterId: number, data: Record<string, unknown>) {
+    return request<CharacterResponse>(
+      `/projects/${projectId}/characters/${characterId}`,
+      { method: 'PATCH', body: data },
+    );
+  },
+
+  delete(projectId: number, characterId: number) {
+    return request<void>(
+      `/projects/${projectId}/characters/${characterId}`,
+      { method: 'DELETE' },
+    );
+  },
+
+  // 角色版本
+  listVersions(projectId: number, characterId: number) {
+    return request<CharacterVersionResponse[]>(
+      `/projects/${projectId}/characters/${characterId}/versions`,
+      { method: 'GET' },
+    );
+  },
+
+  createVersion(projectId: number, characterId: number, data: Record<string, unknown>) {
+    return request<CharacterVersionResponse>(
+      `/projects/${projectId}/characters/${characterId}/versions`,
+      { method: 'POST', body: data },
+    );
+  },
+
+  updateVersion(projectId: number, characterId: number, versionId: number, data: Record<string, unknown>) {
+    return request<CharacterVersionResponse>(
+      `/projects/${projectId}/characters/${characterId}/versions/${versionId}`,
+      { method: 'PATCH', body: data },
+    );
+  },
+
+  deleteVersion(projectId: number, characterId: number, versionId: number) {
+    return request<void>(
+      `/projects/${projectId}/characters/${characterId}/versions/${versionId}`,
+      { method: 'DELETE' },
+    );
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Storyboards API
+// ---------------------------------------------------------------------------
+
+export interface StoryboardResponse {
+  id: number;
+  scene_id: number;
+  emotion_curve: unknown[] | null;
+  narrative_notes: string | null;
+  pacing_ratio: Record<string, unknown> | null;
+  total_duration_sec: number | null;
+  version: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export const storyboardsApi = {
+  get(sceneId: number) {
+    return request<StoryboardResponse>(`/scenes/${sceneId}/storyboard`, { method: 'GET' });
+  },
+
+  create(sceneId: number, data: Record<string, unknown>) {
+    return request<StoryboardResponse>(`/scenes/${sceneId}/storyboard`, {
+      method: 'POST',
+      body: data,
+    });
+  },
+
+  update(sceneId: number, data: Record<string, unknown>) {
+    return request<StoryboardResponse>(`/scenes/${sceneId}/storyboard`, {
+      method: 'PATCH',
+      body: data,
+    });
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Shots API
+// ---------------------------------------------------------------------------
+
+export interface ShotResponse {
+  id: number;
+  storyboard_id: number;
+  shot_code: string;
+  sequence: number;
+  duration_sec: number;
+  camera: Record<string, unknown> | null;
+  composition: Record<string, unknown> | null;
+  character_id: number | null;
+  char_version_id: number | null;
+  character_action: string | null;
+  character_expression: string | null;
+  character_emotion_intensity: number | null;
+  character_sfx: Record<string, unknown> | null;
+  location_id: string | null;
+  environment: Record<string, unknown> | null;
+  dialogue_character: string | null;
+  dialogue_text: string | null;
+  dialogue_delivery: Record<string, unknown> | null;
+  sound_design: Record<string, unknown> | null;
+  transition_in: string | null;
+  transition_out: string | null;
+  transition_notes: string | null;
+  dependencies: unknown[];
+  image_prompt: string | null;
+  negative_prompt: string | null;
+  style_preset: string | null;
+  qc_character_consistency: boolean;
+  qc_lighting_match: boolean;
+  qc_action_continuity: boolean;
+  qc_approved: boolean;
+  qc_score: number | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export const shotsApi = {
+  list(storyboardId: number, status?: string) {
+    const params = status ? `?status=${status}` : '';
+    return request<ShotResponse[]>(
+      `/storyboards/${storyboardId}/shots${params}`,
+      { method: 'GET' },
+    );
+  },
+
+  create(storyboardId: number, data: Record<string, unknown>) {
+    return request<ShotResponse>(`/storyboards/${storyboardId}/shots`, {
+      method: 'POST',
+      body: data,
+    });
+  },
+
+  get(storyboardId: number, shotId: number) {
+    return request<ShotResponse>(
+      `/storyboards/${storyboardId}/shots/${shotId}`,
+      { method: 'GET' },
+    );
+  },
+
+  update(storyboardId: number, shotId: number, data: Record<string, unknown>) {
+    return request<ShotResponse>(
+      `/storyboards/${storyboardId}/shots/${shotId}`,
+      { method: 'PATCH', body: data },
+    );
+  },
+
+  delete(storyboardId: number, shotId: number) {
+    return request<void>(
+      `/storyboards/${storyboardId}/shots/${shotId}`,
+      { method: 'DELETE' },
+    );
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Assets API
+// ---------------------------------------------------------------------------
+
+export interface AssetResponse {
+  id: number;
+  project_id: number;
+  shot_id: number | null;
+  asset_code: string;
+  asset_type: string;
+  file_url: string;
+  file_format: string | null;
+  file_size_bytes: number | null;
+  width: number | null;
+  height: number | null;
+  duration_sec: number | null;
+  source: string;
+  generator: string | null;
+  tags: string[];
+  description: string | null;
+  version: number;
+  is_current: boolean;
+  parent_asset_id: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export const assetsApi = {
+  list(projectId: number, page = 1, pageSize = 20, assetType?: string) {
+    const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    if (assetType) params.set('asset_type', assetType);
+    return request<PageResponse<AssetResponse>>(
+      `/projects/${projectId}/assets?${params}`,
+      { method: 'GET' },
+    );
+  },
+
+  create(projectId: number, data: Record<string, unknown>) {
+    return request<AssetResponse>(`/projects/${projectId}/assets`, {
+      method: 'POST',
+      body: data,
+    });
+  },
+
+  get(projectId: number, assetId: number) {
+    return request<AssetResponse>(
+      `/projects/${projectId}/assets/${assetId}`,
+      { method: 'GET' },
+    );
+  },
+
+  delete(projectId: number, assetId: number) {
+    return request<void>(
+      `/projects/${projectId}/assets/${assetId}`,
+      { method: 'DELETE' },
+    );
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Tasks API
+// ---------------------------------------------------------------------------
+
+export interface TaskResponse {
+  id: number;
+  shot_id: number | null;
+  celery_task_id: string | null;
+  task_type: string;
+  status: string;
+  progress: number;
+  input_params: Record<string, unknown> | null;
+  result_asset_id: number | null;
+  error_message: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  retry_count: number;
+  max_retries: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export const tasksApi = {
+  get(taskId: number) {
+    return request<TaskResponse>(`/tasks/${taskId}`, { method: 'GET' });
+  },
+
+  triggerVideo(data: { shot_id: number; quality?: string; sound?: string; use_image_start?: boolean; callback_url?: string }) {
+    return request<TaskResponse>('/tasks/video', {
+      method: 'POST',
+      body: data,
+    });
+  },
+
+  triggerStoryboard(data: { scene_id: number; shot_count?: number; style_notes?: string }) {
+    return request<TaskResponse>('/tasks/storyboard', {
+      method: 'POST',
+      body: data,
+    });
+  },
+};
+
+// ---------------------------------------------------------------------------
+// SSE 辅助工具
+// ---------------------------------------------------------------------------
+
+/** 读取 SSE 流，逐 chunk 调用 onChunk，遇到 [DONE] 时调用 onDone */
+export async function readSSEStream(
+  response: Response,
+  onChunk: (text: string) => void,
+  onDone?: () => void,
+) {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('No response body');
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.startsWith('data: ')) continue;
+      const data = trimmed.slice(6);
+      if (data === '[DONE]') {
+        onDone?.();
+        return;
+      }
+      if (data.startsWith('[ERROR]')) {
+        throw new Error(data.slice(8).trim());
+      }
+      onChunk(data);
+    }
+  }
+}

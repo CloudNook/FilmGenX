@@ -2,12 +2,22 @@
 LLM 服务：Google Gemini 流式调用。
 
 使用官方 google-genai SDK。
+API Key 从环境变量 settings.GOOGLE_API_KEY 读取，前端无需传递。
 """
 
 import logging
 from typing import AsyncGenerator, List
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
+
+# 允许使用的模型白名单
+ALLOWED_MODELS = {
+    "gemini-3.1-pro-preview",
+    "gemini-3-flash-preview",
+}
+DEFAULT_MODEL = "gemini-3-flash-preview"
 
 
 async def call_llm_stream(
@@ -20,7 +30,7 @@ async def call_llm_stream(
 
     Args:
         messages:     消息历史 [{"role": "user", "content": "..."}]
-        llm_config:   LLM 配置字典，含 model/api_key/temperature
+        llm_config:   前端传入的 LLM 配置，仅使用 model / temperature
         system_prompt: 可选的系统提示词覆盖
 
     Yields:
@@ -29,12 +39,16 @@ async def call_llm_stream(
     from google import genai
     from google.genai import types
 
-    model_name = llm_config.get("model", "gemini-2.0-flash")
-    api_key = llm_config.get("api_key")
-    temperature = llm_config.get("temperature")
+    model_name = llm_config.get("model") or DEFAULT_MODEL
+    if model_name not in ALLOWED_MODELS:
+        logger.warning(f"Unsupported model '{model_name}', falling back to {DEFAULT_MODEL}")
+        model_name = DEFAULT_MODEL
 
+    api_key = settings.GOOGLE_API_KEY
     if not api_key:
-        raise ValueError("Google API key is required")
+        raise ValueError("GOOGLE_API_KEY not configured in environment")
+
+    temperature = llm_config.get("temperature")
 
     # 初始化客户端
     client = genai.Client(api_key=api_key)

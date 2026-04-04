@@ -1,19 +1,13 @@
 'use client';
 
-import { use } from 'react';
+import { useEffect, use, useState } from 'react';
 import Link from 'next/link';
 import { AppLayout } from '@/components/layout';
-import {
-  getProjectById,
-  getEpisodesByProjectId,
-  getCharactersByProjectId,
-  emotionCurveData,
-} from '@/lib/mock-data';
+import { projectsApi, scenesApi, charactersApi, type ProjectResponse, type SceneResponse, type CharacterResponse } from '@/lib/api';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Progress } from '@/components/ui/progress';
-import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import {
   Clapperboard,
   Film,
@@ -27,33 +21,20 @@ import {
   ArrowRight,
   Sparkles,
   Video,
+  Loader2,
 } from 'lucide-react';
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  Area,
-  AreaChart,
-} from 'recharts';
-import type { Episode } from '@/lib/types';
 
-const statusLabels: Record<Episode['status'], string> = {
+const sceneStatusLabels: Record<string, string> = {
   draft: '草稿',
-  scripting: '剧本',
-  storyboarding: '分镜',
-  production: '制作',
+  scored: '已评分',
+  in_production: '制作中',
   completed: '完成',
 };
 
-const statusColors: Record<Episode['status'], string> = {
+const sceneStatusColors: Record<string, string> = {
   draft: 'bg-muted text-muted-foreground',
-  scripting: 'bg-info/20 text-info',
-  storyboarding: 'bg-warning/20 text-warning',
-  production: 'bg-primary/20 text-primary',
+  scored: 'bg-info/20 text-info',
+  in_production: 'bg-primary/20 text-primary',
   completed: 'bg-success/20 text-success',
 };
 
@@ -63,9 +44,38 @@ export default function ProjectWorkspacePage({
   params: Promise<{ projectId: string }>;
 }) {
   const { projectId } = use(params);
-  const project = getProjectById(projectId);
-  const episodes = getEpisodesByProjectId(projectId);
-  const characters = getCharactersByProjectId(projectId);
+  const projectIdNum = Number(projectId);
+
+  const [project, setProject] = useState<ProjectResponse | null>(null);
+  const [scenes, setScenes] = useState<SceneResponse[]>([]);
+  const [characters, setCharacters] = useState<CharacterResponse[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (isNaN(projectIdNum)) return;
+
+    Promise.all([
+      projectsApi.get(projectIdNum).catch(() => null),
+      scenesApi.list(projectIdNum, 1, 50).then(r => r.items).catch(() => []),
+      charactersApi.list(projectIdNum, 1, 50).then(r => r.items).catch(() => []),
+    ])
+      .then(([p, s, c]) => {
+        setProject(p);
+        setScenes(s);
+        setCharacters(c);
+      })
+      .finally(() => setLoading(false));
+  }, [projectIdNum]);
+
+  if (loading) {
+    return (
+      <AppLayout>
+        <div className="flex items-center justify-center h-full">
+          <Loader2 className="h-8 w-8 animate-spin text-primary" />
+        </div>
+      </AppLayout>
+    );
+  }
 
   if (!project) {
     return (
@@ -77,10 +87,8 @@ export default function ProjectWorkspacePage({
     );
   }
 
-  const completedEpisodes = episodes.filter(e => e.status === 'completed').length;
-  const inProgressEpisodes = episodes.filter(e => e.status === 'production' || e.status === 'storyboarding').length;
-  const totalShots = episodes.reduce((sum, e) => sum + e.shotCount, 0);
-  const completedShots = episodes.reduce((sum, e) => sum + e.completedShots, 0);
+  const completedScenes = scenes.filter(s => s.status === 'completed').length;
+  const inProgressScenes = scenes.filter(s => s.status === 'in_production').length;
 
   const quickActions = [
     { icon: MessageSquare, label: 'AI 对话', href: `/projects/${projectId}/chat`, color: 'text-primary' },
@@ -102,13 +110,11 @@ export default function ProjectWorkspacePage({
         <div className="flex items-start justify-between">
           <div className="space-y-1">
             <h1 className="text-2xl font-bold text-foreground">{project.name}</h1>
-            <p className="text-muted-foreground max-w-2xl">{project.description}</p>
+            <p className="text-muted-foreground max-w-2xl">{project.description || project.novel_title}</p>
             <div className="flex items-center gap-2 pt-2">
-              {project.tags.map((tag) => (
-                <Badge key={tag} variant="outline" className="border-border">
-                  {tag}
-                </Badge>
-              ))}
+              <Badge variant="outline" className="border-border">
+                {project.novel_title}
+              </Badge>
             </div>
           </div>
           <Button className="bg-primary text-primary-foreground hover:bg-primary/90">
@@ -123,14 +129,15 @@ export default function ProjectWorkspacePage({
             <CardContent className="p-4">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-sm text-muted-foreground">总进度</p>
-                  <p className="text-2xl font-bold text-foreground">{project.progress}%</p>
+                  <p className="text-sm text-muted-foreground">状态</p>
+                  <p className="text-2xl font-bold text-foreground">
+                    {project.status === 'active' ? '制作中' : project.status === 'archived' ? '已归档' : '草稿'}
+                  </p>
                 </div>
                 <div className="h-12 w-12 rounded-full bg-primary/10 flex items-center justify-center">
                   <TrendingUp className="h-6 w-6 text-primary" />
                 </div>
               </div>
-              <Progress value={project.progress} className="mt-3 h-2" />
             </CardContent>
           </Card>
 
@@ -138,9 +145,9 @@ export default function ProjectWorkspacePage({
             <CardContent className="p-4">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-sm text-muted-foreground">分集</p>
+                  <p className="text-sm text-muted-foreground">片段/分集</p>
                   <p className="text-2xl font-bold text-foreground">
-                    {completedEpisodes}/{project.episodeCount}
+                    {completedScenes}/{scenes.length}
                   </p>
                 </div>
                 <div className="h-12 w-12 rounded-full bg-info/10 flex items-center justify-center">
@@ -148,7 +155,7 @@ export default function ProjectWorkspacePage({
                 </div>
               </div>
               <p className="mt-2 text-xs text-muted-foreground">
-                {inProgressEpisodes} 集制作中
+                {inProgressScenes} 个制作中
               </p>
             </CardContent>
           </Card>
@@ -157,16 +164,18 @@ export default function ProjectWorkspacePage({
             <CardContent className="p-4">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-sm text-muted-foreground">镜头</p>
+                  <p className="text-sm text-muted-foreground">总评分</p>
                   <p className="text-2xl font-bold text-foreground">
-                    {completedShots}/{totalShots}
+                    {scenes.length > 0
+                      ? Math.round(scenes.reduce((s, sc) => s + (sc.score_total || 0), 0) / scenes.length)
+                      : '-'}
                   </p>
                 </div>
                 <div className="h-12 w-12 rounded-full bg-warning/10 flex items-center justify-center">
                   <Film className="h-6 w-6 text-warning" />
                 </div>
               </div>
-              <Progress value={(completedShots / totalShots) * 100} className="mt-3 h-2" />
+              <p className="mt-2 text-xs text-muted-foreground">各片段平均分</p>
             </CardContent>
           </Card>
 
@@ -184,7 +193,6 @@ export default function ProjectWorkspacePage({
               <div className="flex -space-x-2 mt-3">
                 {characters.slice(0, 4).map((char) => (
                   <Avatar key={char.id} className="h-6 w-6 border-2 border-card">
-                    <AvatarImage src={char.avatarUrl} />
                     <AvatarFallback className="text-xs bg-secondary text-secondary-foreground">
                       {char.name.slice(0, 1)}
                     </AvatarFallback>
@@ -223,10 +231,10 @@ export default function ProjectWorkspacePage({
         </Card>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Episode List */}
+          {/* Scene List */}
           <Card className="lg:col-span-2 bg-card border-border">
             <CardHeader className="flex flex-row items-center justify-between pb-3">
-              <CardTitle className="text-lg">分集概览</CardTitle>
+              <CardTitle className="text-lg">片段概览</CardTitle>
               <Link href={`/projects/${projectId}/episodes`}>
                 <Button variant="ghost" size="sm" className="text-primary">
                   查看全部
@@ -235,34 +243,42 @@ export default function ProjectWorkspacePage({
               </Link>
             </CardHeader>
             <CardContent className="space-y-3">
-              {episodes.slice(0, 5).map((episode) => (
+              {scenes.length === 0 && (
+                <div className="text-center py-8 text-muted-foreground">
+                  <Clapperboard className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                  <p className="text-sm">暂无片段，通过 AI 对话创建</p>
+                </div>
+              )}
+              {scenes.slice(0, 5).map((scene) => (
                 <Link
-                  key={episode.id}
-                  href={`/projects/${projectId}/episodes/${episode.id}`}
+                  key={scene.id}
+                  href={`/projects/${projectId}/episodes/${scene.id}`}
                   className="block"
                 >
                   <div className="flex items-center gap-4 p-3 rounded-lg hover:bg-secondary/50 transition-colors">
                     <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary font-semibold">
-                      {episode.number}
+                      {scene.scene_code.replace(/^[A-Z]+_/, '')}
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
                         <span className="font-medium text-foreground truncate">
-                          {episode.title}
+                          {scene.title}
                         </span>
-                        <Badge className={`text-xs ${statusColors[episode.status]}`}>
-                          {statusLabels[episode.status]}
+                        <Badge className={`text-xs ${sceneStatusColors[scene.status] || 'bg-muted'}`}>
+                          {sceneStatusLabels[scene.status] || scene.status}
                         </Badge>
                       </div>
                       <p className="text-sm text-muted-foreground truncate">
-                        {episode.synopsis}
+                        {scene.novel_chapter_start && scene.novel_chapter_end
+                          ? `第 ${scene.novel_chapter_start} - ${scene.novel_chapter_end} 章`
+                          : scene.scene_types.join(', ')}
                       </p>
                     </div>
                     <div className="text-right shrink-0">
                       <p className="text-sm font-medium text-foreground">
-                        {episode.completedShots}/{episode.shotCount}
+                        {scene.score_total ?? '-'}
                       </p>
-                      <p className="text-xs text-muted-foreground">镜头</p>
+                      <p className="text-xs text-muted-foreground">评分</p>
                     </div>
                   </div>
                 </Link>
@@ -270,97 +286,46 @@ export default function ProjectWorkspacePage({
             </CardContent>
           </Card>
 
-          {/* Emotion Curve */}
+          {/* Characters */}
           <Card className="bg-card border-border">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-lg">情感曲线</CardTitle>
+            <CardHeader className="flex flex-row items-center justify-between pb-3">
+              <CardTitle className="text-lg">角色</CardTitle>
+              <Link href={`/projects/${projectId}/characters`}>
+                <Button variant="ghost" size="sm" className="text-primary">
+                  全部
+                  <ArrowRight className="h-4 w-4 ml-1" />
+                </Button>
+              </Link>
             </CardHeader>
             <CardContent>
-              <div className="h-48">
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={emotionCurveData}>
-                    <defs>
-                      <linearGradient id="tensionGradient" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="hsl(var(--primary))" stopOpacity={0.3} />
-                        <stop offset="95%" stopColor="hsl(var(--primary))" stopOpacity={0} />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                    <XAxis
-                      dataKey="time"
-                      tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }}
-                      tickFormatter={(value) => `${Math.floor(value / 60)}m`}
-                    />
-                    <YAxis
-                      tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }}
-                      domain={[0, 100]}
-                    />
-                    <Tooltip
-                      contentStyle={{
-                        backgroundColor: 'hsl(var(--card))',
-                        border: '1px solid hsl(var(--border))',
-                        borderRadius: '8px',
-                      }}
-                      labelFormatter={(value) => `时间: ${Math.floor(Number(value) / 60)}分${Number(value) % 60}秒`}
-                      formatter={(value: number, name: string) => [value, name === 'tension' ? '张力' : name]}
-                    />
-                    <Area
-                      type="monotone"
-                      dataKey="tension"
-                      stroke="hsl(var(--primary))"
-                      fill="url(#tensionGradient)"
-                      strokeWidth={2}
-                    />
-                  </AreaChart>
-                </ResponsiveContainer>
-              </div>
-              <div className="mt-4 space-y-2">
-                {emotionCurveData
-                  .filter((point) => point.label)
-                  .slice(0, 4)
-                  .map((point, index) => (
-                    <div key={index} className="flex items-center justify-between text-sm">
-                      <span className="text-muted-foreground">{point.label}</span>
-                      <Badge variant="outline" className="border-border">
-                        {point.tension}%
-                      </Badge>
+              {characters.length === 0 && (
+                <div className="text-center py-8 text-muted-foreground">
+                  <Users className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                  <p className="text-sm">暂无角色</p>
+                </div>
+              )}
+              <div className="space-y-3">
+                {characters.slice(0, 6).map((char) => (
+                  <Link
+                    key={char.id}
+                    href={`/projects/${projectId}/characters`}
+                    className="flex items-center gap-3 p-2 rounded-lg hover:bg-secondary/50 transition-colors"
+                  >
+                    <Avatar className="h-8 w-8">
+                      <AvatarFallback className="text-xs bg-primary/20 text-primary">
+                        {char.name.slice(0, 1)}
+                      </AvatarFallback>
+                    </Avatar>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-foreground truncate">{char.name}</p>
+                      <p className="text-xs text-muted-foreground">{char.role_description || char.char_code}</p>
                     </div>
-                  ))}
+                  </Link>
+                ))}
               </div>
             </CardContent>
           </Card>
         </div>
-
-        {/* Recent Activity */}
-        <Card className="bg-card border-border">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-lg">最近活动</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-4">
-              {[
-                { icon: CheckCircle2, color: 'text-success', text: '第三集镜头 1-3 渲染完成', time: '10 分钟前' },
-                { icon: MessageSquare, color: 'text-primary', text: 'AI 优化了第四集的台词', time: '25 分钟前' },
-                { icon: Film, color: 'text-warning', text: '新增 5 个分镜到第三集', time: '1 小时前' },
-                { icon: AlertCircle, color: 'text-destructive', text: '镜头 4 渲染失败，需要重试', time: '2 小时前' },
-                { icon: Users, color: 'text-info', text: '更新了角色「陈明」的外观设定', time: '3 小时前' },
-              ].map((activity, index) => (
-                <div key={index} className="flex items-center gap-3">
-                  <div className={`h-8 w-8 rounded-full bg-secondary flex items-center justify-center ${activity.color}`}>
-                    <activity.icon className="h-4 w-4" />
-                  </div>
-                  <div className="flex-1">
-                    <p className="text-sm text-foreground">{activity.text}</p>
-                  </div>
-                  <span className="text-xs text-muted-foreground flex items-center gap-1">
-                    <Clock className="h-3 w-3" />
-                    {activity.time}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
       </div>
     </AppLayout>
   );

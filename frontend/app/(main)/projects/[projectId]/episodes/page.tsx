@@ -1,13 +1,12 @@
 'use client';
 
-import { use, useState } from 'react';
+import { use, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { AppLayout } from '@/components/layout';
-import { getProjectById, getEpisodesByProjectId } from '@/lib/mock-data';
+import { projectsApi, scenesApi, type ProjectResponse, type SceneResponse } from '@/lib/api';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Progress } from '@/components/ui/progress';
 import { Input } from '@/components/ui/input';
 import {
   Select,
@@ -35,22 +34,20 @@ import {
   Film,
   FileText,
   ChevronRight,
+  Loader2,
 } from 'lucide-react';
-import type { Episode } from '@/lib/types';
 
-const statusLabels: Record<Episode['status'], string> = {
+const statusLabels: Record<string, string> = {
   draft: '草稿',
-  scripting: '剧本',
-  storyboarding: '分镜',
-  production: '制作',
+  scored: '已评分',
+  in_production: '制作中',
   completed: '完成',
 };
 
-const statusColors: Record<Episode['status'], string> = {
+const statusColors: Record<string, string> = {
   draft: 'bg-muted text-muted-foreground',
-  scripting: 'bg-info/20 text-info',
-  storyboarding: 'bg-warning/20 text-warning',
-  production: 'bg-primary/20 text-primary',
+  scored: 'bg-info/20 text-info',
+  in_production: 'bg-primary/20 text-primary',
   completed: 'bg-success/20 text-success',
 };
 
@@ -60,15 +57,40 @@ export default function EpisodesPage({
   params: Promise<{ projectId: string }>;
 }) {
   const { projectId } = use(params);
-  const project = getProjectById(projectId);
-  const episodes = getEpisodesByProjectId(projectId);
+  const projectIdNum = Number(projectId);
 
+  const [project, setProject] = useState<ProjectResponse | null>(null);
+  const [scenes, setScenes] = useState<SceneResponse[]>([]);
+  const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
 
+  useEffect(() => {
+    if (isNaN(projectIdNum)) return;
+
+    Promise.all([
+      projectsApi.get(projectIdNum).catch(() => null),
+      scenesApi.list(projectIdNum, 1, 100).then(r => r.items).catch(() => []),
+    ]).then(([p, s]) => {
+      setProject(p);
+      setScenes(s);
+      setLoading(false);
+    });
+  }, [projectIdNum]);
+
+  if (loading) {
+    return (
+      <AppLayout projectId={projectId}>
+        <div className="flex items-center justify-center h-full">
+          <Loader2 className="h-8 w-8 animate-spin text-primary" />
+        </div>
+      </AppLayout>
+    );
+  }
+
   if (!project) {
     return (
-      <AppLayout>
+      <AppLayout projectId={projectId}>
         <div className="flex items-center justify-center h-full">
           <p className="text-muted-foreground">项目不存在</p>
         </div>
@@ -76,15 +98,16 @@ export default function EpisodesPage({
     );
   }
 
-  const filteredEpisodes = episodes.filter((episode) => {
+  const filteredScenes = scenes.filter((scene) => {
     const matchesSearch =
-      episode.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      episode.synopsis.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesStatus = statusFilter === 'all' || episode.status === statusFilter;
+      scene.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (scene.novel_excerpt || '').toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesStatus = statusFilter === 'all' || scene.status === statusFilter;
     return matchesSearch && matchesStatus;
   });
 
-  const formatDuration = (seconds: number) => {
+  const formatDuration = (seconds: number | null) => {
+    if (!seconds) return '--:--';
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins}:${secs.toString().padStart(2, '0')}`;
@@ -119,26 +142,20 @@ export default function EpisodesPage({
               <SelectContent>
                 <SelectItem value="all">全部状态</SelectItem>
                 <SelectItem value="draft">草稿</SelectItem>
-                <SelectItem value="scripting">剧本</SelectItem>
-                <SelectItem value="storyboarding">分镜</SelectItem>
-                <SelectItem value="production">制作</SelectItem>
+                <SelectItem value="scored">已评分</SelectItem>
+                <SelectItem value="in_production">制作中</SelectItem>
                 <SelectItem value="completed">完成</SelectItem>
               </SelectContent>
             </Select>
           </div>
-
-          <Button className="bg-primary text-primary-foreground hover:bg-primary/90">
-            <Plus className="h-4 w-4 mr-2" />
-            新建分集
-          </Button>
         </div>
 
-        {/* Episodes Grid */}
+        {/* Scenes Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {filteredEpisodes.map((episode) => (
-            <EpisodeCard
-              key={episode.id}
-              episode={episode}
+          {filteredScenes.map((scene) => (
+            <SceneCard
+              key={scene.id}
+              scene={scene}
               projectId={projectId}
               formatDuration={formatDuration}
             />
@@ -146,17 +163,27 @@ export default function EpisodesPage({
         </div>
 
         {/* Empty State */}
-        {filteredEpisodes.length === 0 && (
+        {filteredScenes.length === 0 && (
           <div className="flex flex-col items-center justify-center py-16 text-center">
             <div className="flex h-16 w-16 items-center justify-center rounded-full bg-muted mb-4">
               <FileText className="h-8 w-8 text-muted-foreground" />
             </div>
-            <h3 className="text-lg font-semibold text-foreground mb-2">没有找到分集</h3>
+            <h3 className="text-lg font-semibold text-foreground mb-2">
+              {scenes.length === 0 ? '暂无分集' : '没有找到匹配的分集'}
+            </h3>
             <p className="text-muted-foreground mb-6">
-              {searchQuery || statusFilter !== 'all'
-                ? '尝试调整搜索条件或筛选器'
-                : '点击上方按钮创建第一个分集'}
+              {scenes.length === 0
+                ? '通过 AI 对话创建分集后，会自动出现在这里'
+                : '尝试调整搜索条件或筛选器'}
             </p>
+            {scenes.length === 0 && (
+              <Link href={`/projects/${projectId}/chat`}>
+                <Button className="bg-primary text-primary-foreground hover:bg-primary/90">
+                  <Film className="h-4 w-4 mr-2" />
+                  开始 AI 对话
+                </Button>
+              </Link>
+            )}
           </div>
         )}
       </div>
@@ -164,26 +191,36 @@ export default function EpisodesPage({
   );
 }
 
-function EpisodeCard({
-  episode,
+function SceneCard({
+  scene,
   projectId,
   formatDuration,
 }: {
-  episode: Episode;
+  scene: SceneResponse;
   projectId: string;
-  formatDuration: (seconds: number) => string;
+  formatDuration: (seconds: number | null) => string;
 }) {
-  const progress = episode.shotCount > 0 
-    ? Math.round((episode.completedShots / episode.shotCount) * 100) 
-    : 0;
+  const priorityColors: Record<string, string> = {
+    S: 'bg-destructive/20 text-destructive',
+    A: 'bg-primary/20 text-primary',
+    B: 'bg-info/20 text-info',
+    C: 'bg-muted text-muted-foreground',
+  };
 
   return (
     <Card className="bg-card border-border hover:border-primary/50 transition-all duration-200">
       <CardContent className="p-0">
         <div className="flex">
-          {/* Episode Number */}
+          {/* Scene Code / Priority */}
           <div className="flex items-center justify-center w-20 bg-primary/10 shrink-0">
-            <span className="text-3xl font-bold text-primary">{episode.number}</span>
+            <div className="text-center">
+              <span className="text-lg font-bold text-primary block">
+                {scene.scene_code.replace(/^[A-Z]+_/, '')}
+              </span>
+              <Badge className={`text-xs mt-1 ${priorityColors[scene.priority] || ''}`}>
+                {scene.priority}
+              </Badge>
+            </div>
           </div>
 
           {/* Content */}
@@ -191,13 +228,15 @@ function EpisodeCard({
             <div className="flex items-start justify-between mb-2">
               <div>
                 <div className="flex items-center gap-2 mb-1">
-                  <h3 className="font-semibold text-foreground">{episode.title}</h3>
-                  <Badge className={`text-xs ${statusColors[episode.status]}`}>
-                    {statusLabels[episode.status]}
+                  <h3 className="font-semibold text-foreground">{scene.title}</h3>
+                  <Badge className={`text-xs ${statusColors[scene.status] || 'bg-muted'}`}>
+                    {statusLabels[scene.status] || scene.status}
                   </Badge>
                 </div>
                 <p className="text-sm text-muted-foreground line-clamp-2">
-                  {episode.synopsis}
+                  {scene.novel_chapter_start && scene.novel_chapter_end
+                    ? `第 ${scene.novel_chapter_start} - ${scene.novel_chapter_end} 章`
+                    : scene.scene_types.join(', ')}
                 </p>
               </div>
               <DropdownMenu>
@@ -232,30 +271,28 @@ function EpisodeCard({
             <div className="flex items-center gap-4 text-sm text-muted-foreground mb-3">
               <span className="flex items-center gap-1">
                 <Film className="h-3.5 w-3.5" />
-                {episode.completedShots}/{episode.shotCount} 镜头
+                评分 {scene.score_total ?? '-'}
               </span>
-              {episode.duration > 0 && (
+              {scene.estimated_duration_sec && (
                 <span className="flex items-center gap-1">
                   <Clock className="h-3.5 w-3.5" />
-                  {formatDuration(episode.duration)}
+                  {formatDuration(scene.estimated_duration_sec)}
                 </span>
+              )}
+              {scene.scene_types.length > 0 && (
+                <div className="flex gap-1">
+                  {scene.scene_types.slice(0, 3).map((t) => (
+                    <Badge key={t} variant="outline" className="text-xs border-border">
+                      {t}
+                    </Badge>
+                  ))}
+                </div>
               )}
             </div>
 
-            {/* Progress */}
-            {episode.shotCount > 0 && (
-              <div className="space-y-1">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-muted-foreground">完成进度</span>
-                  <span className="text-foreground font-medium">{progress}%</span>
-                </div>
-                <Progress value={progress} className="h-1.5" />
-              </div>
-            )}
-
             {/* Actions */}
             <div className="flex items-center gap-2 mt-4">
-              <Link href={`/projects/${projectId}/episodes/${episode.id}`} className="flex-1">
+              <Link href={`/projects/${projectId}/episodes/${scene.id}`} className="flex-1">
                 <Button
                   variant="outline"
                   size="sm"
@@ -265,7 +302,7 @@ function EpisodeCard({
                   <ChevronRight className="h-4 w-4 ml-1" />
                 </Button>
               </Link>
-              <Link href={`/projects/${projectId}/storyboard?episode=${episode.id}`}>
+              <Link href={`/projects/${projectId}/storyboard?scene=${scene.id}`}>
                 <Button size="sm" className="bg-primary text-primary-foreground hover:bg-primary/90">
                   分镜工作台
                 </Button>

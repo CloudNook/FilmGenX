@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { AppLayout } from "@/components/layout";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -27,8 +27,6 @@ import {
   Shield,
   HardDrive,
   Zap,
-  Globe,
-  Volume2,
   Monitor,
   Moon,
   Sun,
@@ -37,13 +35,30 @@ import {
   RotateCcw,
   Key,
   CreditCard,
-  Users,
-  Clock,
   CheckCircle2,
+  Loader2,
 } from "lucide-react";
+import { useAuth } from "@/lib/auth";
+import { authApi } from "@/lib/api";
 
 export default function SettingsPage() {
+  const { user, refreshUser } = useAuth();
   const [activeTab, setActiveTab] = useState("profile");
+  const [saving, setSaving] = useState(false);
+  const [saveMessage, setSaveMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const avatarInputRef = useRef<HTMLInputElement>(null);
+  const [uploadingAvatar, setUploadingAvatar] = useState(false);
+
+  const [username, setUsername] = useState(user?.username || "");
+  const [email] = useState(user?.email || "");
+
+  // 同步用户数据到表单
+  const [prevUsername, setPrevUsername] = useState(user?.username || "");
+  if (user && user.username !== prevUsername) {
+    setPrevUsername(user.username);
+    setUsername(user.username);
+  }
+
   const [notifications, setNotifications] = useState({
     email: true,
     push: true,
@@ -64,6 +79,47 @@ export default function SettingsPage() {
     gpuAcceleration: true,
     cacheSize: 50,
   });
+
+  const handleAvatarUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadingAvatar(true);
+    setSaveMessage(null);
+    try {
+      await authApi.uploadAvatar(file);
+      await refreshUser();
+      setSaveMessage({ type: "success", text: "头像已更新" });
+    } catch (err) {
+      setSaveMessage({ type: "error", text: err instanceof Error ? err.message : "上传失败" });
+    } finally {
+      setUploadingAvatar(false);
+    }
+  }, [refreshUser]);
+
+  const handleSave = useCallback(async () => {
+    setSaving(true);
+    setSaveMessage(null);
+    try {
+      const data: { username?: string } = {};
+      if (username !== user?.username) data.username = username;
+      if (Object.keys(data).length > 0) {
+        await authApi.updateMe(data);
+        await refreshUser();
+      }
+      setSaveMessage({ type: "success", text: "设置已保存" });
+    } catch (err) {
+      setSaveMessage({ type: "error", text: err instanceof Error ? err.message : "保存失败" });
+    } finally {
+      setSaving(false);
+    }
+  }, [username, user?.username, refreshUser]);
+
+  const handleReset = useCallback(() => {
+    setUsername(user?.username || "");
+    setSaveMessage(null);
+  }, [user?.username]);
+
+  const avatarFallback = (user?.username || "U").slice(0, 2).toUpperCase();
 
   return (
     <AppLayout>
@@ -115,18 +171,35 @@ export default function SettingsPage() {
                 <CardContent className="space-y-6">
                   <div className="flex items-center gap-6">
                     <Avatar className="h-24 w-24">
-                      <AvatarImage src="/avatars/user.jpg" />
+                      <AvatarImage src={user?.avatar_url || undefined} alt={user?.username} />
                       <AvatarFallback className="bg-primary/20 text-primary text-2xl">
-                        张
+                        {avatarFallback}
                       </AvatarFallback>
                     </Avatar>
                     <div className="space-y-2">
-                      <Button variant="outline" size="sm" className="gap-2">
-                        <Camera className="h-4 w-4" />
-                        更换头像
+                      <input
+                        ref={avatarInputRef}
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp,image/gif"
+                        className="hidden"
+                        onChange={handleAvatarUpload}
+                      />
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="gap-2"
+                        disabled={uploadingAvatar}
+                        onClick={() => avatarInputRef.current?.click()}
+                      >
+                        {uploadingAvatar ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Camera className="h-4 w-4" />
+                        )}
+                        {uploadingAvatar ? "上传中..." : "更换头像"}
                       </Button>
                       <p className="text-xs text-muted-foreground">
-                        支持 JPG、PNG 格式，最大 2MB
+                        支持 JPG、PNG、WebP、GIF 格式，最大 5MB
                       </p>
                     </div>
                   </div>
@@ -135,60 +208,17 @@ export default function SettingsPage() {
 
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-2">
-                      <Label htmlFor="name">姓名</Label>
-                      <Input id="name" defaultValue="张明" />
-                    </div>
-                    <div className="space-y-2">
                       <Label htmlFor="username">用户名</Label>
-                      <Input id="username" defaultValue="zhangming" />
+                      <Input
+                        id="username"
+                        value={username}
+                        onChange={(e) => setUsername(e.target.value)}
+                      />
                     </div>
                     <div className="space-y-2">
                       <Label htmlFor="email">邮箱</Label>
-                      <Input id="email" type="email" defaultValue="zhang@filmgenx.com" />
+                      <Input id="email" type="email" value={email} disabled className="opacity-60" />
                     </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="phone">手机号</Label>
-                      <Input id="phone" defaultValue="+86 138 0000 0000" />
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="bio">个人简介</Label>
-                    <textarea
-                      id="bio"
-                      className="w-full h-24 px-3 py-2 bg-input border border-border rounded-md text-foreground resize-none focus:outline-none focus:ring-2 focus:ring-primary"
-                      defaultValue="资深动画导演，专注于 AI 辅助动画制作领域..."
-                    />
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <Badge variant="outline" className="bg-primary/10 text-primary border-primary/30">
-                      Pro 用户
-                    </Badge>
-                    <span className="text-sm text-muted-foreground">
-                      会员到期：2027年3月15日
-                    </span>
-                  </div>
-                </CardContent>
-              </Card>
-
-              <Card className="bg-card border-border">
-                <CardHeader>
-                  <CardTitle>团队信息</CardTitle>
-                  <CardDescription>您所属的团队和协作设置</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <div className="flex items-center justify-between p-4 bg-secondary/30 rounded-lg">
-                    <div className="flex items-center gap-4">
-                      <div className="h-12 w-12 bg-primary/20 rounded-lg flex items-center justify-center">
-                        <Users className="h-6 w-6 text-primary" />
-                      </div>
-                      <div>
-                        <h4 className="font-medium">创意动画工作室</h4>
-                        <p className="text-sm text-muted-foreground">12 名成员</p>
-                      </div>
-                    </div>
-                    <Badge>管理员</Badge>
                   </div>
                 </CardContent>
               </Card>
@@ -796,15 +826,27 @@ export default function SettingsPage() {
           </Tabs>
 
           {/* Save Actions */}
-          <div className="flex items-center justify-end gap-3 mt-8 pt-6 border-t border-border">
-            <Button variant="outline" className="gap-2">
-              <RotateCcw className="h-4 w-4" />
-              重置更改
-            </Button>
-            <Button className="gap-2 bg-primary text-primary-foreground hover:bg-primary/90">
-              <Save className="h-4 w-4" />
-              保存设置
-            </Button>
+          <div className="flex items-center justify-between mt-8 pt-6 border-t border-border">
+            {saveMessage && (
+              <span className={`text-sm ${saveMessage.type === "success" ? "text-green-500" : "text-destructive"}`}>
+                {saveMessage.text}
+              </span>
+            )}
+            {!saveMessage && <span />}
+            <div className="flex items-center gap-3">
+              <Button variant="outline" className="gap-2" onClick={handleReset} disabled={saving}>
+                <RotateCcw className="h-4 w-4" />
+                重置更改
+              </Button>
+              <Button
+                className="gap-2 bg-primary text-primary-foreground hover:bg-primary/90"
+                onClick={handleSave}
+                disabled={saving}
+              >
+                {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                {saving ? "保存中..." : "保存设置"}
+              </Button>
+            </div>
           </div>
         </div>
       </div>
