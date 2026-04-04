@@ -1,6 +1,8 @@
 'use client';
 
 import { use, useState, useRef, useEffect, useCallback } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { AppLayout } from '@/components/layout';
 import {
   projectsApi,
@@ -374,6 +376,64 @@ export default function ChatPage({
 
           <ScrollArea className="flex-1 min-h-0">
             <div className="p-2 space-y-1">
+              {conversations.length === 0 && (
+                <div className="text-center py-8 text-muted-foreground">
+                  <MessageSquare className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                  <p className="text-sm">暂无对话</p>
+                  <p className="text-[10px] mt-1">点击上方按钮开始新的创作</p>
+                </div>
+              )}
+              {conversations.map((conv) => (
+                <div key={conv.id} className="group relative">
+                  <button
+                    onClick={() => setSelectedConvId(conv.id)}
+                    className={`w-full text-left p-3 rounded-lg transition-colors ${
+                      selectedConvId === conv.id
+                        ? 'bg-primary/10 border border-primary/30'
+                        : 'hover:bg-secondary/50'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      <MessageSquare className="h-4 w-4 text-primary" />
+                      <span className="font-medium text-foreground text-sm truncate">
+                        {conv.title}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Badge
+                        variant="outline"
+                        className={`text-[10px] ${
+                          conv.status === 'confirmed'
+                            ? 'border-success/30 text-success'
+                            : conv.status === 'draft_ready'
+                              ? 'border-warning/30 text-warning'
+                              : 'border-border'
+                        }`}
+                      >
+                        {conv.status === 'confirmed'
+                          ? '已确认'
+                          : conv.status === 'draft_ready'
+                            ? '草稿就绪'
+                            : '进行中'}
+                      </Badge>
+                      <span className="text-[10px] text-muted-foreground">
+                        {formatTime(conv.updated_at)}
+                      </span>
+                    </div>
+                  </button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="absolute top-2 right-2 h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDeleteConversation(conv.id);
+                    }}
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </Button>
+                </div>
+              ))}
             </div>
           </ScrollArea>
         </div>
@@ -522,9 +582,17 @@ export default function ChatPage({
                             : 'bg-card border border-border rounded-tl-sm'
                         }`}
                       >
-                        <p className="text-sm whitespace-pre-wrap leading-relaxed">
-                          {message.content}
-                        </p>
+                        {message.role === 'user' ? (
+                          <p className="text-sm whitespace-pre-wrap leading-relaxed">
+                            {message.content}
+                          </p>
+                        ) : (
+                          <div className="prose prose-custom prose-sm dark:prose-invert max-w-none break-words">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                              {message.content}
+                            </ReactMarkdown>
+                          </div>
+                        )}
                       </div>
                       <div
                         className={`flex items-center gap-2 mt-1 ${
@@ -549,10 +617,11 @@ export default function ChatPage({
                     </AvatarFallback>
                   </Avatar>
                   <div className="inline-block rounded-2xl px-4 py-3 bg-card border border-border rounded-tl-sm max-w-[80%]">
-                    <p className="text-sm whitespace-pre-wrap leading-relaxed">
-                      {streamingText}
-                      <span className="inline-block w-1.5 h-4 bg-primary animate-pulse ml-0.5 align-middle" />
-                    </p>
+                    <div className="prose prose-custom prose-sm dark:prose-invert max-w-none break-words">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {streamingText + ' ▍'}
+                      </ReactMarkdown>
+                    </div>
                   </div>
                 </div>
               )}

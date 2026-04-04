@@ -1,5 +1,6 @@
 @import 'tailwindcss';
 @import 'tw-animate-css';
+@plugin '@tailwindcss/typography';
 
 @custom-variant dark (&:is(.dark *));
 
@@ -127,5 +128,33 @@
   }
   body {
     @apply bg-background text-foreground;
+  }
+}
+
+@layer components {
+  .prose-custom,
+  .prose-custom p,
+  .prose-custom h1,
+  .prose-custom h2,
+  .prose-custom h3,
+  .prose-custom h4,
+  .prose-custom h5,
+  .prose-custom h6,
+  .prose-custom span,
+  .prose-custom li,
+  .prose-custom strong,
+  .prose-custom ul,
+  .prose-custom ol,
+  .prose-custom blockquote,
+  .prose-custom table,
+  .prose-custom th,
+  .prose-custom td {
+    color: var(--foreground) !important;
+  }
+  .prose-custom a {
+    color: var(--primary) !important;
+  }
+  .prose-custom hr {
+    border-color: var(--border) !important;
   }
 }
