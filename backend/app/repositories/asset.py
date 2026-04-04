@@ -2,9 +2,9 @@
 素材（Asset）Repository。
 """
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.asset import Asset
@@ -20,13 +20,22 @@ class AssetRepository(BaseRepository[Asset]):
         project_id: int,
         *,
         asset_type: Optional[str] = None,
+        shot_id: Optional[int] = None,
+        source: Optional[str] = None,
+        is_current: Optional[bool] = None,
         page: int = 1,
         page_size: int = 20,
     ):
-        """查询项目下的素材列表，支持按类型过滤。"""
-        filters = [Asset.project_id == project_id]
+        """查询项目下的素材列表，支持多条件过滤。"""
+        filters = [Asset.project_id == project_id, Asset.is_deleted.is_(False)]
         if asset_type:
             filters.append(Asset.asset_type == asset_type)
+        if shot_id is not None:
+            filters.append(Asset.shot_id == shot_id)
+        if source:
+            filters.append(Asset.source == source)
+        if is_current is not None:
+            filters.append(Asset.is_current == is_current)
         return await self.list(
             filters=filters,
             order_by=Asset.id.desc(),
@@ -43,6 +52,30 @@ class AssetRepository(BaseRepository[Asset]):
             select(Asset).where(*cond).order_by(Asset.version.desc())
         )
         return list(result.scalars().all())
+
+    async def get_stats_by_project(self, project_id: int) -> Dict[str, int]:
+        """统计项目下各类型素材数量。"""
+        result = await self.session.execute(
+            select(Asset.asset_type, func.count(Asset.id))
+            .where(
+                Asset.project_id == project_id,
+                Asset.is_deleted.is_(False),
+            )
+            .group_by(Asset.asset_type)
+        )
+        return {row[0]: row[1] for row in result.all()}
+
+    async def get_stats_by_shot(self, shot_id: int) -> Dict[str, int]:
+        """统计镜头下各类型素材数量。"""
+        result = await self.session.execute(
+            select(Asset.asset_type, func.count(Asset.id))
+            .where(
+                Asset.shot_id == shot_id,
+                Asset.is_deleted.is_(False),
+            )
+            .group_by(Asset.asset_type)
+        )
+        return {row[0]: row[1] for row in result.all()}
 
     async def deprecate_shot_assets(self, shot_id: int, asset_type: str) -> None:
         """将指定镜头、指定类型的当前素材全部标记为非当前版本。

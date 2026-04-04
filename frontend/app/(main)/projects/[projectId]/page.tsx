@@ -22,6 +22,7 @@ import {
   Sparkles,
   Video,
   Loader2,
+  FolderOpen,
 } from 'lucide-react';
 
 const sceneStatusLabels: Record<string, string> = {
@@ -92,8 +93,8 @@ export default function ProjectWorkspacePage({
 
   const quickActions = [
     { icon: MessageSquare, label: 'AI 对话', href: `/projects/${projectId}/chat`, color: 'text-primary' },
+    { icon: FolderOpen, label: '素材库', href: `/projects/${projectId}/materials`, color: 'text-warning' },
     { icon: Clapperboard, label: '分集管理', href: `/projects/${projectId}/episodes`, color: 'text-info' },
-    { icon: Sparkles, label: '分镜工作台', href: `/projects/${projectId}/storyboard`, color: 'text-warning' },
     { icon: Video, label: '视频制作', href: `/projects/${projectId}/video`, color: 'text-success' },
   ];
 
