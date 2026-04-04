@@ -680,6 +680,7 @@ export interface ShotResponse {
   qc_approved: boolean;
   qc_score: number | null;
   status: string;
+  video_url: string | null;
   created_at: string;
   updated_at: string;
 }

@@ -81,7 +81,7 @@ async def _run_video_generation(task: VideoGenerationTask, task_db_id: int) -> d
     from app.repositories.task import TaskRepository
     from app.utils.evolink import evolink_client
 
-    async with task.session_factory() as session:
+    async with task.get_session_factory()() as session:
         task_repo = TaskRepository(session)
         gen_task = await task_repo.get(task_db_id)
         if not gen_task:
