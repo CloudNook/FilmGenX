@@ -8,7 +8,6 @@ if TYPE_CHECKING:
     from app.models.storyboard import Storyboard
     from app.models.asset import Asset
     from app.models.task import GenerationTask
-    from app.models.location import Location, LocationVersion
 
 
 class Shot(Base):
@@ -35,32 +34,20 @@ class Shot(Base):
         comment="构图描述：{subject_position, foreground, midground, background, leading_lines}"
     )
 
-    # 角色
-    character_id: Mapped[Optional[int]] = mapped_column(ForeignKey("characters.id", ondelete="SET NULL"), nullable=True, index=True)
-    char_version_id: Mapped[Optional[int]] = mapped_column(ForeignKey("character_versions.id", ondelete="SET NULL"), nullable=True)
-    character_action: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="角色动作描述")
-    character_expression: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="表情描述")
-    character_emotion_intensity: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="情绪强度 1-10")
-    character_sfx: Mapped[Optional[dict]] = mapped_column(
+    # 角色（支持多角色）
+    char_version_ids: Mapped[list] = mapped_column(
+        JSON, nullable=False, default=list,
+        comment="角色版本ID列表，如 [1, 3, 5]"
+    )
+    characters_config: Mapped[Optional[list]] = mapped_column(
         JSON, nullable=True,
-        comment="角色特效：{dou_qi_color, dou_qi_pattern, aura_intensity, particle_effects}"
+        comment="多角色配置：[{char_version_id, action, expression, emotion_intensity, sfx}]"
     )
 
-    # 环境
-    location_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("locations.id", ondelete="SET NULL"),
-        nullable=True,
-        index=True,
-        comment="场景地点ID"
-    )
-    location_version_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("location_versions.id", ondelete="SET NULL"),
-        nullable=True,
-        comment="场景变体ID（使用非默认版本时填写）"
-    )
+    # 环境（通过 environment.location_id 关联场景）
     environment: Mapped[Optional[dict]] = mapped_column(
         JSON, nullable=True,
-        comment="环境配置：{time_of_day, weather, lighting, atmosphere}"
+        comment="环境配置：{location_id, location_version_id, time_of_day, weather, lighting, atmosphere}"
     )
 
     # 台词
@@ -107,7 +94,5 @@ class Shot(Base):
 
     # Relations
     storyboard: Mapped["Storyboard"] = relationship("Storyboard", back_populates="shots")
-    location: Mapped[Optional["Location"]] = relationship("Location", back_populates="shots")
-    location_version: Mapped[Optional["LocationVersion"]] = relationship("LocationVersion", back_populates="shots")
     assets: Mapped[List["Asset"]] = relationship("Asset", back_populates="shot", cascade="all, delete-orphan")
     generation_tasks: Mapped[List["GenerationTask"]] = relationship("GenerationTask", back_populates="shot", cascade="all, delete-orphan")

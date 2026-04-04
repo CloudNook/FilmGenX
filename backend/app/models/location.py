@@ -14,7 +14,6 @@ from app.db.base import Base
 if TYPE_CHECKING:
     from app.models.project import Project
     from app.models.asset import Asset
-    from app.models.shot import Shot
 
 
 class Location(Base):
@@ -155,10 +154,6 @@ class Location(Base):
         back_populates="location",
         primaryjoin="Asset.location_id == Location.id"
     )
-    shots: Mapped[List["Shot"]] = relationship(
-        "Shot",
-        back_populates="location"
-    )
 
 
 class LocationVersion(Base):
@@ -261,7 +256,3 @@ class LocationVersion(Base):
 
     # === Relations ===
     location: Mapped["Location"] = relationship("Location", back_populates="versions")
-    shots: Mapped[List["Shot"]] = relationship(
-        "Shot",
-        back_populates="location_version"
-    )

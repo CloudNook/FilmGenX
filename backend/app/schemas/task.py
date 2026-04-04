@@ -40,3 +40,14 @@ class StoryboardGenerationRequest(BaseModel):
     scene_id: int = Field(..., description="要生成分镜脚本的高光片段ID")
     shot_count: int = Field(8, ge=1, le=20, description="目标镜头数量（1-20）")
     style_notes: Optional[str] = Field(None, description="风格备注，如 '强调动作感，大量特写'")
+
+
+class ImageGenerationRequest(BaseModel):
+    """触发图像生成的请求体。"""
+    shot_id: Optional[int] = Field(None, description="关联镜头ID，不传则为全局素材")
+    prompt: str = Field(..., min_length=1, max_length=2000, description="正向提示词，描述想要生成的画面")
+    negative_prompt: Optional[str] = Field(None, max_length=1000, description="负向提示词，描述不想要出现的元素")
+    aspect_ratio: str = Field("16:9", pattern="^(1:1|16:9|9:16|4:3|3:4)$", description="画幅比例")
+    style_preset: Optional[str] = Field(None, max_length=100, description="风格预设，如 cinematic / anime / realistic")
+    reference_image_url: Optional[str] = Field(None, max_length=500, description="参考图URL（可选）")
+    save_to_shot: bool = Field(True, description="是否保存到镜头素材库")

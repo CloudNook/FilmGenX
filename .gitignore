@@ -30,3 +30,7 @@ backend/storage/
 .idea/
 *.DS_Store
 /.claude/
+
+# 测试生成的图片
+docs/img/
+backend/test_*.py

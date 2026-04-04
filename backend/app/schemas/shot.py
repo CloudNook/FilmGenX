@@ -27,6 +27,25 @@ class CompositionConfig(BaseModel):
     leading_lines: Optional[str] = Field(None, description="引导线描述")
 
 
+class CharacterInShot(BaseModel):
+    """镜头中的单个角色配置。"""
+    char_version_id: int = Field(..., description="角色版本ID")
+    action: Optional[str] = Field(None, description="动作描述")
+    expression: Optional[str] = Field(None, description="表情描述")
+    emotion_intensity: Optional[int] = Field(None, ge=1, le=10, description="情绪强度 1-10")
+    sfx: Optional[Dict[str, Any]] = Field(None, description="角色特效：斗气颜色/强度/粒子效果")
+
+
+class EnvironmentConfig(BaseModel):
+    """环境配置。"""
+    location_id: Optional[int] = Field(None, description="场景地点ID")
+    location_version_id: Optional[int] = Field(None, description="场景变体ID")
+    time_of_day: Optional[str] = Field(None, description="时间：dawn/day/dusk/night")
+    weather: Optional[str] = Field(None, description="天气：clear/cloudy/rain/snow/fog/storm")
+    lighting: Optional[str] = Field(None, description="光照描述")
+    atmosphere: Optional[str] = Field(None, description="氛围描述")
+
+
 class ShotCreate(BaseModel):
     """创建单镜头请求体。"""
     shot_code: str = Field(..., max_length=30, description="业务ID，如 DQCK_001_S003")
@@ -37,18 +56,12 @@ class ShotCreate(BaseModel):
     camera: Optional[CameraConfig] = None
     composition: Optional[CompositionConfig] = None
 
-    # 角色
-    character_id: Optional[int] = None
-    char_version_id: Optional[int] = None
-    character_action: Optional[str] = None
-    character_expression: Optional[str] = None
-    character_emotion_intensity: Optional[int] = Field(None, ge=1, le=10)
-    character_sfx: Optional[Dict[str, Any]] = Field(None, description="角色特效：斗气颜色/强度/粒子效果")
+    # 角色（支持多角色）
+    char_version_ids: List[int] = Field(default_factory=list, description="角色版本ID列表")
+    characters_config: Optional[List[CharacterInShot]] = Field(None, description="多角色详细配置")
 
     # 环境
-    location_id: Optional[int] = Field(None, description="场景地点ID")
-    location_version_id: Optional[int] = Field(None, description="场景变体ID（使用非默认版本时填写）")
-    environment: Optional[Dict[str, Any]] = Field(None, description="环境配置：时间/天气/光照/氛围")
+    environment: Optional[EnvironmentConfig] = Field(None, description="环境配置")
 
     # 台词
     dialogue_character: Optional[str] = Field(None, max_length=50)
@@ -78,15 +91,9 @@ class ShotUpdate(BaseModel):
     duration_sec: Optional[float] = Field(None, gt=0, le=30)
     camera: Optional[CameraConfig] = None
     composition: Optional[CompositionConfig] = None
-    character_id: Optional[int] = None
-    char_version_id: Optional[int] = None
-    character_action: Optional[str] = None
-    character_expression: Optional[str] = None
-    character_emotion_intensity: Optional[int] = Field(None, ge=1, le=10)
-    character_sfx: Optional[Dict[str, Any]] = None
-    location_id: Optional[int] = Field(None, description="场景地点ID")
-    location_version_id: Optional[int] = Field(None, description="场景变体ID（使用非默认版本时填写）")
-    environment: Optional[Dict[str, Any]] = None
+    char_version_ids: Optional[List[int]] = None
+    characters_config: Optional[List[CharacterInShot]] = None
+    environment: Optional[EnvironmentConfig] = None
     dialogue_character: Optional[str] = Field(None, max_length=50)
     dialogue_text: Optional[str] = None
     dialogue_delivery: Optional[Dict[str, Any]] = None
@@ -119,14 +126,8 @@ class ShotResponse(BaseResponse):
     duration_sec: float
     camera: Optional[dict]
     composition: Optional[dict]
-    character_id: Optional[int]
-    char_version_id: Optional[int]
-    character_action: Optional[str]
-    character_expression: Optional[str]
-    character_emotion_intensity: Optional[int]
-    character_sfx: Optional[dict]
-    location_id: Optional[int]
-    location_version_id: Optional[int]
+    char_version_ids: list
+    characters_config: Optional[list]
     environment: Optional[dict]
     dialogue_character: Optional[str]
     dialogue_text: Optional[str]

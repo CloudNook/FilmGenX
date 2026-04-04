@@ -41,4 +41,4 @@ celery_app.conf.update(
 )
 
 # 自动发现任务模块
-celery_app.autodiscover_tasks(["app.tasks.video", "app.tasks.storyboard"])
+celery_app.autodiscover_tasks(["app.tasks.video", "app.tasks.image", "app.tasks.storyboard"])
