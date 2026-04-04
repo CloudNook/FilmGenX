@@ -522,6 +522,12 @@ export interface CharacterVersionResponse {
   key_features: string[];
   reference_image_urls: string[];
   base_image_prompt: string | null;
+  // 三视图
+  view_front_url: string | null;
+  view_side_url: string | null;
+  view_back_url: string | null;
+  // 状态图片
+  state_images: Record<string, string> | null;
   created_at: string;
   updated_at: string;
 }
@@ -607,6 +613,98 @@ export const charactersApi = {
     return request<void>(
       `/projects/${projectId}/characters/${characterId}/versions/${versionId}`,
       { method: 'DELETE' },
+    );
+  },
+
+  // 角色图片上传
+  uploadReferenceImage(projectId: number, characterId: number, versionId: number, file: File): Promise<CharacterVersionResponse> {
+    const formData = new FormData();
+    formData.append('file', file);
+    const token = getToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    return fetch(
+      `${BASE_URL}/projects/${projectId}/characters/${characterId}/versions/${versionId}/images/reference`,
+      { method: 'POST', headers, body: formData },
+    ).then(async (res) => {
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: '上传失败' }));
+        throw new Error(err.detail || '上传失败');
+      }
+      return res.json() as Promise<CharacterVersionResponse>;
+    });
+  },
+
+  uploadViewImage(projectId: number, characterId: number, versionId: number, viewType: 'front' | 'side' | 'back', file: File): Promise<CharacterVersionResponse> {
+    const formData = new FormData();
+    formData.append('file', file);
+    const token = getToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    return fetch(
+      `${BASE_URL}/projects/${projectId}/characters/${characterId}/versions/${versionId}/images/view/${viewType}`,
+      { method: 'POST', headers, body: formData },
+    ).then(async (res) => {
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: '上传失败' }));
+        throw new Error(err.detail || '上传失败');
+      }
+      return res.json() as Promise<CharacterVersionResponse>;
+    });
+  },
+
+  uploadStateImage(projectId: number, characterId: number, versionId: number, stateType: string, file: File): Promise<CharacterVersionResponse> {
+    const formData = new FormData();
+    formData.append('file', file);
+    const token = getToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    return fetch(
+      `${BASE_URL}/projects/${projectId}/characters/${characterId}/versions/${versionId}/images/state/${stateType}`,
+      { method: 'POST', headers, body: formData },
+    ).then(async (res) => {
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: '上传失败' }));
+        throw new Error(err.detail || '上传失败');
+      }
+      return res.json() as Promise<CharacterVersionResponse>;
+    });
+  },
+
+  // 删除图片
+  deleteReferenceImage(projectId: number, characterId: number, versionId: number, imageIndex: number) {
+    return request<CharacterVersionResponse>(
+      `/projects/${projectId}/characters/${characterId}/versions/${versionId}/images/reference/${imageIndex}`,
+      { method: 'DELETE' },
+    );
+  },
+
+  deleteViewImage(projectId: number, characterId: number, versionId: number, viewType: 'front' | 'side' | 'back') {
+    return request<CharacterVersionResponse>(
+      `/projects/${projectId}/characters/${characterId}/versions/${versionId}/images/view/${viewType}`,
+      { method: 'DELETE' },
+    );
+  },
+
+  deleteStateImage(projectId: number, characterId: number, versionId: number, stateType: string) {
+    return request<CharacterVersionResponse>(
+      `/projects/${projectId}/characters/${characterId}/versions/${versionId}/images/state/${stateType}`,
+      { method: 'DELETE' },
+    );
+  },
+
+  // 图片生成
+  generateViewImage(projectId: number, characterId: number, versionId: number, viewType: 'front' | 'side' | 'back', promptOverride?: string) {
+    return request<{ id: number; task_id: number; task_type: string; status: string; message: string }>(
+      `/projects/${projectId}/characters/${characterId}/versions/${versionId}/images/generate/view`,
+      { method: 'POST', body: { view_type: viewType, prompt_override: promptOverride } },
+    );
+  },
+
+  generateStateImage(projectId: number, characterId: number, versionId: number, stateType: string, stateDescription?: string, promptOverride?: string) {
+    return request<{ id: number; task_id: number; task_type: string; status: string; message: string }>(
+      `/projects/${projectId}/characters/${characterId}/versions/${versionId}/images/generate/state`,
+      { method: 'POST', body: { state_type: stateType, state_description: stateDescription, prompt_override: promptOverride } },
     );
   },
 };
@@ -730,6 +828,7 @@ export interface AssetResponse {
   id: number;
   project_id: number;
   shot_id: number | null;
+  location_id: number | null;
   asset_code: string;
   asset_type: string;
   file_url: string;
@@ -769,11 +868,14 @@ export const assetsApi = {
     );
   },
 
-  upload(projectId: number, file: File, shotId?: number): Promise<AssetResponse> {
+  upload(projectId: number, file: File, shotId?: number, locationId?: number): Promise<AssetResponse> {
     const formData = new FormData();
     formData.append('file', file);
     if (shotId !== undefined) {
       formData.append('shot_id', String(shotId));
+    }
+    if (locationId !== undefined) {
+      formData.append('location_id', String(locationId));
     }
 
     const token = getToken();
@@ -840,6 +942,7 @@ export interface TaskResponse {
 export interface ImageGenerationRequest {
   project_id?: number;
   shot_id?: number;
+  location_id?: number;
   prompt: string;
   negative_prompt?: string;
   aspect_ratio?: string;

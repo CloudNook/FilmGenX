@@ -153,6 +153,30 @@ class CharacterVersion(Base):
         comment="该版本的参考图URL列表"
     )
 
+    # 三视图（角色标准视图）
+    view_front_url: Mapped[Optional[str]] = mapped_column(
+        String(500),
+        nullable=True,
+        comment="正面视图URL"
+    )
+    view_side_url: Mapped[Optional[str]] = mapped_column(
+        String(500),
+        nullable=True,
+        comment="侧面视图URL"
+    )
+    view_back_url: Mapped[Optional[str]] = mapped_column(
+        String(500),
+        nullable=True,
+        comment="背面视图URL"
+    )
+
+    # 状态图片（按情绪/动作分类）
+    state_images: Mapped[Optional[dict]] = mapped_column(
+        JSON,
+        nullable=True,
+        comment="状态图片URL字典，如 {anger: 'url', skill_release: 'url', happy: 'url'}"
+    )
+
     # 生成提示词（该版本专属基础提示词）
     base_image_prompt: Mapped[Optional[str]] = mapped_column(
         Text,

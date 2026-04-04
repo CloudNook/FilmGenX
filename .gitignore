@@ -34,3 +34,4 @@ backend/storage/
 # 测试生成的图片
 docs/img/
 backend/test_*.py
+backend/test_image*.py

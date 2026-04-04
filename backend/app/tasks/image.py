@@ -1,16 +1,10 @@
 """
 图像生成 Celery 任务。
-
-流程：
-  1. 从数据库加载 GenerationTask + Shot 信息
-  2. 拼装 Google Imagen API 请求
-  3. 调用 Imagen API 生成图像
-  4. 上传图片到 OSS，写入 Asset 表
-  5. 更新 GenerationTask 状态为 success / failed
 """
 
 import asyncio
 import logging
+import uuid
 from datetime import datetime, timezone
 
 from celery import Task
@@ -28,9 +22,9 @@ class ImageGenerationTask(Task):
 
     @property
     def session_factory(self):
-        """懒加载 AsyncSessionFactory，避免 Worker 启动时触发数据库连接。"""
         if self._session_factory is None:
             from app.db.session import AsyncSessionFactory
+
             self._session_factory = AsyncSessionFactory
         return self._session_factory
 
@@ -40,19 +34,10 @@ class ImageGenerationTask(Task):
     base=ImageGenerationTask,
     name="app.tasks.image.generate_image_task",
     max_retries=3,
-    default_retry_delay=30,  # 失败后 30 秒重试
+    default_retry_delay=30,
     queue="image",
 )
 def generate_image_task(self, task_db_id: int) -> dict:
-    """图像生成任务入口（同步包装，内部运行异步逻辑）。
-
-    Args:
-        task_db_id: GenerationTask 的数据库 ID。
-
-    Returns:
-        {"status": "success", "asset_id": int, "image_url": str}
-    """
-    # 每次执行都创建新的事件循环，避免重试时 "Event loop is closed" 错误
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -62,68 +47,90 @@ def generate_image_task(self, task_db_id: int) -> dict:
 
 
 async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> dict:
-    """图像生成异步核心逻辑。"""
     import httpx
-    import uuid
+
     from app.repositories.asset import AssetRepository
+    from app.repositories.location import LocationRepository
+    from app.repositories.shot import ShotRepository
     from app.repositories.task import TaskRepository
     from app.utils.image_gen import image_gen_client
     from app.utils.oss import oss_client
 
     async with task.session_factory() as session:
         task_repo = TaskRepository(session)
+        asset_repo = AssetRepository(session)
+        shot_repo = ShotRepository(session)
+        location_repo = LocationRepository(session)
+
         gen_task = await task_repo.get(task_db_id)
         if not gen_task:
-            logger.error("GenerationTask %d 不存在", task_db_id)
+            logger.error("GenerationTask %d does not exist", task_db_id)
             return {"status": "failed", "error": "任务记录不存在"}
 
-        # 标记任务开始
-        await task_repo.update(gen_task, {
-            "status": "running",
-            "started_at": datetime.now(timezone.utc),
-        })
+        await task_repo.update(
+            gen_task,
+            {
+                "status": "running",
+                "started_at": datetime.now(timezone.utc),
+            },
+        )
         await session.commit()
 
         try:
             params = gen_task.input_params or {}
             project_id = params.get("project_id")
+            shot_id = params.get("shot_id")
+            location_id = params.get("location_id")
             prompt = params.get("prompt", "")
             negative_prompt = params.get("negative_prompt")
             aspect_ratio = params.get("aspect_ratio", "16:9")
             resolution = params.get("resolution", "1K")
             style_preset = params.get("style_preset")
-            reference_image_urls = params.get("reference_image_urls", [])
-            save_to_library = params.get("save_to_library", True)
+            reference_image_urls = params.get("reference_image_urls") or []
+            save_to_library = params.get("save_to_shot", True)
 
-            # 构建完整提示词
             full_prompt = prompt
             if style_preset:
                 full_prompt = f"{prompt}, {style_preset} style"
 
+            shot = None
+            if shot_id:
+                shot = await shot_repo.get(shot_id)
+                if shot:
+                    await shot_repo.update(shot, {"status": "generating"})
+                    await session.commit()
+                    if not project_id and getattr(shot, "storyboard", None) and shot.storyboard:
+                        project_id = shot.storyboard.scene.project_id
+
+            location = None
+            if location_id:
+                location = await location_repo.get(location_id)
+
             logger.info(
-                "开始生成图像：project_id=%s prompt=%s... resolution=%s aspect_ratio=%s ref_count=%d",
-                project_id, prompt[:50], resolution, aspect_ratio, len(reference_image_urls or [])
+                "Start image generation task=%s project=%s shot=%s location=%s refs=%s",
+                task_db_id,
+                project_id,
+                shot_id,
+                location_id,
+                len(reference_image_urls),
             )
 
-            # 根据是否有参考图选择生成方法
-            if reference_image_urls and len(reference_image_urls) > 0:
-                # 图生图模式：下载参考图
-                reference_images = []
+            if reference_image_urls:
+                reference_images: list[bytes] = []
                 async with httpx.AsyncClient(timeout=30) as http_client:
-                    for url in reference_image_urls[:5]:  # 最多 5 张
+                    for url in reference_image_urls[:5]:
                         try:
-                            resp = await http_client.get(url)
-                            if resp.status_code == 200:
-                                reference_images.append(resp.content)
+                            response = await http_client.get(url)
+                            if response.status_code == 200:
+                                reference_images.append(response.content)
                             else:
-                                logger.warning(f"下载参考图失败: {url}, status={resp.status_code}")
-                        except Exception as e:
-                            logger.warning(f"下载参考图异常: {url}, error={e}")
+                                logger.warning("Failed to download reference image %s: %s", url, response.status_code)
+                        except Exception as exc:
+                            logger.warning("Failed to download reference image %s: %s", url, exc)
 
                 if not reference_images:
                     raise RuntimeError("所有参考图下载失败")
 
-                logger.info(f"成功下载 {len(reference_images)} 张参考图，开始图生图...")
                 result = await image_gen_client.generate_with_reference(
                     prompt=full_prompt,
                     reference_images=reference_images,
@@ -132,7 +139,6 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
                     image_size=resolution,
                 )
             else:
-                # 文生图模式
                 result = await image_gen_client.generate(
                     prompt=full_prompt,
                     negative_prompt=negative_prompt,
@@ -140,72 +146,110 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
                     image_size=resolution,
                 )
 
-            if not result.success:
+            if not result.success or not result.image_data:
                 raise RuntimeError(result.error_message or "图像生成失败")
 
-            logger.info("图像生成成功：size=%d bytes", len(result.image_data or b""))
-
-            # 上传图片到 OSS
             file_format = "png" if "png" in (result.mime_type or "") else "jpg"
-            asset_code = f"img_{uuid.uuid4().hex[:8]}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            asset_code = f"img_{task_db_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            if shot:
+                asset_code = f"{shot.shot_code}_image"
+            elif location:
+                asset_code = f"{location.loc_code.lower()}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
-            # 生成 OSS 路径和文件名
             filename = f"{asset_code}.{file_format}"
-            image_url = oss_client.upload_bytes(
-                result.image_data,
-                filename,
-                directory="generated/images",
-            )
+            directory = "generated/images"
+            if location:
+                directory = f"generated/locations/{location.id}"
 
-            logger.info("图片已上传到 OSS：%s", image_url)
+            image_url = oss_client.upload_bytes(result.image_data, filename, directory=directory)
+            logger.info("Generated image uploaded to %s", image_url)
 
-            # 保存到素材库
             asset_id = None
             if save_to_library and project_id:
-                asset_repo = AssetRepository(session)
+                tags = ["image", "generated", "global"]
+                if shot:
+                    tags = [shot.shot_code, "image", "generated"]
+                elif location:
+                    tags = [location.loc_code, "image", "generated", "location"]
 
-                new_asset = await asset_repo.create(
-                    project_id=project_id,
-                    shot_id=None,
-                    asset_code=asset_code,
-                    asset_type="image",
-                    file_url=image_url,
-                    file_format=file_format,
-                    file_size_bytes=len(result.image_data or b""),
-                    source="generated",
-                    generator="gemini",
-                    version=1,
-                    is_current=True,
-                    tags=["image", "generated"],
-                )
-                asset_id = new_asset.id
-                logger.info(f"素材已保存到项目 {project_id} 素材库，asset_id={asset_id}")
+                if shot:
+                    await asset_repo.deprecate_shot_assets(shot.id, "image")
+                    existing_assets = await asset_repo.get_by_shot(shot.id, current_only=False)
+                    image_versions = [asset.version for asset in existing_assets if asset.asset_type == "image"]
+                    next_version = (max(image_versions) + 1) if image_versions else 1
+                    new_asset = await asset_repo.create(
+                        project_id=project_id,
+                        shot_id=shot.id,
+                        location_id=location.id if location else None,
+                        asset_code=f"{shot.shot_code}_image_v{next_version}",
+                        asset_type="image",
+                        file_url=image_url,
+                        file_format=file_format,
+                        file_size_bytes=len(result.image_data),
+                        source="generated",
+                        generator="gemini",
+                        version=next_version,
+                        is_current=True,
+                        tags=tags,
+                    )
+                    asset_id = new_asset.id
+                    await shot_repo.update(shot, {"status": "review"})
+                else:
+                    new_asset = await asset_repo.create(
+                        project_id=project_id,
+                        shot_id=None,
+                        location_id=location.id if location else None,
+                        asset_code=f"img_{uuid.uuid4().hex[:8]}_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                        asset_type="image",
+                        file_url=image_url,
+                        file_format=file_format,
+                        file_size_bytes=len(result.image_data),
+                        source="generated",
+                        generator="gemini",
+                        version=1,
+                        is_current=True,
+                        tags=tags,
+                    )
+                    asset_id = new_asset.id
 
-            # 更新任务状态
-            await task_repo.update(gen_task, {
-                "status": "success",
-                "progress": 100,
-                "result_asset_id": asset_id,
-                "completed_at": datetime.now(timezone.utc),
-            })
+                if location:
+                    reference_urls = list(location.reference_image_urls or [])
+                    if image_url not in reference_urls:
+                        reference_urls.append(image_url)
+                        await location_repo.update(location, {"reference_image_urls": reference_urls})
+
+            await task_repo.update(
+                gen_task,
+                {
+                    "status": "success",
+                    "progress": 100,
+                    "result_asset_id": asset_id,
+                    "completed_at": datetime.now(timezone.utc),
+                },
+            )
             await session.commit()
 
-            return {
-                "status": "success",
-                "asset_id": asset_id,
-                "image_url": image_url,
-            }
+            return {"status": "success", "asset_id": asset_id, "image_url": image_url}
 
         except Exception as exc:
-            logger.exception("图像生成失败：task_id=%d error=%s", task_db_id, exc)
-            await task_repo.update(gen_task, {
-                "status": "failed",
-                "error_message": str(exc),
-                "completed_at": datetime.now(timezone.utc),
-            })
+            logger.exception("Image generation failed task_id=%d error=%s", task_db_id, exc)
+            await task_repo.update(
+                gen_task,
+                {
+                    "status": "failed",
+                    "error_message": str(exc),
+                    "completed_at": datetime.now(timezone.utc),
+                },
+            )
+
+            shot_id = (gen_task.input_params or {}).get("shot_id")
+            if shot_id:
+                shot = await shot_repo.get(shot_id)
+                if shot:
+                    await shot_repo.update(shot, {"status": "draft"})
+
             await session.commit()
 
-            # 可重试的异常
             retryable = (RuntimeError, TimeoutError, ConnectionError)
             if isinstance(exc, retryable) and task.request.retries < task.max_retries:
                 raise task.retry(exc=exc)

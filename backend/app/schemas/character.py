@@ -10,6 +10,36 @@ from app.schemas.base import BaseResponse
 
 
 # ---------------------------------------------------------------------------
+# 角色图片生成相关
+# ---------------------------------------------------------------------------
+
+class CharacterViewGenerateRequest(BaseModel):
+    """生成角色三视图请求体。"""
+    view_type: str = Field(..., description="视图类型：front / side / back")
+    prompt_override: Optional[str] = Field(None, description="覆盖默认提示词")
+
+
+class CharacterStateImageGenerateRequest(BaseModel):
+    """生成角色状态图片请求体。"""
+    state_type: str = Field(..., description="状态类型：anger / happy / sad / skill_release / battle / etc")
+    state_description: Optional[str] = Field(None, description="状态详细描述")
+    prompt_override: Optional[str] = Field(None, description="覆盖默认提示词")
+
+
+class CharacterImageUploadRequest(BaseModel):
+    """角色图片上传请求体。"""
+    image_type: str = Field(..., description="图片类型：reference / view_front / view_side / view_back / state")
+    state_key: Optional[str] = Field(None, description="状态图片的键名（当 image_type=state 时必填）")
+
+
+class CharacterImageUploadResponse(BaseModel):
+    """角色图片上传响应。"""
+    upload_url: str = Field(..., description="上传目标 URL")
+    file_key: str = Field(..., description="文件在 OSS 中的 key")
+    image_url: str = Field(..., description="上传完成后的访问 URL")
+
+
+# ---------------------------------------------------------------------------
 # CharacterVersion
 # ---------------------------------------------------------------------------
 
@@ -48,6 +78,12 @@ class CharacterVersionUpdate(BaseModel):
     key_features: Optional[List[str]] = None
     reference_image_urls: Optional[List[str]] = None
     base_image_prompt: Optional[str] = None
+    # 三视图
+    view_front_url: Optional[str] = None
+    view_side_url: Optional[str] = None
+    view_back_url: Optional[str] = None
+    # 状态图片
+    state_images: Optional[Dict[str, str]] = None
 
 
 class CharacterVersionResponse(BaseResponse):
@@ -67,7 +103,21 @@ class CharacterVersionResponse(BaseResponse):
     dou_qi_level: Optional[str]
     key_features: list
     reference_image_urls: list
+    # 三视图
+    view_front_url: Optional[str] = None
+    view_side_url: Optional[str] = None
+    view_back_url: Optional[str] = None
+    # 状态图片
+    state_images: Optional[dict] = None
     base_image_prompt: Optional[str]
+
+
+class CharacterVersionBrief(BaseResponse):
+    """角色版本简要响应。"""
+    character_id: int
+    version_code: str
+    label: str
+    view_front_url: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -113,3 +163,23 @@ class CharacterResponse(BaseResponse):
 class CharacterDetailResponse(CharacterResponse):
     """角色详情响应（含所有版本）。"""
     versions: List[CharacterVersionResponse] = []
+
+
+# ---------------------------------------------------------------------------
+# 预定义状态类型
+# ---------------------------------------------------------------------------
+
+CHARACTER_STATE_TYPES = {
+    "anger": "愤怒",
+    "happy": "开心",
+    "sad": "悲伤",
+    "surprise": "惊讶",
+    "fear": "恐惧",
+    "determination": "坚定",
+    "skill_release": "释放技能",
+    "battle_stance": "战斗姿态",
+    "injured": "受伤",
+    "exhausted": "精疲力尽",
+    "meditation": "冥想",
+    "triumph": "胜利",
+}
