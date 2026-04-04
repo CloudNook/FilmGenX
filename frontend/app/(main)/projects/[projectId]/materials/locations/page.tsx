@@ -203,6 +203,7 @@ export default function LocationsPage({
       breadcrumbs={[
         { label: '项目', href: '/projects' },
         { label: project.name, href: `/projects/${projectId}` },
+        { label: '素材库', href: `/projects/${projectId}/materials` },
         { label: '场景管理' },
       ]}
     >

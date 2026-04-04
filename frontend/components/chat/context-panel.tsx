@@ -216,6 +216,17 @@ export function ContextPanel({
                 </p>
               </div>
 
+              {outline && (
+                <OutlineCard
+                  outline={outline}
+                  isEditing={false}
+                  onEditStart={() => {}}
+                  onSave={async () => {}}
+                  onCancel={() => {}}
+                  readOnly
+                />
+              )}
+
               {conv?.scene_id && (
                 <Button variant="outline" className="w-full border-border" asChild>
                   <a href={`/projects/${projectId}/episodes/${conv.scene_id}`}>

@@ -227,5 +227,3 @@ def _build_storyboard_request(scene, shot_count: int, style_notes: str) -> Story
         shot_count=shot_count,
         style_notes=style_notes or None,
     )
-
-

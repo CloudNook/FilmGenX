@@ -27,6 +27,9 @@ class Storyboard(Base):
         comment="节奏比例，格式：{buildup: 30, climax: 40, resolution: 30}"
     )
 
+    # 计划镜头数量（由 confirm 时传入）
+    shot_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="计划生成的镜头数量")
+
     # 整体时长（秒）
     total_duration_sec: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 

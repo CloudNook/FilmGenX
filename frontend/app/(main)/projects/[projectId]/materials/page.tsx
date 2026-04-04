@@ -93,7 +93,7 @@ export default function MaterialsPage({
       icon: Users,
       title: '角色管理',
       description: '管理项目中的角色档案、版本和特征设定',
-      href: `/projects/${projectId}/characters`,
+      href: `/projects/${projectId}/materials/characters`,
       count: characterCount,
       color: 'text-primary',
       bgColor: 'bg-primary/10',
@@ -102,7 +102,7 @@ export default function MaterialsPage({
       icon: MapPin,
       title: '场景管理',
       description: '管理项目中的场景地点、环境设定和变体',
-      href: `/projects/${projectId}/locations`,
+      href: `/projects/${projectId}/materials/locations`,
       count: locationCount,
       color: 'text-info',
       bgColor: 'bg-info/10',
@@ -111,7 +111,7 @@ export default function MaterialsPage({
       icon: Image,
       title: '素材库',
       description: '管理所有图片、视频、音频素材',
-      href: `/projects/${projectId}/assets`,
+      href: `/projects/${projectId}/materials/assets`,
       count: Object.values(assetStats).reduce((a, b) => a + b, 0),
       color: 'text-success',
       bgColor: 'bg-success/10',
@@ -218,7 +218,7 @@ export default function MaterialsPage({
           <Card className="bg-card border-border">
             <CardHeader className="flex flex-row items-center justify-between pb-3">
               <CardTitle className="text-base">最近角色</CardTitle>
-              <Link href={`/projects/${projectId}/characters`}>
+              <Link href={`/projects/${projectId}/materials/characters`}>
                 <Button variant="ghost" size="sm" className="text-primary">
                   查看全部
                   <ArrowRight className="h-4 w-4 ml-1" />
@@ -236,7 +236,7 @@ export default function MaterialsPage({
                   {recentCharacters.map((char) => (
                     <Link
                       key={char.id}
-                      href={`/projects/${projectId}/characters`}
+                      href={`/projects/${projectId}/materials/characters`}
                       className="flex items-center gap-3 p-2 rounded-lg hover:bg-secondary/50 transition-colors"
                     >
                       <Avatar className="h-8 w-8">
@@ -261,7 +261,7 @@ export default function MaterialsPage({
           <Card className="bg-card border-border">
             <CardHeader className="flex flex-row items-center justify-between pb-3">
               <CardTitle className="text-base">最近场景</CardTitle>
-              <Link href={`/projects/${projectId}/locations`}>
+              <Link href={`/projects/${projectId}/materials/locations`}>
                 <Button variant="ghost" size="sm" className="text-primary">
                   查看全部
                   <ArrowRight className="h-4 w-4 ml-1" />
@@ -279,7 +279,7 @@ export default function MaterialsPage({
                   {recentLocations.map((loc) => (
                     <Link
                       key={loc.id}
-                      href={`/projects/${projectId}/locations`}
+                      href={`/projects/${projectId}/materials/locations`}
                       className="flex items-center gap-3 p-2 rounded-lg hover:bg-secondary/50 transition-colors"
                     >
                       <div className="h-8 w-8 rounded-lg bg-info/10 flex items-center justify-center">
@@ -302,7 +302,7 @@ export default function MaterialsPage({
           <Card className="bg-card border-border">
             <CardHeader className="flex flex-row items-center justify-between pb-3">
               <CardTitle className="text-base">最近素材</CardTitle>
-              <Link href={`/projects/${projectId}/assets`}>
+              <Link href={`/projects/${projectId}/materials/assets`}>
                 <Button variant="ghost" size="sm" className="text-primary">
                   查看全部
                   <ArrowRight className="h-4 w-4 ml-1" />
@@ -320,7 +320,7 @@ export default function MaterialsPage({
                   {recentAssets.map((asset) => (
                     <Link
                       key={asset.id}
-                      href={`/projects/${projectId}/assets`}
+                      href={`/projects/${projectId}/materials/assets`}
                       className="group relative aspect-square rounded-lg overflow-hidden bg-secondary/50 hover:ring-2 ring-primary/50 transition-all"
                     >
                       {asset.asset_type === 'image' ? (

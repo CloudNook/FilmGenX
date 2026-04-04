@@ -362,27 +362,52 @@ export interface ConversationDetailResponse extends ConversationResponse {
   messages: MessageResponse[];
 }
 
+export interface KeyEvent {
+  order: number;
+  description: string;
+  emotional_beat: string;
+}
+
+export interface VisualHighlight {
+  name: string;
+  description: string;
+}
+
 export interface EpisodeOutline {
+  // 基本信息
   title: string;
-  episode_code: string;
+  episode_code?: string;
   synopsis: string;
   theme: string;
+  // 原著映射
   novel_chapter_start: string;
   novel_chapter_end: string;
   novel_excerpt: string;
-  scene_types: string[];
-  priority: string;
-  estimated_duration_sec: number;
-  scores: {
-    dramatic_tension: number;
-    visual_potential: number;
-    emotional_resonance: number;
-    narrative_importance: number;
-    audience_familiarity: number;
-  };
+  // 叙事结构
+  story_arc?: string;
+  key_events?: KeyEvent[];
+  emotional_arc?: string;
+  // 角色
   characters: string[];
+  character_focus?: string;
+  // 场景设定
+  primary_location?: string;
+  location_atmosphere?: string;
+  // 视觉与制作
+  visual_highlights?: VisualHighlight[];
+  color_palette?: string;
+  bgm_direction?: string;
+  // 分镜指导
   storyboard_style_notes: string;
   storyboard_shot_count: number;
+  // 制作参数
+  priority: string;
+  estimated_duration_sec: number;
+  scene_types: string[];
+  // 上下文衔接
+  previous_episode_hint?: string;
+  next_episode_hint?: string;
+  // 元信息
   version: number;
   generated_at?: string;
 }

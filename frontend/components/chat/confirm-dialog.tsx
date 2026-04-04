@@ -11,7 +11,7 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { CheckCircle2, Loader2, Film } from 'lucide-react';
+import { CheckCircle2, Loader2, Film, Clock, MapPin } from 'lucide-react';
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -32,14 +32,6 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   if (!outline) return null;
 
-  const scores = outline.scores;
-  const total =
-    scores.dramatic_tension +
-    scores.visual_potential +
-    scores.emotional_resonance +
-    scores.narrative_importance +
-    scores.audience_familiarity;
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
@@ -59,34 +51,40 @@ export function ConfirmDialog({
             <Badge>{priorityLabels[outline.priority] || outline.priority}</Badge>
           </div>
 
+          {outline.theme && (
+            <p className="text-sm text-warning">{outline.theme}</p>
+          )}
+
           <p className="text-sm text-muted-foreground line-clamp-3">{outline.synopsis}</p>
 
           <div className="grid grid-cols-2 gap-2 text-sm">
-            <div>
-              <span className="text-muted-foreground">编号：</span>
-              <span className="font-medium">{outline.episode_code}</span>
-            </div>
-            <div>
-              <span className="text-muted-foreground">时长：</span>
+            <div className="flex items-center gap-1">
+              <Clock className="h-3.5 w-3.5 text-muted-foreground" />
               <span className="font-medium">{outline.estimated_duration_sec}秒</span>
             </div>
-            <div>
-              <span className="text-muted-foreground">镜头数：</span>
-              <span className="font-medium">{outline.storyboard_shot_count}</span>
+            <div className="flex items-center gap-1">
+              <Film className="h-3.5 w-3.5 text-muted-foreground" />
+              <span className="font-medium">{outline.storyboard_shot_count} 镜头</span>
             </div>
-            <div>
-              <span className="text-muted-foreground">总分：</span>
-              <span className="font-medium">{total}/50</span>
-            </div>
+            {outline.primary_location && (
+              <div className="flex items-center gap-1 col-span-2">
+                <MapPin className="h-3.5 w-3.5 text-muted-foreground" />
+                <span className="font-medium">{outline.primary_location}</span>
+              </div>
+            )}
           </div>
 
-          <div className="flex flex-wrap gap-1">
-            {outline.characters.map((char) => (
-              <Badge key={char} variant="outline" className="text-xs">
-                {char}
-              </Badge>
-            ))}
-          </div>
+          {(outline.characters || []).length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {outline.characters.map((char) => (
+                <Badge key={char} variant="outline" className="text-xs">{char}</Badge>
+              ))}
+            </div>
+          )}
+
+          {outline.story_arc && (
+            <p className="text-xs text-muted-foreground italic">{outline.story_arc}</p>
+          )}
         </div>
 
         <DialogFooter className="gap-2">

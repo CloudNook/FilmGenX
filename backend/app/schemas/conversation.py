@@ -14,31 +14,64 @@ from app.schemas.base import BaseResponse
 # 剧本大纲（EpisodeOutline）
 # ---------------------------------------------------------------------------
 
-class ScoreDetail(BaseModel):
-    dramatic_tension: int = Field(..., ge=0, le=10)
-    visual_potential: int = Field(..., ge=0, le=10)
-    emotional_resonance: int = Field(..., ge=0, le=10)
-    narrative_importance: int = Field(..., ge=0, le=10)
-    audience_familiarity: int = Field(..., ge=0, le=10)
+class KeyEvent(BaseModel):
+    order: int
+    description: str
+    emotional_beat: str
+
+
+class VisualHighlight(BaseModel):
+    name: str
+    description: str
 
 
 class EpisodeOutline(BaseModel):
     """剧本大纲结构。由 AI 生成，可被用户编辑后确认。"""
+
+    # 基本信息
     title: str = Field(..., description="本集标题")
-    episode_code: Optional[str] = Field(None, description="分集编号，由后端 confirm 时自动生成，LLM 无需填写")
-    synopsis: str = Field(..., description="本集剧情概述，100-300字")
+    episode_code: Optional[str] = Field(None, description="分集编号，由后端自动生成")
+    synopsis: str = Field(..., description="200-400字剧情概述")
     theme: str = Field(..., description="核心主题，一句话")
+
+    # 原著映射
     novel_chapter_start: str = Field(..., description="起始章节")
     novel_chapter_end: str = Field(..., description="结束章节")
-    novel_excerpt: str = Field(..., description="关键原著摘录，用于分镜参考")
-    scene_types: List[str] = Field(default_factory=list)
+    novel_excerpt: str = Field(..., description="关键原著摘录")
+
+    # 叙事结构
+    story_arc: str = Field("", description="叙事弧，开头→冲突→结尾")
+    key_events: List[KeyEvent] = Field(default_factory=list, description="关键剧情节点")
+    emotional_arc: str = Field("", description="情绪走势")
+
+    # 角色
+    characters: List[str] = Field(default_factory=list, description="涉及角色列表")
+    character_focus: str = Field("", description="核心角色心理状态和变化")
+
+    # 场景设定
+    primary_location: str = Field("", description="主要地点")
+    location_atmosphere: str = Field("", description="场景氛围")
+
+    # 视觉与制作
+    visual_highlights: List[VisualHighlight] = Field(default_factory=list, description="视觉亮点")
+    color_palette: str = Field("", description="主色调方向")
+    bgm_direction: str = Field("", description="音乐方向")
+
+    # 分镜指导
+    storyboard_style_notes: str = Field("", description="给分镜AI的详细风格指导")
+    storyboard_shot_count: int = Field(8, ge=4, le=20, description="计划镜头数量")
+
+    # 制作参数
     priority: str = Field("A", pattern="^[SABC]$")
-    estimated_duration_sec: int = Field(..., gt=0)
-    scores: ScoreDetail
-    characters: List[str] = Field(default_factory=list, description="角色名列表")
-    storyboard_style_notes: str = Field("", description="给分镜AI的风格指导")
-    storyboard_shot_count: int = Field(8, ge=1, le=20, description="建议镜头数量")
-    version: int = Field(1, ge=1, description="第几次总结，从1开始")
+    estimated_duration_sec: int = Field(120, gt=0)
+    scene_types: List[str] = Field(default_factory=list)
+
+    # 上下文衔接
+    previous_episode_hint: Optional[str] = Field(None, description="上一集结尾简述")
+    next_episode_hint: Optional[str] = Field(None, description="本集结尾悬念/钩子")
+
+    # 元信息
+    version: int = Field(1, ge=1, description="第几次总结")
     generated_at: Optional[str] = None
 
 

@@ -1,6 +1,6 @@
 from app.schemas.base import BaseResponse, PageResponse
 from app.schemas.project import ProjectCreate, ProjectUpdate, ProjectResponse
-from app.schemas.scene import SceneCreate, SceneUpdate, SceneResponse, ScoreDetail
+from app.schemas.scene import SceneCreate, SceneUpdate, SceneResponse
 from app.schemas.storyboard import StoryboardCreate, StoryboardUpdate, StoryboardResponse
 from app.schemas.shot import ShotCreate, ShotUpdate, ShotResponse
 from app.schemas.character import (
@@ -25,7 +25,7 @@ from app.schemas.conversation import (
 __all__ = [
     "BaseResponse", "PageResponse",
     "ProjectCreate", "ProjectUpdate", "ProjectResponse",
-    "SceneCreate", "SceneUpdate", "SceneResponse", "ScoreDetail",
+    "SceneCreate", "SceneUpdate", "SceneResponse",
     "StoryboardCreate", "StoryboardUpdate", "StoryboardResponse",
     "ShotCreate", "ShotUpdate", "ShotResponse",
     "CharacterCreate", "CharacterUpdate", "CharacterResponse", "CharacterDetailResponse",

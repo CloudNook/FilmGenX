@@ -24,6 +24,7 @@ async def _require_project(project_id: int, user_id: int, db: AsyncSession):
     return project
 
 
+
 @router.get("", response_model=PageResponse[SceneResponse], summary="获取片段列表")
 async def list_scenes(
     project_id: int,
@@ -57,20 +58,7 @@ async def create_scene(
     if await repo.get_by_code(body.scene_code):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"scene_code '{body.scene_code}' 已存在")
 
-    # 将 scores 嵌套对象展开为扁平字段
-    data = body.model_dump(exclude={"scores"})
-    if body.scores:
-        s = body.scores
-        data["score_dramatic_tension"]    = s.dramatic_tension
-        data["score_visual_potential"]    = s.visual_potential
-        data["score_emotional_resonance"] = s.emotional_resonance
-        data["score_narrative_importance"] = s.narrative_importance
-        data["score_audience_familiarity"] = s.audience_familiarity
-        # 计算总分（非空维度求和）
-        values = [v for v in [s.dramatic_tension, s.visual_potential, s.emotional_resonance,
-                               s.narrative_importance, s.audience_familiarity] if v is not None]
-        data["score_total"] = sum(values) if values else None
-
+    data = body.model_dump()
     scene = await repo.create(project_id=project_id, **data)
     await db.commit()
     return scene
@@ -104,41 +92,7 @@ async def update_scene(
     if not scene:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="片段不存在")
 
-    data = body.model_dump(exclude_none=True, exclude={"scores"})
-    if body.scores:
-        s = body.scores
-        if s.dramatic_tension is not None:
-            data["score_dramatic_tension"] = s.dramatic_tension
-        if s.visual_potential is not None:
-            data["score_visual_potential"] = s.visual_potential
-        if s.emotional_resonance is not None:
-            data["score_emotional_resonance"] = s.emotional_resonance
-        if s.narrative_importance is not None:
-            data["score_narrative_importance"] = s.narrative_importance
-        if s.audience_familiarity is not None:
-            data["score_audience_familiarity"] = s.audience_familiarity
-        # 重算总分
-        values = [
-            getattr(scene, f"score_{k}") for k in
-            ["dramatic_tension", "visual_potential", "emotional_resonance",
-             "narrative_importance", "audience_familiarity"]
-        ]
-        # 用更新后的值覆盖
-        overrides = {
-            "dramatic_tension": s.dramatic_tension,
-            "visual_potential": s.visual_potential,
-            "emotional_resonance": s.emotional_resonance,
-            "narrative_importance": s.narrative_importance,
-            "audience_familiarity": s.audience_familiarity,
-        }
-        merged = [
-            overrides[k] if overrides[k] is not None else getattr(scene, f"score_{k}")
-            for k in ["dramatic_tension", "visual_potential", "emotional_resonance",
-                      "narrative_importance", "audience_familiarity"]
-        ]
-        valid = [v for v in merged if v is not None]
-        data["score_total"] = sum(valid) if valid else None
-
+    data = body.model_dump(exclude_none=True)
     scene = await repo.update(scene, data)
     await db.commit()
     return scene

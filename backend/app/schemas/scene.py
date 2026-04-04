@@ -2,55 +2,84 @@
 高光片段（Scene）的请求/响应 Schema。
 """
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.schemas.base import BaseResponse
 
 
-# ---------------------------------------------------------------------------
-# 创建
-# ---------------------------------------------------------------------------
+class KeyEventSchema(BaseModel):
+    order: int
+    description: str
+    emotional_beat: str
 
-class ScoreDetail(BaseModel):
-    """各维度评分（0-10）。"""
-    dramatic_tension: Optional[int] = Field(None, ge=0, le=10, description="戏剧张力")
-    visual_potential: Optional[int] = Field(None, ge=0, le=10, description="视觉化潜力")
-    emotional_resonance: Optional[int] = Field(None, ge=0, le=10, description="情感共鸣度")
-    narrative_importance: Optional[int] = Field(None, ge=0, le=10, description="叙事重要性")
-    audience_familiarity: Optional[int] = Field(None, ge=0, le=10, description="粉丝熟知度")
 
+class VisualHighlightSchema(BaseModel):
+    name: str
+    description: str
+
+
+# ---------------------------------------------------------------------------
+# 创建 / 更新
+# ---------------------------------------------------------------------------
 
 class SceneCreate(BaseModel):
-    """创建高光片段请求体。"""
-    scene_code: str = Field(..., max_length=20, description="业务ID，如 DQCK_001")
-    title: str = Field(..., max_length=200, description="片段标题")
-    novel_chapter_start: Optional[str] = Field(None, max_length=50, description="起始章节")
-    novel_chapter_end: Optional[str] = Field(None, max_length=50, description="结束章节")
-    novel_excerpt: Optional[str] = Field(None, description="原著关键段落摘录")
-    scene_types: List[str] = Field(default_factory=list, description="片段类型列表")
-    priority: str = Field("A", pattern="^[SABC]$", description="优先级：S/A/B/C")
-    scores: Optional[ScoreDetail] = None
-    character_ids: List[int] = Field(default_factory=list, description="涉及角色ID列表")
-    estimated_duration_sec: Optional[int] = Field(None, gt=0, description="预估时长（秒）")
+    """创建高光片段请求体（手动创建时使用，confirm 接口直接从 outline 创建）。"""
+    scene_code: str = Field(..., max_length=20)
+    title: str = Field(..., max_length=200)
+    synopsis: Optional[str] = None
+    theme: Optional[str] = None
+    novel_chapter_start: Optional[str] = Field(None, max_length=50)
+    novel_chapter_end: Optional[str] = Field(None, max_length=50)
+    novel_excerpt: Optional[str] = None
+    story_arc: Optional[str] = None
+    key_events: List[Dict[str, Any]] = Field(default_factory=list)
+    emotional_arc: Optional[str] = None
+    characters: List[str] = Field(default_factory=list)
+    character_focus: Optional[str] = None
+    character_ids: List[int] = Field(default_factory=list)
+    primary_location: Optional[str] = None
+    location_atmosphere: Optional[str] = None
+    visual_highlights: List[Dict[str, Any]] = Field(default_factory=list)
+    color_palette: Optional[str] = None
+    bgm_direction: Optional[str] = None
+    storyboard_style_notes: Optional[str] = None
+    previous_episode_hint: Optional[str] = None
+    next_episode_hint: Optional[str] = None
+    scene_types: List[str] = Field(default_factory=list)
+    priority: str = Field("A", pattern="^[SABC]$")
+    estimated_duration_sec: Optional[int] = Field(None, gt=0)
 
 
 class SceneUpdate(BaseModel):
     """更新高光片段请求体（所有字段可选）。"""
     title: Optional[str] = Field(None, max_length=200)
+    synopsis: Optional[str] = None
+    theme: Optional[str] = None
     novel_chapter_start: Optional[str] = Field(None, max_length=50)
     novel_chapter_end: Optional[str] = Field(None, max_length=50)
     novel_excerpt: Optional[str] = None
+    story_arc: Optional[str] = None
+    key_events: Optional[List[Dict[str, Any]]] = None
+    emotional_arc: Optional[str] = None
+    characters: Optional[List[str]] = None
+    character_focus: Optional[str] = None
+    character_ids: Optional[List[int]] = None
+    primary_location: Optional[str] = None
+    location_atmosphere: Optional[str] = None
+    visual_highlights: Optional[List[Dict[str, Any]]] = None
+    color_palette: Optional[str] = None
+    bgm_direction: Optional[str] = None
+    storyboard_style_notes: Optional[str] = None
+    previous_episode_hint: Optional[str] = None
+    next_episode_hint: Optional[str] = None
     scene_types: Optional[List[str]] = None
     priority: Optional[str] = Field(None, pattern="^[SABC]$")
-    scores: Optional[ScoreDetail] = None
-    character_ids: Optional[List[int]] = None
     estimated_duration_sec: Optional[int] = Field(None, gt=0)
     status: Optional[str] = Field(
         None,
-        pattern="^(draft|scored|in_production|completed)$",
-        description="状态：draft / scored / in_production / completed",
+        pattern="^(draft|in_production|completed)$",
     )
 
 
@@ -63,17 +92,31 @@ class SceneResponse(BaseResponse):
     project_id: int
     scene_code: str
     title: str
+    synopsis: Optional[str]
+    theme: Optional[str]
     novel_chapter_start: Optional[str]
     novel_chapter_end: Optional[str]
     novel_excerpt: Optional[str]
+    story_arc: Optional[str]
+    key_events: List[Dict[str, Any]]
+    emotional_arc: Optional[str]
+    characters: List[str]
+    character_focus: Optional[str]
+    character_ids: List[int]
+    primary_location: Optional[str]
+    location_atmosphere: Optional[str]
+    visual_highlights: List[Dict[str, Any]]
+    color_palette: Optional[str]
+    bgm_direction: Optional[str]
+    storyboard_style_notes: Optional[str]
+    previous_episode_hint: Optional[str]
+    next_episode_hint: Optional[str]
     scene_types: List[str]
     priority: str
-    score_dramatic_tension: Optional[int]
-    score_visual_potential: Optional[int]
-    score_emotional_resonance: Optional[int]
-    score_narrative_importance: Optional[int]
-    score_audience_familiarity: Optional[int]
-    score_total: Optional[int]
-    character_ids: List[int]
     estimated_duration_sec: Optional[int]
     status: str
+
+    @field_validator('characters', 'character_ids', 'key_events', 'visual_highlights', 'scene_types', mode='before')
+    @classmethod
+    def coerce_null_to_list(cls, v):
+        return v if v is not None else []

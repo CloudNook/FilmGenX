@@ -410,31 +410,32 @@ async def confirm_conversation(
         next_num += 1
         scene_code = f"P{project_id}_EP{next_num:03d}"
 
-    scores = outline.scores
-    score_total = (
-        scores.dramatic_tension
-        + scores.visual_potential
-        + scores.emotional_resonance
-        + scores.narrative_importance
-        + scores.audience_familiarity
-    )
     scene = await scene_repo.create(
         project_id=project_id,
         scene_code=scene_code,
         title=outline.title,
+        synopsis=outline.synopsis,
+        theme=outline.theme,
         novel_chapter_start=outline.novel_chapter_start,
         novel_chapter_end=outline.novel_chapter_end,
         novel_excerpt=outline.novel_excerpt,
+        story_arc=outline.story_arc,
+        key_events=[e.model_dump() for e in outline.key_events],
+        emotional_arc=outline.emotional_arc,
+        characters=outline.characters,
+        character_focus=outline.character_focus,
+        character_ids=[],
+        primary_location=outline.primary_location,
+        location_atmosphere=outline.location_atmosphere,
+        visual_highlights=[v.model_dump() for v in outline.visual_highlights],
+        color_palette=outline.color_palette,
+        bgm_direction=outline.bgm_direction,
+        storyboard_style_notes=outline.storyboard_style_notes,
+        previous_episode_hint=outline.previous_episode_hint,
+        next_episode_hint=outline.next_episode_hint,
         scene_types=outline.scene_types,
         priority=outline.priority,
         estimated_duration_sec=outline.estimated_duration_sec,
-        score_dramatic_tension=scores.dramatic_tension,
-        score_visual_potential=scores.visual_potential,
-        score_emotional_resonance=scores.emotional_resonance,
-        score_narrative_importance=scores.narrative_importance,
-        score_audience_familiarity=scores.audience_familiarity,
-        score_total=score_total,
-        character_ids=[],
         status="in_production",
     )
 

@@ -167,6 +167,7 @@ export default function CharactersPage({
       breadcrumbs={[
         { label: '项目', href: '/projects' },
         { label: project.name, href: `/projects/${projectId}` },
+        { label: '素材库', href: `/projects/${projectId}/materials` },
         { label: '角色管理' },
       ]}
     >
