@@ -1,6 +1,45 @@
 """
 FilmGenX 提示词统一管理。
 
+同时定义与提示词配套的 LLM 结构化输出 Schema（Pydantic），
+通过 response_schema 传给 Gemini，强制结构化输出，无需手动解析 JSON。
+"""
+
+from typing import List, Optional
+from pydantic import BaseModel, Field
+
+
+# ---------------------------------------------------------------------------
+# 大纲总结结构化 Schema（LLM 填写部分，不含后端自动生成的字段）
+# ---------------------------------------------------------------------------
+
+class ScoreLLMSchema(BaseModel):
+    dramatic_tension: int = Field(ge=0, le=10)
+    visual_potential: int = Field(ge=0, le=10)
+    emotional_resonance: int = Field(ge=0, le=10)
+    narrative_importance: int = Field(ge=0, le=10)
+    audience_familiarity: int = Field(ge=0, le=10)
+
+
+class OutlineLLMSchema(BaseModel):
+    """Gemini 返回的大纲结构，不含 episode_code / version / generated_at（由后端填充）。"""
+    title: str
+    synopsis: str = Field(description="100-300字的本集剧情概述")
+    theme: str = Field(description="一句话核心主题")
+    novel_chapter_start: str
+    novel_chapter_end: str
+    novel_excerpt: str = Field(description="关键原著摘录，1-3段，用\\n\\n分隔")
+    scene_types: List[str]
+    priority: str = Field(description="S/A/B/C")
+    estimated_duration_sec: int = Field(gt=0)
+    scores: ScoreLLMSchema
+    characters: List[str]
+    storyboard_style_notes: str = Field(description="给分镜导演的具体风格指导，包括色调、运镜风格、特效建议")
+    storyboard_shot_count: int = Field(ge=1, le=20)
+
+
+# ---------------------------------------------------------------------------
+
 所有发给 LLM 的系统提示词在此文件集中定义，
 业务代码直接 from app.prompts import XXX 使用，禁止在其他文件内联定义提示词。
 

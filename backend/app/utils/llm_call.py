@@ -5,12 +5,57 @@ LLM 服务：Google Gemini 流式调用。
 API Key 从环境变量 settings.GOOGLE_API_KEY 读取，前端无需传递。
 """
 
+import json
 import logging
-from typing import AsyncGenerator, List
+import re
+from typing import AsyncGenerator, List, Optional
 
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def parse_llm_json(text: str) -> Optional[dict]:
+    """从 LLM 自由文本响应中提取第一个合法 JSON 对象。
+
+    依次尝试以下策略：
+    1. ```json ... ``` 代码块
+    2. ``` ... ``` 代码块
+    3. 第一个完整的 { ... } 对象（括号深度匹配）
+    4. 直接解析整个文本
+
+    Returns:
+        解析成功返回 dict，失败返回 None。
+    """
+    # 1. ```json ... ```
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # 2. 括号深度匹配，提取第一个完整 {...}
+    start = text.find("{")
+    if start != -1:
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start:i + 1])
+                    except json.JSONDecodeError:
+                        break
+
+    # 3. 整体解析
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
 
 # 允许使用的模型白名单
 ALLOWED_MODELS = {

@@ -40,7 +40,7 @@ from app.schemas.conversation import (
 
 router = APIRouter()
 
-from app.prompts import CHAT_SYSTEM_PROMPT, SUMMARIZE_SYSTEM_PROMPT
+from app.prompts import CHAT_SYSTEM_PROMPT, SUMMARIZE_SYSTEM_PROMPT, OutlineLLMSchema
 
 
 # ---------------------------------------------------------------------------
@@ -295,100 +295,35 @@ async def summarize_outline(
         for m in messages
     ]
 
-    print(f"[DEBUG] Summarize: conversation_id={conversation_id}, messages={len(llm_messages)}, "
-          f"system_prompt={'(default)' if not body.system_prompt.strip() else '(custom)'}, "
-          f"model={body.llm_config.get('model')}")
-    for i, m in enumerate(llm_messages):
-        print(f"[DEBUG]   msg[{i}] role={m['role']} content={m['content'][:80]}...")
-
     # 下一版本号
     next_version = 1
     if conv.latest_outline:
         next_version = conv.latest_outline.get("version", 0) + 1
 
     async def stream_summarize() -> AsyncGenerator[str, None]:
-        from app.utils.llm_call import call_llm_stream
+        from app.utils.llm_call import call_llm
 
-        # 构建总结提示词
         summarize_prompt = body.system_prompt.strip() or SUMMARIZE_SYSTEM_PROMPT
         summarize_prompt += f"\n\n当前是第 {next_version} 次总结。"
 
-        print(f"[DEBUG] Summarize prompt (first 200 chars): {summarize_prompt[:200]}")
-
-        # Gemini 要求最后一条消息必须是 user 角色，否则返回空响应
+        # Gemini 要求最后一条消息必须是 user 角色
         messages_for_summary = llm_messages.copy()
         if not messages_for_summary or messages_for_summary[-1]["role"] != "user":
             messages_for_summary.append({"role": "user", "content": "请根据以上对话内容生成剧本大纲。"})
 
-        full_response = ""
         try:
-            async for chunk in call_llm_stream(
+            raw = await call_llm(
                 messages=messages_for_summary,
                 llm_config=body.llm_config,
                 system_prompt=summarize_prompt,
-            ):
-                full_response += chunk
-                yield f"data: {chunk}\n\n"
+                response_schema=OutlineLLMSchema,
+            )
         except Exception as e:
-            logger.error("LLM stream error: %s", e)
+            logger.error("LLM summarize error: %s", e)
             yield f"data: [ERROR] LLM 调用失败: {e}\n\n"
             return
 
-        # 解析 LLM 返回中的 JSON（支持多种格式）
-        import re
-
-        logger.info("LLM summarize raw response:\n%s", full_response)
-
-        outline_json = None
-
-        # 1. 尝试 <outline>...</outline> 标签
-        match = re.search(r"<outline>(.*?)</outline>", full_response, re.DOTALL)
-        if match:
-            try:
-                outline_json = json.loads(match.group(1))
-            except json.JSONDecodeError:
-                pass
-
-        # 2. 尝试 ```json ... ``` 代码块
-        if outline_json is None:
-            match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", full_response, re.DOTALL)
-            if match:
-                try:
-                    outline_json = json.loads(match.group(1))
-                except json.JSONDecodeError:
-                    pass
-
-        # 3. 尝试提取第一个完整的 { ... } 对象
-        if outline_json is None:
-            brace_start = full_response.find("{")
-            if brace_start != -1:
-                # 从第一个 { 开始，找到匹配的 }
-                depth = 0
-                for i in range(brace_start, len(full_response)):
-                    if full_response[i] == "{":
-                        depth += 1
-                    elif full_response[i] == "}":
-                        depth -= 1
-                        if depth == 0:
-                            try:
-                                outline_json = json.loads(full_response[brace_start : i + 1])
-                            except json.JSONDecodeError:
-                                pass
-                            break
-
-        # 4. 直接尝试解析整个响应
-        if outline_json is None:
-            try:
-                outline_json = json.loads(full_response)
-            except json.JSONDecodeError:
-                pass
-
-        if outline_json is None:
-            logger.error(f"Failed to parse outline JSON. Raw response: {full_response[:500]}")
-            yield "data: [ERROR] 无法解析剧本大纲 JSON，请重试\n\n"
-            return
-
-        # 更新 version
+        outline_json = json.loads(raw)
         outline_json["version"] = next_version
         outline_json["generated_at"] = datetime.now(timezone.utc).isoformat()
 
