@@ -80,6 +80,9 @@ class Shot(Base):
     negative_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     style_preset: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
+    # 生成的视频 URL
+    video_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="生成的视频 URL")
+
     # 质量审核
     qc_character_consistency: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     qc_lighting_match: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

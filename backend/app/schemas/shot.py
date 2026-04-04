@@ -146,3 +146,4 @@ class ShotResponse(BaseResponse):
     qc_approved: bool
     qc_score: Optional[int]
     status: str
+    video_url: Optional[str] = None

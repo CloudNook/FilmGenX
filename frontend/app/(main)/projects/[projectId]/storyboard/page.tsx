@@ -555,10 +555,18 @@ export default function StoryboardPage({
             <div className="flex-1 relative bg-black flex items-center justify-center">
               {selectedShot ? (
                 <>
-                  <div className="flex flex-col items-center justify-center text-white/60">
-                    <Camera className="h-16 w-16 mb-4" />
-                    <p>暂无预览</p>
-                  </div>
+                  {selectedShot.video_url ? (
+                    <video
+                      src={selectedShot.video_url}
+                      controls
+                      className="max-w-full max-h-full object-contain"
+                    />
+                  ) : (
+                    <div className="flex flex-col items-center justify-center text-white/60">
+                      <Camera className="h-16 w-16 mb-4" />
+                      <p>暂无预览</p>
+                    </div>
+                  )}
 
                   {/* Overlay Controls */}
                   <div className="absolute top-4 right-4 flex items-center gap-2">
