@@ -3,7 +3,7 @@
 """
 
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -44,10 +44,24 @@ class StoryboardGenerationRequest(BaseModel):
 
 class ImageGenerationRequest(BaseModel):
     """触发图像生成的请求体。"""
+    project_id: Optional[int] = Field(None, description="项目ID，用于保存到项目素材库")
     shot_id: Optional[int] = Field(None, description="关联镜头ID，不传则为全局素材")
     prompt: str = Field(..., min_length=1, max_length=2000, description="正向提示词，描述想要生成的画面")
     negative_prompt: Optional[str] = Field(None, max_length=1000, description="负向提示词，描述不想要出现的元素")
-    aspect_ratio: str = Field("16:9", pattern="^(1:1|16:9|9:16|4:3|3:4)$", description="画幅比例")
+    aspect_ratio: str = Field(
+        "16:9",
+        pattern="^(1:1|1:4|1:8|2:3|3:2|3:4|4:1|4:3|4:5|5:4|8:1|9:16|16:9|21:9)$",
+        description="画幅比例",
+    )
+    resolution: str = Field(
+        "1K",
+        pattern="^(512|1K|2K|4K)$",
+        description="分辨率：512 / 1K / 2K / 4K",
+    )
     style_preset: Optional[str] = Field(None, max_length=100, description="风格预设，如 cinematic / anime / realistic")
-    reference_image_url: Optional[str] = Field(None, max_length=500, description="参考图URL（可选）")
-    save_to_shot: bool = Field(True, description="是否保存到镜头素材库")
+    reference_image_urls: Optional[List[str]] = Field(
+        None,
+        max_length=5,
+        description="参考图URL列表（最多5个，用于图生图）",
+    )
+    save_to_shot: bool = Field(True, description="是否保存到素材库")

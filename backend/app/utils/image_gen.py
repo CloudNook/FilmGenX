@@ -29,17 +29,26 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# 允许的画幅比例
+# 允许的画幅比例（14 种）
 ASPECT_RATIOS = {
     "1:1": "1:1",
-    "16:9": "16:9",
-    "9:16": "9:16",
-    "4:3": "4:3",
+    "1:4": "1:4",
+    "1:8": "1:8",
+    "2:3": "2:3",
+    "3:2": "3:2",
     "3:4": "3:4",
+    "4:1": "4:1",
+    "4:3": "4:3",
+    "4:5": "4:5",
+    "5:4": "5:4",
+    "8:1": "8:1",
+    "9:16": "9:16",
+    "16:9": "16:9",
+    "21:9": "21:9",
 }
 
-# 图像尺寸选项
-IMAGE_SIZES = ["256", "512", "1024", "2K", "4K"]
+# 图像分辨率选项（直接使用，不做映射）
+RESOLUTIONS = ["512", "1K", "2K", "4K"]
 
 # 默认模型
 DEFAULT_MODEL = "gemini-3-pro-image-preview"
@@ -76,7 +85,7 @@ class ImageGenClient:
         prompt: str,
         negative_prompt: Optional[str] = None,
         aspect_ratio: str = "16:9",
-        image_size: str = "1024",
+        image_size: str = "1K",
         model: str = DEFAULT_MODEL,
     ) -> ImageGenerationResult:
         """生成图像。
@@ -84,8 +93,8 @@ class ImageGenClient:
         Args:
             prompt: 正向提示词，描述想要生成的画面。
             negative_prompt: 负向提示词（当前模型可能不支持）。
-            aspect_ratio: 画幅比例，支持 1:1 / 16:9 / 9:16 / 4:3 / 3:4。
-            image_size: 图像尺寸，支持 256 / 512 / 1024 / 2K / 4K。
+            aspect_ratio: 画幅比例，支持 14 种比例。
+            image_size: 图像分辨率，支持 512 / 1K / 2K / 4K。
             model: 使用的模型，默认 gemini-3-pro-image-preview。
 
         Returns:
@@ -101,10 +110,10 @@ class ImageGenClient:
                 logger.warning(f"不支持的画幅比例 '{aspect_ratio}'，使用默认 16:9")
                 aspect_ratio = "16:9"
 
-            # 验证图像尺寸
-            if image_size not in IMAGE_SIZES:
-                logger.warning(f"不支持的图像尺寸 '{image_size}'，使用默认 1024")
-                image_size = "1024"
+            # 验证分辨率
+            if image_size not in RESOLUTIONS:
+                logger.warning(f"不支持的分辨率 '{image_size}'，使用默认 1K")
+                image_size = "1K"
 
             # 构建完整提示词
             full_prompt = prompt
@@ -114,7 +123,7 @@ class ImageGenClient:
 
             logger.info(
                 f"Gemini Image 调用: model={model}, prompt={prompt[:50]}..., "
-                f"aspect_ratio={aspect_ratio}, image_size={image_size}"
+                f"aspect_ratio={aspect_ratio}, resolution={image_size}"
             )
 
             def _sync_generate():
@@ -134,37 +143,7 @@ class ImageGenClient:
             loop = asyncio.get_event_loop()
             response = await loop.run_in_executor(None, _sync_generate)
 
-            # 处理响应，提取图片数据
-            image_data = None
-            mime_type = "image/png"
-
-            for part in response.candidates[0].content.parts:
-                if part.inline_data:
-                    image_data = base64.b64decode(part.inline_data.data)
-                    mime_type = part.inline_data.mime_type or "image/png"
-                    logger.info(f"获取到图片: mime_type={mime_type}, size={len(image_data)} bytes")
-                    break
-
-            if not image_data:
-                # 检查是否有文本响应（可能是 RAI 拒绝）
-                text_response = response.text if hasattr(response, "text") else None
-                if text_response:
-                    return ImageGenerationResult(
-                        success=False,
-                        error_message=f"模型返回文本而非图片: {text_response[:200]}",
-                    )
-                return ImageGenerationResult(
-                    success=False,
-                    error_message="未生成任何图片数据",
-                )
-
-            logger.info(f"Gemini Image 生成成功: size={len(image_data)} bytes")
-
-            return ImageGenerationResult(
-                success=True,
-                image_data=image_data,
-                mime_type=mime_type,
-            )
+            return self._extract_image_from_response(response)
 
         except Exception as e:
             error_msg = str(e)
@@ -173,6 +152,132 @@ class ImageGenClient:
                 success=False,
                 error_message=error_msg,
             )
+
+    async def generate_with_reference(
+        self,
+        *,
+        prompt: str,
+        reference_images: list[bytes],
+        negative_prompt: Optional[str] = None,
+        aspect_ratio: str = "16:9",
+        image_size: str = "1K",
+        model: str = DEFAULT_MODEL,
+    ) -> ImageGenerationResult:
+        """图生图：根据参考图生成新图像。
+
+        Args:
+            prompt: 正向提示词，描述想要生成的画面。
+            reference_images: 参考图片的二进制数据列表（最多 5 张）。
+            negative_prompt: 负向提示词（可选）。
+            aspect_ratio: 画幅比例，支持 14 种比例。
+            image_size: 图像分辨率，支持 512 / 1K / 2K / 4K。
+            model: 使用的模型，默认 gemini-3-pro-image-preview。
+
+        Returns:
+            ImageGenerationResult，包含生成结果或错误信息。
+        """
+        import asyncio
+
+        try:
+            client = self._get_client()
+
+            # 验证画幅比例
+            if aspect_ratio not in ASPECT_RATIOS:
+                logger.warning(f"不支持的画幅比例 '{aspect_ratio}'，使用默认 16:9")
+                aspect_ratio = "16:9"
+
+            # 验证分辨率
+            if image_size not in RESOLUTIONS:
+                logger.warning(f"不支持的分辨率 '{image_size}'，使用默认 1K")
+                image_size = "1K"
+
+            # 限制参考图数量
+            if len(reference_images) > 5:
+                logger.warning(f"参考图数量 {len(reference_images)} 超过限制，只使用前 5 张")
+                reference_images = reference_images[:5]
+
+            logger.info(
+                f"Gemini Image 图生图调用: model={model}, prompt={prompt[:50]}..., "
+                f"aspect_ratio={aspect_ratio}, resolution={image_size}, ref_count={len(reference_images)}"
+            )
+
+            # 构建多模态内容：文本 + 参考图
+            from PIL import Image
+            import io
+
+            content_parts = [prompt]
+            for img_bytes in reference_images:
+                try:
+                    img = Image.open(io.BytesIO(img_bytes))
+                    content_parts.append(img)
+                except Exception as e:
+                    logger.warning(f"无法解析参考图: {e}")
+
+            def _sync_generate():
+                return client.models.generate_content(
+                    model=model,
+                    contents=content_parts,
+                    config=types.GenerateContentConfig(
+                        response_modalities=["IMAGE"],
+                        image_config=types.ImageConfig(
+                            aspect_ratio=aspect_ratio,
+                            image_size=image_size,
+                        ),
+                    ),
+                )
+
+            # 在线程池中运行同步调用
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(None, _sync_generate)
+
+            return self._extract_image_from_response(response)
+
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Gemini Image 图生图失败: {error_msg}")
+            return ImageGenerationResult(
+                success=False,
+                error_message=error_msg,
+            )
+
+    def _extract_image_from_response(self, response) -> ImageGenerationResult:
+        """从 Gemini 响应中提取图片数据。"""
+        # 处理响应，提取图片数据
+        image_data = None
+        mime_type = "image/png"
+
+        for part in response.candidates[0].content.parts:
+            if part.inline_data:
+                raw_data = part.inline_data.data
+                # 检查数据类型：bytes 直接使用，str 则需要 base64 解码
+                if isinstance(raw_data, bytes):
+                    image_data = raw_data
+                else:
+                    image_data = base64.b64decode(raw_data)
+                mime_type = part.inline_data.mime_type or "image/png"
+                logger.info(f"获取到图片: mime_type={mime_type}, size={len(image_data)} bytes")
+                break
+
+        if not image_data:
+            # 检查是否有文本响应（可能是 RAI 拒绝）
+            text_response = response.text if hasattr(response, "text") else None
+            if text_response:
+                return ImageGenerationResult(
+                    success=False,
+                    error_message=f"模型返回文本而非图片: {text_response[:200]}",
+                )
+            return ImageGenerationResult(
+                success=False,
+                error_message="未生成任何图片数据",
+            )
+
+        logger.info(f"Gemini Image 生成成功: size={len(image_data)} bytes")
+
+        return ImageGenerationResult(
+            success=True,
+            image_data=image_data,
+            mime_type=mime_type,
+        )
 
 
 # 全局单例

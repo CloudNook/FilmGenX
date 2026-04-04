@@ -2,7 +2,11 @@
 Celery 应用实例配置。
 
 启动 Worker（开发环境）：
+    # Linux/macOS
     uv run celery -A app.tasks.celery_app worker --loglevel=info -Q default,video,image
+
+    # Windows（使用 solo 模式避免进程池兼容问题）
+    uv run celery -A app.tasks.celery_app worker --loglevel=info -Q default,video,image --pool=solo
 """
 
 from celery import Celery

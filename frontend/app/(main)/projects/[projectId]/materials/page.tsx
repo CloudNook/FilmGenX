@@ -26,7 +26,10 @@ import {
   FileImage,
   ArrowRight,
   Loader2,
+  Plus,
+  Sparkles,
 } from 'lucide-react';
+import { ImageUploadDialog } from '@/components/assets/ImageUploadDialog';
 
 export default function MaterialsPage({
   params,
@@ -48,6 +51,9 @@ export default function MaterialsPage({
   const [recentCharacters, setRecentCharacters] = useState<CharacterResponse[]>([]);
   const [recentLocations, setRecentLocations] = useState<LocationResponse[]>([]);
   const [recentAssets, setRecentAssets] = useState<AssetResponse[]>([]);
+
+  // Upload dialog
+  const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
 
   useEffect(() => {
     if (isNaN(projectIdNum)) return;
@@ -148,11 +154,23 @@ export default function MaterialsPage({
     >
       <div className="p-6 space-y-6">
         {/* Header */}
-        <div>
-          <h1 className="text-2xl font-bold text-foreground">素材库</h1>
-          <p className="text-muted-foreground mt-1">
-            管理项目中的角色、场景和素材资源
-          </p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold text-foreground">素材库</h1>
+            <p className="text-muted-foreground mt-1">
+              管理项目中的角色、场景和素材资源
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={() => setUploadDialogOpen(true)}>
+              <Plus className="h-4 w-4 mr-2" />
+              上传素材
+            </Button>
+            <Button onClick={() => setUploadDialogOpen(true)}>
+              <Sparkles className="h-4 w-4 mr-2" />
+              AI 生成
+            </Button>
+          </div>
         </div>
 
         {/* Category Cards */}
@@ -347,6 +365,18 @@ export default function MaterialsPage({
             </CardContent>
           </Card>
         </div>
+
+        {/* Upload Dialog */}
+        <ImageUploadDialog
+          open={uploadDialogOpen}
+          onOpenChange={setUploadDialogOpen}
+          projectId={projectIdNum}
+          onAssetCreated={() => {
+            // Refresh data
+            assetsApi.list(projectIdNum, 1, 6).then(r => setRecentAssets(r.items));
+            assetsApi.stats(projectIdNum).then(setAssetStats);
+          }}
+        />
       </div>
     </AppLayout>
   );

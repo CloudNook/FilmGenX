@@ -775,6 +775,30 @@ export const assetsApi = {
     );
   },
 
+  upload(projectId: number, file: File, shotId?: number): Promise<AssetResponse> {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (shotId !== undefined) {
+      formData.append('shot_id', String(shotId));
+    }
+
+    const token = getToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    return fetch(`${BASE_URL}/projects/${projectId}/assets/upload`, {
+      method: 'POST',
+      headers,
+      body: formData,
+    }).then(async (res) => {
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: '上传失败' }));
+        throw new Error(err.detail || '上传失败');
+      }
+      return res.json() as Promise<AssetResponse>;
+    });
+  },
+
   create(projectId: number, data: Record<string, unknown>) {
     return request<AssetResponse>(`/projects/${projectId}/assets`, {
       method: 'POST',
@@ -819,6 +843,18 @@ export interface TaskResponse {
   updated_at: string;
 }
 
+export interface ImageGenerationRequest {
+  project_id?: number;
+  shot_id?: number;
+  prompt: string;
+  negative_prompt?: string;
+  aspect_ratio?: string;
+  resolution?: string;
+  style_preset?: string;
+  reference_image_urls?: string[];
+  save_to_shot?: boolean;
+}
+
 export const tasksApi = {
   get(taskId: number) {
     return request<TaskResponse>(`/tasks/${taskId}`, { method: 'GET' });
@@ -833,6 +869,13 @@ export const tasksApi = {
 
   triggerStoryboard(data: { scene_id: number; shot_count?: number; style_notes?: string }) {
     return request<TaskResponse>('/tasks/storyboard', {
+      method: 'POST',
+      body: data,
+    });
+  },
+
+  triggerImage(data: ImageGenerationRequest) {
+    return request<TaskResponse>('/tasks/image', {
       method: 'POST',
       body: data,
     });

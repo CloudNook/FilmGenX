@@ -89,9 +89,13 @@ def generate_storyboard_task(task_db_id: int) -> dict:
     Args:
         task_db_id: GenerationTask 的数据库 ID。
     """
-    return asyncio.get_event_loop().run_until_complete(
-        _run_storyboard_generation(task_db_id)
-    )
+    # 每次执行都创建新的事件循环，避免重试时 "Event loop is closed" 错误
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(_run_storyboard_generation(task_db_id))
+    finally:
+        loop.close()
 
 
 async def _run_storyboard_generation(task_db_id: int) -> dict:

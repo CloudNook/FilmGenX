@@ -4,9 +4,11 @@
 路由前缀：/api/v1/projects/{project_id}/assets
 """
 
+import os
+from datetime import datetime
 from typing import Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user_id, get_db
@@ -14,6 +16,7 @@ from app.repositories.asset import AssetRepository
 from app.repositories.project import ProjectRepository
 from app.schemas.asset import AssetCreate, AssetResponse
 from app.schemas.base import PageResponse
+from app.utils.oss import oss_client
 
 router = APIRouter()
 
@@ -118,3 +121,109 @@ async def delete_asset(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="素材不存在")
     await repo.soft_delete(asset)
     await db.commit()
+
+
+# 支持的文件类型和大小限制
+ALLOWED_TYPES = {
+    # 图片类型（最大 10MB）
+    "image/jpeg": {"asset_type": "image", "max_size": 10 * 1024 * 1024},
+    "image/png": {"asset_type": "image", "max_size": 10 * 1024 * 1024},
+    "image/webp": {"asset_type": "image", "max_size": 10 * 1024 * 1024},
+    "image/gif": {"asset_type": "image", "max_size": 10 * 1024 * 1024},
+    # 视频类型（最大 100MB）
+    "video/mp4": {"asset_type": "video", "max_size": 100 * 1024 * 1024},
+    "video/webm": {"asset_type": "video", "max_size": 100 * 1024 * 1024},
+    "video/quicktime": {"asset_type": "video", "max_size": 100 * 1024 * 1024},
+    # 音频类型（最大 20MB）
+    "audio/mpeg": {"asset_type": "audio", "max_size": 20 * 1024 * 1024},
+    "audio/wav": {"asset_type": "audio", "max_size": 20 * 1024 * 1024},
+    "audio/mp3": {"asset_type": "audio", "max_size": 20 * 1024 * 1024},
+}
+
+
+@router.post("/upload", response_model=AssetResponse, status_code=status.HTTP_201_CREATED, summary="上传素材文件")
+async def upload_asset(
+    project_id: int,
+    file: UploadFile = File(..., description="要上传的文件"),
+    shot_id: Optional[int] = Form(None, description="关联镜头ID（可选）"),
+    db: AsyncSession = Depends(get_db),
+    user_id: int = Depends(get_current_user_id),
+):
+    """上传素材文件到 OSS 并创建素材记录。
+
+    支持的文件类型：
+    - 图片：image/jpeg, image/png, image/webp, image/gif（最大 10MB）
+    - 视频：video/mp4, video/webm, video/quicktime（最大 100MB）
+    - 音频：audio/mpeg, audio/wav, audio/mp3（最大 20MB）
+
+    Args:
+        project_id: 项目ID
+        file: 上传的文件
+        shot_id: 关联的镜头ID（可选）
+
+    Returns:
+        创建的素材记录
+    """
+    await _require_project(project_id, user_id, db)
+
+    # 验证文件类型
+    content_type = file.content_type or "application/octet-stream"
+    if content_type not in ALLOWED_TYPES:
+        allowed = ", ".join(ALLOWED_TYPES.keys())
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"不支持的文件类型: {content_type}。支持的类型: {allowed}",
+        )
+
+    type_config = ALLOWED_TYPES[content_type]
+    asset_type = type_config["asset_type"]
+    max_size = type_config["max_size"]
+
+    # 读取文件内容
+    content = await file.read()
+    file_size = len(content)
+
+    # 验证文件大小
+    if file_size > max_size:
+        max_mb = max_size / (1024 * 1024)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"文件大小 {file_size / (1024 * 1024):.1f}MB 超过限制 {max_mb:.0f}MB",
+        )
+
+    # 生成素材代码和文件名
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    original_filename = file.filename or "upload"
+    file_ext = os.path.splitext(original_filename)[1] or f".{asset_type}"
+    asset_code = f"upload_{timestamp}_{project_id}"
+    filename = f"{asset_code}{file_ext}"
+
+    # 确定上传目录
+    directory = "uploads"
+    if shot_id:
+        directory = f"shots/{shot_id}"
+
+    # 上传到 OSS
+    file_url = oss_client.upload_bytes(
+        content,
+        filename=filename,
+        directory=directory,
+    )
+
+    # 创建素材记录
+    repo = AssetRepository(db)
+    asset = await repo.create(
+        project_id=project_id,
+        shot_id=shot_id,
+        asset_code=asset_code,
+        asset_type=asset_type,
+        file_url=file_url,
+        file_format=file_ext.lstrip("."),
+        file_size_bytes=file_size,
+        source="uploaded",
+        tags=["uploaded", asset_type],
+    )
+    await db.commit()
+    await db.refresh(asset)
+
+    return asset

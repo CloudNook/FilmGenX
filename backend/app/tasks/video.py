@@ -52,9 +52,13 @@ def generate_video_task(self, task_db_id: int) -> dict:
     Returns:
         {"status": "success", "asset_id": int, "video_url": str}
     """
-    return asyncio.get_event_loop().run_until_complete(
-        _run_video_generation(self, task_db_id)
-    )
+    # 每次执行都创建新的事件循环，避免重试时 "Event loop is closed" 错误
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(_run_video_generation(self, task_db_id))
+    finally:
+        loop.close()
 
 
 async def _run_video_generation(task: VideoGenerationTask, task_db_id: int) -> dict:

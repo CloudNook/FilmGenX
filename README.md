@@ -33,7 +33,11 @@ uv run alembic upgrade head
 uv run uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 # 启动 Celery Worker（新终端）
+# Linux/macOS
 uv run celery -A app.tasks.celery_app worker --loglevel=info -Q default,video,image
+
+# Windows（使用 solo 模式避免进程池兼容问题）
+uv run celery -A app.tasks.celery_app worker --loglevel=info -Q default,video,image --pool=solo
 ```
 
 ### 2. 前端
