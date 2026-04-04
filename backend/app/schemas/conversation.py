@@ -47,10 +47,10 @@ class EpisodeOutline(BaseModel):
 # ---------------------------------------------------------------------------
 
 class LLMConfigPayload(BaseModel):
-    """随请求传入的 LLM 配置（不存后端，每次调用时由前端提供）。"""
-    provider: str = Field(..., description="google | openai | anthropic | custom")
-    model: str = Field(..., description="模型名称，如 gemini-2.0-flash")
-    api_key: str = Field(..., description="API Key")
+    """随请求传入的 LLM 配置（API Key 由后端环境变量管理，前端只需传 model/temperature）。"""
+    model: str = Field(..., description="模型名称，如 gemini-3-flash-preview")
+    provider: Optional[str] = Field(None, description="google | openai | anthropic | custom")
+    api_key: Optional[str] = Field(None, description="API Key（后端优先使用环境变量）")
     base_url: Optional[str] = Field(None, description="自定义端点（custom provider 时必填）")
     temperature: Optional[float] = Field(None, ge=0, le=2)
     max_tokens: Optional[int] = Field(None, gt=0)

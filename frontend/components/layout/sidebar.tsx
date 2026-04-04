@@ -43,11 +43,11 @@ export function Sidebar({ projectId }: SidebarProps) {
   const projectNavItems: NavItem[] = projectId
     ? [
         { title: '项目概览', href: `/projects/${projectId}`, icon: Film },
-        { title: 'AI 对话', href: `/projects/${projectId}/chat`, icon: MessageSquare, badge: 3 },
+        { title: '角色管理', href: `/projects/${projectId}/characters`, icon: Users },
+        { title: 'AI 剧本', href: `/projects/${projectId}/chat`, icon: MessageSquare},
         { title: '分集管理', href: `/projects/${projectId}/episodes`, icon: Clapperboard },
         { title: '分镜工作台', href: `/projects/${projectId}/storyboard`, icon: Sparkles },
         { title: '视频制作', href: `/projects/${projectId}/video`, icon: Video },
-        { title: '角色管理', href: `/projects/${projectId}/characters`, icon: Users },
       ]
     : [];
 
