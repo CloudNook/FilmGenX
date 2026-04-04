@@ -7,6 +7,12 @@ from app.schemas.character import (
     CharacterCreate, CharacterUpdate, CharacterResponse, CharacterDetailResponse,
     CharacterVersionCreate, CharacterVersionUpdate, CharacterVersionResponse,
 )
+from app.schemas.location import (
+    LocationCreate, LocationUpdate, LocationResponse, LocationBrief,
+    LocationVersionCreate, LocationVersionUpdate, LocationVersionResponse, LocationVersionBrief,
+    LocationDetailResponse, LocationWithVersionsResponse,
+    AtmosphereConfig,
+)
 from app.schemas.asset import AssetCreate, AssetResponse
 from app.schemas.task import TaskResponse, VideoGenerationRequest, StoryboardGenerationRequest
 from app.schemas.conversation import (
@@ -24,6 +30,9 @@ __all__ = [
     "ShotCreate", "ShotUpdate", "ShotResponse",
     "CharacterCreate", "CharacterUpdate", "CharacterResponse", "CharacterDetailResponse",
     "CharacterVersionCreate", "CharacterVersionUpdate", "CharacterVersionResponse",
+    "LocationCreate", "LocationUpdate", "LocationResponse", "LocationBrief",
+    "LocationVersionCreate", "LocationVersionUpdate", "LocationVersionResponse", "LocationVersionBrief",
+    "LocationDetailResponse", "LocationWithVersionsResponse", "AtmosphereConfig",
     "AssetCreate", "AssetResponse",
     "TaskResponse", "VideoGenerationRequest", "StoryboardGenerationRequest",
     "ConversationCreate", "ConversationUpdate", "ConversationResponse", "ConversationDetailResponse",

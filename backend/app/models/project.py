@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from app.models.character import Character
     from app.models.asset import Asset
     from app.models.conversation import Conversation
+    from app.models.location import Location
 
 
 class Project(Base):
@@ -35,5 +36,6 @@ class Project(Base):
     owner: Mapped["User"] = relationship("User", back_populates="projects")
     scenes: Mapped[List["Scene"]] = relationship("Scene", back_populates="project", cascade="all, delete-orphan")
     characters: Mapped[List["Character"]] = relationship("Character", back_populates="project", cascade="all, delete-orphan")
+    locations: Mapped[List["Location"]] = relationship("Location", back_populates="project", cascade="all, delete-orphan")
     assets: Mapped[List["Asset"]] = relationship("Asset", back_populates="project", cascade="all, delete-orphan")
     conversations: Mapped[List["Conversation"]] = relationship("Conversation", back_populates="project", cascade="all, delete-orphan")

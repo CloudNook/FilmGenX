@@ -8,6 +8,7 @@ from app.models.scene import Scene
 from app.models.storyboard import Storyboard
 from app.models.shot import Shot
 from app.models.character import Character, CharacterVersion
+from app.models.location import Location, LocationVersion
 from app.models.asset import Asset
 from app.models.task import GenerationTask
 from app.models.prompt import PromptTemplate
@@ -21,6 +22,8 @@ __all__ = [
     "Shot",
     "Character",
     "CharacterVersion",
+    "Location",
+    "LocationVersion",
     "Asset",
     "GenerationTask",
     "PromptTemplate",

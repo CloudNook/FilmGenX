@@ -46,7 +46,8 @@ class ShotCreate(BaseModel):
     character_sfx: Optional[Dict[str, Any]] = Field(None, description="角色特效：斗气颜色/强度/粒子效果")
 
     # 环境
-    location_id: Optional[str] = Field(None, max_length=50)
+    location_id: Optional[int] = Field(None, description="场景地点ID")
+    location_version_id: Optional[int] = Field(None, description="场景变体ID（使用非默认版本时填写）")
     environment: Optional[Dict[str, Any]] = Field(None, description="环境配置：时间/天气/光照/氛围")
 
     # 台词
@@ -83,7 +84,8 @@ class ShotUpdate(BaseModel):
     character_expression: Optional[str] = None
     character_emotion_intensity: Optional[int] = Field(None, ge=1, le=10)
     character_sfx: Optional[Dict[str, Any]] = None
-    location_id: Optional[str] = Field(None, max_length=50)
+    location_id: Optional[int] = Field(None, description="场景地点ID")
+    location_version_id: Optional[int] = Field(None, description="场景变体ID（使用非默认版本时填写）")
     environment: Optional[Dict[str, Any]] = None
     dialogue_character: Optional[str] = Field(None, max_length=50)
     dialogue_text: Optional[str] = None
@@ -123,7 +125,8 @@ class ShotResponse(BaseResponse):
     character_expression: Optional[str]
     character_emotion_intensity: Optional[int]
     character_sfx: Optional[dict]
-    location_id: Optional[str]
+    location_id: Optional[int]
+    location_version_id: Optional[int]
     environment: Optional[dict]
     dialogue_character: Optional[str]
     dialogue_text: Optional[str]

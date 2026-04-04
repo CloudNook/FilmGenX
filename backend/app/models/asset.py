@@ -7,6 +7,7 @@ from app.db.base import Base
 if TYPE_CHECKING:
     from app.models.project import Project
     from app.models.shot import Shot
+    from app.models.location import Location
 
 
 class Asset(Base):
@@ -24,7 +25,13 @@ class Asset(Base):
         ForeignKey("shots.id", ondelete="CASCADE"),
         nullable=True,
         index=True,
-        comment="关联镜头ID，全局素材（如角色参考图）可为空"
+        comment="关联镜头ID，全局素材（如角色参考图、场景素材）可为空"
+    )
+    location_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("locations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        comment="关联场景ID（场景素材时使用）"
     )
 
     # 文件信息
@@ -94,3 +101,4 @@ class Asset(Base):
     # Relations
     project: Mapped["Project"] = relationship("Project", back_populates="assets")
     shot: Mapped[Optional["Shot"]] = relationship("Shot", back_populates="assets")
+    location: Mapped[Optional["Location"]] = relationship("Location", back_populates="assets")

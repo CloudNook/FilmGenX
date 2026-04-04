@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from app.models.storyboard import Storyboard
     from app.models.asset import Asset
     from app.models.task import GenerationTask
+    from app.models.location import Location, LocationVersion
 
 
 class Shot(Base):
@@ -46,7 +47,17 @@ class Shot(Base):
     )
 
     # 环境
-    location_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, comment="地点标识，如 LOC_YUNLAN_SQUARE")
+    location_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("locations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        comment="场景地点ID"
+    )
+    location_version_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("location_versions.id", ondelete="SET NULL"),
+        nullable=True,
+        comment="场景变体ID（使用非默认版本时填写）"
+    )
     environment: Mapped[Optional[dict]] = mapped_column(
         JSON, nullable=True,
         comment="环境配置：{time_of_day, weather, lighting, atmosphere}"
@@ -96,5 +107,7 @@ class Shot(Base):
 
     # Relations
     storyboard: Mapped["Storyboard"] = relationship("Storyboard", back_populates="shots")
+    location: Mapped[Optional["Location"]] = relationship("Location", back_populates="shots")
+    location_version: Mapped[Optional["LocationVersion"]] = relationship("LocationVersion", back_populates="shots")
     assets: Mapped[List["Asset"]] = relationship("Asset", back_populates="shot", cascade="all, delete-orphan")
     generation_tasks: Mapped[List["GenerationTask"]] = relationship("GenerationTask", back_populates="shot", cascade="all, delete-orphan")
