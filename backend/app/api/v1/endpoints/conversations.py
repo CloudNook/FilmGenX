@@ -462,7 +462,6 @@ def _get_default_summarize_prompt() -> str:
 ```json
 {
   "title": "本集标题",
-  "episode_code": "项目前缀_EP序号",
   "synopsis": "100-300字的本集剧情概述",
   "theme": "一句话核心主题",
   "novel_chapter_start": "起始章节",
@@ -486,7 +485,7 @@ def _get_default_summarize_prompt() -> str:
 ```
 
 注意：
-- version 会自动填充，无需在 JSON 中指定
+- version 和 episode_code 会由系统自动生成，无需在 JSON 中指定
 - storyboard_style_notes 要具体，包括色调、运镜风格、特效建议
 - 充分吸收用户在对话中提出的所有修改意见"""
 
@@ -538,13 +537,14 @@ async def confirm_conversation(
         outline_data=outline_dict,
     )
 
-    # 2. 创建 Scene
+    # 2. 创建 Scene（episode_code 由后端按项目序号自动生成，格式 P{project_id}_EP{N:03d}）
     scene_repo = SceneRepository(db)
-    if await scene_repo.get_by_code(outline.episode_code):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"episode_code '{outline.episode_code}' 已存在，请修改后重试",
-        )
+    next_num = await scene_repo.count_by_project(project_id) + 1
+    scene_code = f"P{project_id}_EP{next_num:03d}"
+    # 极端情况下防重（并发创建时序号可能碰撞）
+    while await scene_repo.get_by_code(scene_code):
+        next_num += 1
+        scene_code = f"P{project_id}_EP{next_num:03d}"
 
     scores = outline.scores
     score_total = (
@@ -556,7 +556,7 @@ async def confirm_conversation(
     )
     scene = await scene_repo.create(
         project_id=project_id,
-        scene_code=outline.episode_code,
+        scene_code=scene_code,
         title=outline.title,
         novel_chapter_start=outline.novel_chapter_start,
         novel_chapter_end=outline.novel_chapter_end,

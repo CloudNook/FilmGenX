@@ -12,53 +12,80 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
+from typing import List, Optional
+
+from pydantic import BaseModel, Field
 
 from app.tasks.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 
-# 分镜生成系统提示词（固定模板）
-_SYSTEM_PROMPT = """你是一名专业的动漫分镜导演，擅长将小说文本转化为精确的分镜脚本。
 
-输出格式要求：
-- 严格输出 JSON，不要任何多余的说明文字
-- JSON 结构如下：
-{
-  "narrative_notes": "叙事设计备注",
-  "pacing_ratio": {"buildup": 30, "climax": 50, "resolution": 20},
-  "emotion_curve": [
-    {"time_sec": 0, "intensity": 3, "label": "压抑开场"},
-    {"time_sec": 8, "intensity": 8, "label": "战斗爆发"},
-    {"time_sec": 15, "intensity": 10, "label": "最强一击"}
-  ],
-  "shots": [
-    {
-      "sequence": 1,
-      "shot_code": "{scene_code}_S001",
-      "duration_sec": 3.0,
-      "camera": {
-        "shot_type": "LS",
-        "angle": "low_angle",
-        "movement": "dolly",
-        "focal_length": "24mm 广角",
-        "depth_of_field": "深景深，全景清晰"
-      },
-      "composition": {
-        "subject_position": "画面中央",
-        "foreground": "碎石瓦砾",
-        "background": "烟雾弥漫的擂台"
-      },
-      "character_action": "萧炎单膝跪地，缓缓抬头",
-      "character_expression": "坚毅，不服输",
-      "character_emotion_intensity": 7,
-      "dialogue_text": null,
-      "transition_in": "cut",
-      "transition_out": "cut",
-      "image_prompt": "xiao yan kneeling on arena, dust and smoke, low angle, wide shot, determination in eyes, anime style, high quality",
-      "negative_prompt": "blurry, low quality, watermark"
-    }
-  ]
-}
+# ---------------------------------------------------------------------------
+# 结构化输出 Schema（传给 Gemini response_schema）
+# ---------------------------------------------------------------------------
+
+class CameraConfig(BaseModel):
+    shot_type: str = Field(description="景别：ECS/ECU/CU/MCU/MS/MLS/LS/ELS")
+    angle: str = Field(description="机位角度：eye_level/low_angle/high_angle/dutch/bird_eye")
+    movement: str = Field(description="运镜方式：static/pan/tilt/dolly/zoom/handheld/crane")
+    focal_length: Optional[str] = None
+    depth_of_field: Optional[str] = None
+
+
+class CompositionConfig(BaseModel):
+    subject_position: str
+    foreground: Optional[str] = None
+    background: Optional[str] = None
+
+
+class EmotionPoint(BaseModel):
+    time_sec: float
+    intensity: int = Field(ge=1, le=10)
+    label: str
+
+
+class PacingRatio(BaseModel):
+    buildup: int = Field(ge=0, le=100)
+    climax: int = Field(ge=0, le=100)
+    resolution: int = Field(ge=0, le=100)
+
+
+class ShotSchema(BaseModel):
+    sequence: int
+    shot_code: str = Field(description="格式：{scene_code}_S001")
+    duration_sec: float = Field(ge=0.5, le=30.0)
+    camera: CameraConfig
+    composition: CompositionConfig
+    character_action: str
+    character_expression: Optional[str] = None
+    character_emotion_intensity: Optional[int] = Field(None, ge=1, le=10)
+    dialogue_text: Optional[str] = None
+    transition_in: str = Field(default="cut", description="cut/fade/dissolve/wipe")
+    transition_out: str = Field(default="cut")
+    image_prompt: str = Field(description="英文图像生成提示词")
+    negative_prompt: Optional[str] = None
+
+
+class StoryboardSchema(BaseModel):
+    narrative_notes: str
+    pacing_ratio: PacingRatio
+    emotion_curve: List[EmotionPoint]
+    shots: List[ShotSchema]
+
+
+# ---------------------------------------------------------------------------
+# 系统提示词
+# ---------------------------------------------------------------------------
+
+_SYSTEM_PROMPT = """你是一名专业的动漫分镜导演，擅长将《斗破苍穹》小说文本转化为精确的分镜脚本。
+
+要求：
+- 严格按照 JSON schema 输出，不要任何多余文字
+- shot_code 格式：{scene_code}_S001、{scene_code}_S002 ...（序号三位补零）
+- image_prompt 使用英文，风格关键词包含 "anime style, high quality, dynamic lighting"
+- camera.shot_type 使用缩写：ECS/ECU/CU/MCU/MS/MLS/LS/ELS
+- 情感曲线 emotion_curve 节点数量与镜头数对应，体现叙事节奏变化
 """
 
 
@@ -112,13 +139,17 @@ async def _run_storyboard_generation(task_db_id: int) -> dict:
                 raise ValueError(f"Scene {scene_id} 不存在")
 
             # 构建 AI 请求
-            user_prompt = _build_user_prompt(scene, shot_count, style_notes)
-            ai_response = await _call_gemini(
-                user_prompt,
-                llm_config=llm_config,
-                system_prompt_override=system_prompt,
+            from app.utils.llm_call import call_llm
+            req = _build_storyboard_request(scene, shot_count, style_notes)
+            effective_system = (system_prompt or "").strip() or _SYSTEM_PROMPT
+            effective_llm_config = llm_config or {"model": "gemini-2.0-flash"}
+            raw = await call_llm(
+                messages=[{"role": "user", "content": req.to_prompt()}],
+                llm_config=effective_llm_config,
+                system_prompt=effective_system,
+                response_schema=StoryboardSchema,
             )
-            data = json.loads(ai_response)
+            data = json.loads(raw)
 
             # 创建分镜脚本
             sb_repo = StoryboardRepository(session)
@@ -131,12 +162,16 @@ async def _run_storyboard_generation(task_db_id: int) -> dict:
             )
 
             # 批量创建镜头
+            from app.models.shot import Shot as ShotModel
+            _shot_columns = {c.key for c in ShotModel.__table__.columns}
+
             shot_repo = ShotRepository(session)
             for shot_data in data.get("shots", []):
-                await shot_repo.create(
-                    storyboard_id=storyboard.id,
-                    **{k: v for k, v in shot_data.items() if v is not None},
-                )
+                safe = {
+                    k: v for k, v in shot_data.items()
+                    if v is not None and k in _shot_columns
+                }
+                await shot_repo.create(storyboard_id=storyboard.id, **safe)
 
             # 更新总时长
             total_dur = sum(s.get("duration_sec", 3.0) for s in data.get("shots", []))
@@ -167,65 +202,42 @@ async def _run_storyboard_generation(task_db_id: int) -> dict:
             return {"status": "failed", "error": str(exc)}
 
 
-def _build_user_prompt(scene, shot_count: int, style_notes: str) -> str:
-    """根据 Scene 信息构建发给 AI 的用户提示词。"""
-    lines = [
-        f"片段标题：{scene.title}",
-        f"类型：{', '.join(scene.scene_types)}",
-        f"章节范围：{scene.novel_chapter_start or '未知'} — {scene.novel_chapter_end or '未知'}",
-    ]
-    if scene.novel_excerpt:
-        lines.append(f"\n原著摘录：\n{scene.novel_excerpt}")
-    lines.append(f"\n请生成 {shot_count} 个镜头的分镜脚本，scene_code 为 {scene.scene_code}。")
-    if style_notes:
-        lines.append(f"风格要求：{style_notes}")
-    return "\n".join(lines)
+class StoryboardRequest(BaseModel):
+    """传给 LLM 的分镜生成请求，结构化表示所有输入信息。"""
+    scene_code: str
+    title: str
+    scene_types: List[str]
+    novel_chapter_start: Optional[str]
+    novel_chapter_end: Optional[str]
+    novel_excerpt: Optional[str]
+    shot_count: int
+    style_notes: Optional[str]
+
+    def to_prompt(self) -> str:
+        lines = [
+            f"片段标题：{self.title}",
+            f"scene_code：{self.scene_code}",
+            f"类型：{', '.join(self.scene_types)}",
+            f"章节范围：{self.novel_chapter_start or '未知'} — {self.novel_chapter_end or '未知'}",
+        ]
+        if self.novel_excerpt:
+            lines.append(f"\n原著摘录：\n{self.novel_excerpt}")
+        lines.append(f"\n请生成 {self.shot_count} 个镜头的分镜脚本。")
+        if self.style_notes:
+            lines.append(f"风格要求：{self.style_notes}")
+        return "\n".join(lines)
 
 
-async def _call_gemini(
-    user_prompt: str,
-    llm_config: dict | None = None,
-    system_prompt_override: str | None = None,
-) -> str:
-    """调用 LLM API 生成分镜 JSON。
-
-    优先使用调用方传入的 llm_config（动态配置），
-    若未传则回退到环境变量中的 Google API Key + 默认模型。
-
-    Args:
-        user_prompt:           用户侧提示词（场景信息）。
-        llm_config:            前端传来的 LLM 配置字典，包含
-                               provider / model / api_key / temperature 等。
-        system_prompt_override: 用户自定义的系统提示词，覆盖内置 _SYSTEM_PROMPT。
-    """
-    from google import genai
-    from google.genai import types
-    from app.core.config import settings
-
-    system_prompt = system_prompt_override.strip() if system_prompt_override else _SYSTEM_PROMPT
-
-    # 解析动态配置
-    if llm_config:
-        api_key = llm_config.get("api_key") or settings.GOOGLE_API_KEY
-        model = llm_config.get("model", "gemini-2.0-flash")
-        temperature = llm_config.get("temperature")
-    else:
-        api_key = settings.GOOGLE_API_KEY
-        model = "gemini-2.0-flash"
-        temperature = None
-
-    client = genai.Client(api_key=api_key)
-
-    gen_config_kwargs: dict = {"response_mime_type": "application/json"}
-    if temperature is not None:
-        gen_config_kwargs["temperature"] = temperature
-
-    response = await client.aio.models.generate_content(
-        model=model,
-        contents=user_prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            **gen_config_kwargs,
-        ),
+def _build_storyboard_request(scene, shot_count: int, style_notes: str) -> StoryboardRequest:
+    return StoryboardRequest(
+        scene_code=scene.scene_code,
+        title=scene.title,
+        scene_types=scene.scene_types or [],
+        novel_chapter_start=scene.novel_chapter_start,
+        novel_chapter_end=scene.novel_chapter_end,
+        novel_excerpt=scene.novel_excerpt,
+        shot_count=shot_count,
+        style_notes=style_notes or None,
     )
-    return response.text
+
+

@@ -20,6 +20,62 @@ ALLOWED_MODELS = {
 DEFAULT_MODEL = "gemini-3-flash-preview"
 
 
+async def call_llm(
+    *,
+    messages: List[dict],
+    llm_config: dict,
+    system_prompt: str = "",
+    response_schema=None,
+) -> str:
+    """调用 Google Gemini 非流式生成，返回完整文本。
+
+    Args:
+        messages:         消息历史 [{"role": "user", "content": "..."}]
+        llm_config:       LLM 配置，使用 model / temperature
+        system_prompt:    可选系统提示词
+        response_schema:  可选 Pydantic 模型，传入后强制 JSON 结构化输出
+
+    Returns:
+        生成的文本内容
+    """
+    from google import genai
+    from google.genai import types
+
+    model_name = llm_config.get("model") or DEFAULT_MODEL
+    if model_name not in ALLOWED_MODELS:
+        logger.warning(f"Unsupported model '{model_name}', falling back to {DEFAULT_MODEL}")
+        model_name = DEFAULT_MODEL
+
+    api_key = settings.GOOGLE_API_KEY
+    if not api_key:
+        raise ValueError("GOOGLE_API_KEY not configured in environment")
+
+    temperature = llm_config.get("temperature")
+
+    client = genai.Client(api_key=api_key)
+
+    contents = []
+    for msg in messages:
+        role = "user" if msg["role"] == "user" else "model"
+        contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+
+    config_kwargs: dict = {}
+    if temperature is not None:
+        config_kwargs["temperature"] = temperature
+    if system_prompt:
+        config_kwargs["system_instruction"] = system_prompt
+    if response_schema is not None:
+        config_kwargs["response_mime_type"] = "application/json"
+        config_kwargs["response_schema"] = response_schema
+
+    response = await client.aio.models.generate_content(
+        model=model_name,
+        contents=contents,
+        config=types.GenerateContentConfig(**config_kwargs),
+    )
+    return response.text
+
+
 async def call_llm_stream(
     *,
     messages: List[dict],

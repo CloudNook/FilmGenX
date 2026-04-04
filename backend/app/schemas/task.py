@@ -38,5 +38,5 @@ class VideoGenerationRequest(BaseModel):
 class StoryboardGenerationRequest(BaseModel):
     """触发分镜脚本 AI 生成的请求体。"""
     scene_id: int = Field(..., description="要生成分镜脚本的高光片段ID")
-    shot_count: int = Field(6, ge=1, le=6, description="目标镜头数量（1-6）")
+    shot_count: int = Field(8, ge=1, le=20, description="目标镜头数量（1-20）")
     style_notes: Optional[str] = Field(None, description="风格备注，如 '强调动作感，大量特写'")

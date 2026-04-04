@@ -4,7 +4,7 @@
 
 from typing import List, Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.scene import Scene
@@ -38,6 +38,13 @@ class SceneRepository(BaseRepository[Scene]):
             select(Scene).where(Scene.scene_code == scene_code, Scene.is_deleted.is_(False))
         )
         return result.scalar_one_or_none()
+
+    async def count_by_project(self, project_id: int) -> int:
+        """返回项目下未删除的 Scene 数量，用于生成下一个序号。"""
+        result = await self.session.execute(
+            select(func.count()).where(Scene.project_id == project_id, Scene.is_deleted.is_(False))
+        )
+        return result.scalar_one()
 
     async def get_by_id_and_project(self, id: int, project_id: int) -> Optional[Scene]:
         """按 ID + 项目ID 查询，防止越权访问。"""

@@ -25,7 +25,7 @@ class ScoreDetail(BaseModel):
 class EpisodeOutline(BaseModel):
     """剧本大纲结构。由 AI 生成，可被用户编辑后确认。"""
     title: str = Field(..., description="本集标题")
-    episode_code: str = Field(..., description="分集编号，如 DQCK_EP01")
+    episode_code: Optional[str] = Field(None, description="分集编号，由后端 confirm 时自动生成，LLM 无需填写")
     synopsis: str = Field(..., description="本集剧情概述，100-300字")
     theme: str = Field(..., description="核心主题，一句话")
     novel_chapter_start: str = Field(..., description="起始章节")
@@ -49,8 +49,6 @@ class EpisodeOutline(BaseModel):
 class LLMConfigPayload(BaseModel):
     """随请求传入的 LLM 配置（API Key 由后端环境变量管理，前端只需传 model/temperature）。"""
     model: str = Field(..., description="模型名称，如 gemini-3-flash-preview")
-    provider: Optional[str] = Field(None, description="google | openai | anthropic | custom")
-    api_key: Optional[str] = Field(None, description="API Key（后端优先使用环境变量）")
     base_url: Optional[str] = Field(None, description="自定义端点（custom provider 时必填）")
     temperature: Optional[float] = Field(None, ge=0, le=2)
     max_tokens: Optional[int] = Field(None, gt=0)
