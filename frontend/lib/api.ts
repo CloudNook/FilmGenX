@@ -731,11 +731,21 @@ export interface AssetResponse {
 }
 
 export const assetsApi = {
-  list(projectId: number, page = 1, pageSize = 20, assetType?: string) {
+  list(projectId: number, page = 1, pageSize = 20, filters?: { assetType?: string; shotId?: number; source?: string; isCurrent?: boolean }) {
     const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
-    if (assetType) params.set('asset_type', assetType);
+    if (filters?.assetType) params.set('asset_type', filters.assetType);
+    if (filters?.shotId !== undefined) params.set('shot_id', String(filters.shotId));
+    if (filters?.source) params.set('source', filters.source);
+    if (filters?.isCurrent !== undefined) params.set('is_current', String(filters.isCurrent));
     return request<PageResponse<AssetResponse>>(
       `/projects/${projectId}/assets?${params}`,
+      { method: 'GET' },
+    );
+  },
+
+  stats(projectId: number) {
+    return request<Record<string, number>>(
+      `/projects/${projectId}/assets/stats`,
       { method: 'GET' },
     );
   },
@@ -801,6 +811,135 @@ export const tasksApi = {
       method: 'POST',
       body: data,
     });
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Locations API
+// ---------------------------------------------------------------------------
+
+export interface LocationVersionResponse {
+  id: number;
+  location_id: number;
+  version_code: string;
+  label: string;
+  description: string | null;
+  atmosphere_override: Record<string, unknown> | null;
+  time_of_day: string | null;
+  weather: string | null;
+  additional_elements: string[];
+  removed_elements: string[];
+  prompt_suffix: string | null;
+  full_prompt: string | null;
+  reference_image_urls: string[];
+  applicable_scene_codes: string[];
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LocationResponse {
+  id: number;
+  project_id: number;
+  loc_code: string;
+  name: string;
+  aliases: string[];
+  location_type: string;
+  domain: string | null;
+  description: string | null;
+  architectural_style: string | null;
+  key_elements: string[];
+  default_atmosphere: Record<string, unknown> | null;
+  time_variants: Record<string, string> | null;
+  base_background_prompt: string | null;
+  negative_prompt: string | null;
+  style_preset: string | null;
+  reference_image_urls: string[];
+  tags: string[];
+  is_active: boolean;
+  usage_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LocationDetailResponse extends LocationResponse {
+  versions: LocationVersionResponse[];
+  default_version: LocationVersionResponse | null;
+  version_count: number;
+}
+
+export const locationsApi = {
+  list(projectId: number, page = 1, pageSize = 50, isActive?: boolean) {
+    const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    if (isActive !== undefined) params.set('is_active', String(isActive));
+    return request<PageResponse<LocationResponse>>(
+      `/projects/${projectId}/locations?${params}`,
+      { method: 'GET' },
+    );
+  },
+
+  listBrief(projectId: number) {
+    return request<LocationResponse[]>(
+      `/projects/${projectId}/locations/brief`,
+      { method: 'GET' },
+    );
+  },
+
+  create(projectId: number, data: Record<string, unknown>) {
+    return request<LocationResponse>(
+      `/projects/${projectId}/locations`,
+      { method: 'POST', body: data },
+    );
+  },
+
+  get(projectId: number, locationId: number) {
+    return request<LocationDetailResponse>(
+      `/projects/${projectId}/locations/${locationId}`,
+      { method: 'GET' },
+    );
+  },
+
+  update(projectId: number, locationId: number, data: Record<string, unknown>) {
+    return request<LocationResponse>(
+      `/projects/${projectId}/locations/${locationId}`,
+      { method: 'PATCH', body: data },
+    );
+  },
+
+  delete(projectId: number, locationId: number) {
+    return request<void>(
+      `/projects/${projectId}/locations/${locationId}`,
+      { method: 'DELETE' },
+    );
+  },
+
+  // Versions
+  listVersions(projectId: number, locationId: number) {
+    return request<LocationVersionResponse[]>(
+      `/projects/${projectId}/locations/${locationId}/versions`,
+      { method: 'GET' },
+    );
+  },
+
+  createVersion(projectId: number, locationId: number, data: Record<string, unknown>) {
+    return request<LocationVersionResponse>(
+      `/projects/${projectId}/locations/${locationId}/versions`,
+      { method: 'POST', body: data },
+    );
+  },
+
+  updateVersion(projectId: number, locationId: number, versionId: number, data: Record<string, unknown>) {
+    return request<LocationVersionResponse>(
+      `/projects/${projectId}/locations/${locationId}/versions/${versionId}`,
+      { method: 'PATCH', body: data },
+    );
+  },
+
+  deleteVersion(projectId: number, locationId: number, versionId: number) {
+    return request<void>(
+      `/projects/${projectId}/locations/${locationId}/versions/${versionId}`,
+      { method: 'DELETE' },
+    );
   },
 };
 
