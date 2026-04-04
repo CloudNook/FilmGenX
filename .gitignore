@@ -18,7 +18,7 @@ frontend/dist/
 frontend/.env.local
 
 # 数据库迁移自动生成
-backend/app/db/migrations/versions/
+# backend/app/db/migrations/versions/
 
 # 素材文件（体积大，单独管理）
 backend/storage/
