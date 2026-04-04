@@ -7,6 +7,7 @@ from app.db.base import Base
 if TYPE_CHECKING:
     from app.models.project import Project
     from app.models.storyboard import Storyboard
+    from app.models.conversation import Conversation
 
 
 class Scene(Base):
@@ -52,3 +53,4 @@ class Scene(Base):
     # Relations
     project: Mapped["Project"] = relationship("Project", back_populates="scenes")
     storyboard: Mapped[Optional["Storyboard"]] = relationship("Storyboard", back_populates="scene", uselist=False, cascade="all, delete-orphan")
+    conversation: Mapped[Optional["Conversation"]] = relationship("Conversation", back_populates="scene", uselist=False)

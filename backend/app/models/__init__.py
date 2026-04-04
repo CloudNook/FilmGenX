@@ -11,6 +11,7 @@ from app.models.character import Character, CharacterVersion
 from app.models.asset import Asset
 from app.models.task import GenerationTask
 from app.models.prompt import PromptTemplate
+from app.models.conversation import Conversation, Message
 
 __all__ = [
     "User",
@@ -23,4 +24,6 @@ __all__ = [
     "Asset",
     "GenerationTask",
     "PromptTemplate",
+    "Conversation",
+    "Message",
 ]
