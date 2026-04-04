@@ -258,7 +258,7 @@ export default function ChatPage({
   const handleConfirm = useCallback(
     async (outline: EpisodeOutline) => {
       if (!selectedConvId) return;
-      await conversationsApi.confirm(projectIdNum, selectedConvId, outline, llmConfig, '', outline.storyboard_shot_count);
+      await conversationsApi.confirm(projectIdNum, selectedConvId, outline, llmConfig, outline.storyboard_shot_count);
       await reloadConv();
       // Also reload conversation list to update status badge
       const list = await conversationsApi.list(projectIdNum).then((r) => r.items);

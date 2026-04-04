@@ -429,7 +429,7 @@ export const conversationsApi = {
   },
 
   /** 流式聊天，返回 Response 对象供前端读取 SSE */
-  chat(projectId: number, conversationId: number, content: string, llmConfig: LLMConfig, systemPrompt = '') {
+  chat(projectId: number, conversationId: number, content: string, llmConfig: LLMConfig) {
     const token = getToken();
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -441,13 +441,13 @@ export const conversationsApi = {
       {
         method: 'POST',
         headers,
-        body: JSON.stringify({ content, llm_config: llmConfig, system_prompt: systemPrompt }),
+        body: JSON.stringify({ content, llm_config: llmConfig }),
       },
     );
   },
 
   /** 流式总结，返回 Response 对象供前端读取 SSE */
-  summarize(projectId: number, conversationId: number, llmConfig: LLMConfig, systemPrompt = '') {
+  summarize(projectId: number, conversationId: number, llmConfig: LLMConfig) {
     const token = getToken();
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -459,18 +459,18 @@ export const conversationsApi = {
       {
         method: 'POST',
         headers,
-        body: JSON.stringify({ llm_config: llmConfig, system_prompt: systemPrompt }),
+        body: JSON.stringify({ llm_config: llmConfig }),
       },
     );
   },
 
   /** 确认大纲，创建 Scene 并触发分镜生成 */
-  confirm(projectId: number, conversationId: number, outline: EpisodeOutline, llmConfig: LLMConfig, systemPrompt = '', shotCount?: number) {
+  confirm(projectId: number, conversationId: number, outline: EpisodeOutline, llmConfig: LLMConfig, shotCount?: number) {
     return request<{ scene_id: number; task_id: number; celery_task_id: string }>(
       `/projects/${projectId}/conversations/${conversationId}/confirm`,
       {
         method: 'POST',
-        body: { outline, llm_config: llmConfig, system_prompt: systemPrompt, shot_count: shotCount },
+        body: { outline, llm_config: llmConfig, shot_count: shotCount },
       },
     );
   },

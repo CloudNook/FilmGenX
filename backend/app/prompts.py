@@ -31,7 +31,7 @@ class OutlineLLMSchema(BaseModel):
     novel_excerpt: str = Field(description="关键原著摘录，1-3段，用\\n\\n分隔")
     scene_types: List[str]
     priority: str = Field(description="S/A/B/C")
-    estimated_duration_sec: int = Field(gt=0)
+    estimated_duration_sec: int
     scores: ScoreLLMSchema
     characters: List[str]
     storyboard_style_notes: str = Field(description="给分镜导演的具体风格指导，包括色调、运镜风格、特效建议")

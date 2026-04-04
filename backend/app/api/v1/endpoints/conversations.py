@@ -51,13 +51,11 @@ class ChatRequest(BaseModel):
     """发送聊天消息请求。"""
     content: str = Field(..., description="用户消息内容")
     llm_config: dict = Field(..., description="LLM 配置，包含 provider/model/api_key/temperature 等")
-    system_prompt: str = Field("", description="可选的系统提示词覆盖")
 
 
 class SummarizeRequest(BaseModel):
     """触发剧本总结请求。"""
     llm_config: dict = Field(..., description="LLM 配置")
-    system_prompt: str = Field("", description="总结提示词模板（可选覆盖）")
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +231,7 @@ async def chat_message(
         async for chunk in call_llm_stream(
             messages=llm_messages,
             llm_config=body.llm_config,
-            system_prompt=body.system_prompt or CHAT_SYSTEM_PROMPT,
+            system_prompt=CHAT_SYSTEM_PROMPT,
         ):
             full_response += chunk
             # SSE 格式：data: <chunk>\n\n
@@ -303,8 +301,7 @@ async def summarize_outline(
     async def stream_summarize() -> AsyncGenerator[str, None]:
         from app.utils.llm_call import call_llm
 
-        summarize_prompt = body.system_prompt.strip() or SUMMARIZE_SYSTEM_PROMPT
-        summarize_prompt += f"\n\n当前是第 {next_version} 次总结。"
+        summarize_prompt = SUMMARIZE_SYSTEM_PROMPT + f"\n\n当前是第 {next_version} 次总结。"
 
         # Gemini 要求最后一条消息必须是 user 角色
         messages_for_summary = llm_messages.copy()
@@ -472,7 +469,6 @@ async def confirm_conversation(
             "style_notes": outline.storyboard_style_notes,
             "novel_excerpt": outline.novel_excerpt,
             "llm_config": body.llm_config.model_dump(),
-            "system_prompt": body.system_prompt,
         },
     )
 

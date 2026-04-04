@@ -126,7 +126,6 @@ class ConversationConfirmRequest(BaseModel):
     """确认剧本大纲，创建 Scene 并触发分镜生成。"""
     outline: EpisodeOutline = Field(..., description="最终确认的剧本大纲（可能经用户编辑）")
     llm_config: LLMConfigPayload = Field(..., description="用于分镜生成的 LLM 配置")
-    system_prompt: str = Field("", description="分镜生成系统提示词（用户可修改）")
     shot_count: Optional[int] = Field(None, ge=1, le=20, description="覆盖大纲中的镜头数量")
 
 
