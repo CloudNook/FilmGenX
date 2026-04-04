@@ -74,19 +74,7 @@ class StoryboardSchema(BaseModel):
     shots: List[ShotSchema]
 
 
-# ---------------------------------------------------------------------------
-# 系统提示词
-# ---------------------------------------------------------------------------
-
-_SYSTEM_PROMPT = """你是一名专业的动漫分镜导演，擅长将《斗破苍穹》小说文本转化为精确的分镜脚本。
-
-要求：
-- 严格按照 JSON schema 输出，不要任何多余文字
-- shot_code 格式：{scene_code}_S001、{scene_code}_S002 ...（序号三位补零）
-- image_prompt 使用英文，风格关键词包含 "anime style, high quality, dynamic lighting"
-- camera.shot_type 使用缩写：ECS/ECU/CU/MCU/MS/MLS/LS/ELS
-- 情感曲线 emotion_curve 节点数量与镜头数对应，体现叙事节奏变化
-"""
+from app.prompts import STORYBOARD_SYSTEM_PROMPT
 
 
 @celery_app.task(
@@ -141,7 +129,7 @@ async def _run_storyboard_generation(task_db_id: int) -> dict:
             # 构建 AI 请求
             from app.utils.llm_call import call_llm
             req = _build_storyboard_request(scene, shot_count, style_notes)
-            effective_system = (system_prompt or "").strip() or _SYSTEM_PROMPT
+            effective_system = (system_prompt or "").strip() or STORYBOARD_SYSTEM_PROMPT
             effective_llm_config = llm_config or {"model": "gemini-2.0-flash"}
             raw = await call_llm(
                 messages=[{"role": "user", "content": req.to_prompt()}],

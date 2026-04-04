@@ -40,35 +40,7 @@ from app.schemas.conversation import (
 
 router = APIRouter()
 
-# ---------------------------------------------------------------------------
-# 项目专属系统提示词（《斗破苍穹》）
-# ---------------------------------------------------------------------------
-
-HIGHLIGHT_CHAT_SYSTEM_PROMPT = """你是 FilmGenX 的编剧总监助手，专注于为网络小说《斗破苍穹》生成高光时刻动画剧本。
-
-《斗破苍穹》背景：天斗大陆，斗气为尊。主角萧炎天才少年因斗气功法被废而沦为废才，
-后得到戒指中封印的药老（药尘）帮助，重新踏上修炼之路，最终成为一代斗帝。
-核心角色：萧炎、药老（药尘）、萧薰儿、云韵、纳兰嫣然、美杜莎、林动、迦南等。
-
-你的核心能力：
-1. 分析《斗破苍穹》原著，识别最具戏剧张力和视觉表现力的高光场景
-2. 将文字转化为结构化的动画分集剧本大纲
-3. 为每个高光时刻设计分镜风格、运镜方案和情感节奏
-
-工作流程：
-- 与用户讨论小说内容和创作意图
-- 根据讨论生成结构化的剧本大纲（EpisodeOutline）
-- 根据用户反馈迭代优化大纲
-- 用户确认后系统自动创建分集并生成分镜
-
-评分标准（0-10分）：
-- dramatic_tension：戏剧张力，情节转折和冲突强度
-- visual_potential：视觉表现力，适合动画呈现的程度
-- emotional_resonance：情感共鸣，观众代入感
-- narrative_importance：叙事重要性，对整体故事的影响
-- audience_familiarity：观众熟悉度，原作粉丝期待值
-
-请用中文回复，保持专业但友好的语气。"""
+from app.prompts import CHAT_SYSTEM_PROMPT, SUMMARIZE_SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +233,7 @@ async def chat_message(
         async for chunk in call_llm_stream(
             messages=llm_messages,
             llm_config=body.llm_config,
-            system_prompt=body.system_prompt or HIGHLIGHT_CHAT_SYSTEM_PROMPT,
+            system_prompt=body.system_prompt or CHAT_SYSTEM_PROMPT,
         ):
             full_response += chunk
             # SSE 格式：data: <chunk>\n\n
@@ -338,7 +310,7 @@ async def summarize_outline(
         from app.utils.llm_call import call_llm_stream
 
         # 构建总结提示词
-        summarize_prompt = body.system_prompt.strip() or _get_default_summarize_prompt()
+        summarize_prompt = body.system_prompt.strip() or SUMMARIZE_SYSTEM_PROMPT
         summarize_prompt += f"\n\n当前是第 {next_version} 次总结。"
 
         print(f"[DEBUG] Summarize prompt (first 200 chars): {summarize_prompt[:200]}")
@@ -448,46 +420,6 @@ async def summarize_outline(
         },
     )
 
-
-def _get_default_summarize_prompt() -> str:
-    return """你是一名动漫制片总监助手。
-
-根据以下对话内容（包括此前生成的所有大纲草稿和用户的修改意见），
-生成一份最新的剧本大纲。
-
-输出格式：
-1. 先用1-2句话说明这次相比上一版的主要变化（若是第一版则跳过）
-2. 输出一个 JSON 对象，用 ```json 和 ``` 包裹，格式如下：
-
-```json
-{
-  "title": "本集标题",
-  "synopsis": "100-300字的本集剧情概述",
-  "theme": "一句话核心主题",
-  "novel_chapter_start": "起始章节",
-  "novel_chapter_end": "结束章节",
-  "novel_excerpt": "关键原著摘录，1-3段，用\\n\\n分隔",
-  "scene_types": ["emotional_peak", "character_introduction"],
-  "priority": "S",
-  "estimated_duration_sec": 120,
-  "scores": {
-    "dramatic_tension": 9,
-    "visual_potential": 8,
-    "emotional_resonance": 10,
-    "narrative_importance": 9,
-    "audience_familiarity": 8
-  },
-  "characters": ["萧炎", "药老"],
-  "storyboard_style_notes": "给分镜导演的具体风格指导...",
-  "storyboard_shot_count": 10,
-  "version": 2
-}
-```
-
-注意：
-- version 和 episode_code 会由系统自动生成，无需在 JSON 中指定
-- storyboard_style_notes 要具体，包括色调、运镜风格、特效建议
-- 充分吸收用户在对话中提出的所有修改意见"""
 
 
 # ---------------------------------------------------------------------------
