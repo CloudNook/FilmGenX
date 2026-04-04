@@ -165,18 +165,16 @@ export default function ProjectWorkspacePage({
             <CardContent className="p-4">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-sm text-muted-foreground">总评分</p>
+                  <p className="text-sm text-muted-foreground">总片段数</p>
                   <p className="text-2xl font-bold text-foreground">
-                    {scenes.length > 0
-                      ? Math.round(scenes.reduce((s, sc) => s + (sc.score_total || 0), 0) / scenes.length)
-                      : '-'}
+                    {scenes.length}
                   </p>
                 </div>
                 <div className="h-12 w-12 rounded-full bg-warning/10 flex items-center justify-center">
                   <Film className="h-6 w-6 text-warning" />
                 </div>
               </div>
-              <p className="mt-2 text-xs text-muted-foreground">各片段平均分</p>
+              <p className="mt-2 text-xs text-muted-foreground">已创建的片段</p>
             </CardContent>
           </Card>
 
@@ -277,9 +275,9 @@ export default function ProjectWorkspacePage({
                     </div>
                     <div className="text-right shrink-0">
                       <p className="text-sm font-medium text-foreground">
-                        {scene.score_total ?? '-'}
+                        {scene.status}
                       </p>
-                      <p className="text-xs text-muted-foreground">评分</p>
+                      <p className="text-xs text-muted-foreground">状态</p>
                     </div>
                   </div>
                 </Link>

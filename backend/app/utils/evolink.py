@@ -329,8 +329,11 @@ class EvolinkClient:
 
         Returns:
             VideoTask，status 为 completed 时 video_url 有值（24 小时有效）。
+
+        Note:
+            Evolink 统一任务查询端点: GET /v1/tasks/{task_id}
         """
-        response = await self._get_client().get(f"/v1/videos/generations/{task_id}")
+        response = await self._get_client().get(f"/v1/tasks/{task_id}")
         self._raise_for_status(response)
         return self._parse_task(response.json())
 
@@ -339,6 +342,10 @@ class EvolinkClient:
         task_id: str,
         poll_interval: float = 5.0,
         timeout: float = 600.0,
+        *,
+        upload_to_oss: bool = False,
+        oss_directory: Optional[str] = None,
+        oss_filename: Optional[str] = None,
     ) -> VideoTask:
         """轮询任务直到完成或超时。
 
@@ -346,9 +353,12 @@ class EvolinkClient:
             task_id:       要等待的任务 ID。
             poll_interval: 每次轮询间隔（秒），默认 5 秒。
             timeout:       最大等待时间（秒），默认 600 秒（10 分钟）。
+            upload_to_oss: 是否自动下载视频并上传到 OSS（获取永久 URL）。
+            oss_directory: OSS 目标目录，如 "videos/shots"。
+            oss_filename: OSS 文件名，如 "shot_001.mp4"。
 
         Returns:
-            完成或失败的 VideoTask。
+            完成或失败的 VideoTask。如果 upload_to_oss=True，video_url 为永久 URL。
 
         Raises:
             TimeoutError: 超过 timeout 仍未完成。
@@ -362,6 +372,27 @@ class EvolinkClient:
                 task_id, task.status, task.progress,
             )
             if task.status == "completed":
+                # 下载并上传到 OSS
+                if upload_to_oss and task.video_url:
+                    from app.utils.oss import oss_client
+                    permanent_url = oss_client.download_and_upload(
+                        task.video_url,
+                        directory=oss_directory,
+                        filename=oss_filename,
+                    )
+                    logger.info("视频已上传到 OSS：%s", permanent_url)
+                    # 更新返回对象中的 URL
+                    task = VideoTask(
+                        id=task.id,
+                        status=task.status,
+                        progress=task.progress,
+                        model=task.model,
+                        created=task.created,
+                        video_duration=task.video_duration,
+                        task_info=task.task_info,
+                        video_url=permanent_url,
+                        results=[permanent_url],
+                    )
                 return task
             if task.status == "failed":
                 raise RuntimeError(f"Evolink 任务 {task_id} 失败")

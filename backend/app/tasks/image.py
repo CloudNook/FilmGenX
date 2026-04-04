@@ -64,8 +64,8 @@ def generate_image_task(self, task_db_id: int) -> dict:
 async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> dict:
     """图像生成异步核心逻辑。"""
     import httpx
+    import uuid
     from app.repositories.asset import AssetRepository
-    from app.repositories.shot import ShotRepository
     from app.repositories.task import TaskRepository
     from app.utils.image_gen import image_gen_client
     from app.utils.oss import oss_client
@@ -86,15 +86,14 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
 
         try:
             params = gen_task.input_params or {}
-            project_id = params.get("project_id")  # 从请求获取项目 ID
-            shot_id = params.get("shot_id")
+            project_id = params.get("project_id")
             prompt = params.get("prompt", "")
             negative_prompt = params.get("negative_prompt")
             aspect_ratio = params.get("aspect_ratio", "16:9")
             resolution = params.get("resolution", "1K")
             style_preset = params.get("style_preset")
             reference_image_urls = params.get("reference_image_urls", [])
-            save_to_library = params.get("save_to_shot", True)  # 是否保存到素材库
+            save_to_library = params.get("save_to_library", True)
 
             # 构建完整提示词
             full_prompt = prompt
@@ -102,22 +101,9 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
                 full_prompt = f"{prompt}, {style_preset} style"
 
             logger.info(
-                "开始生成图像：shot_id=%s project_id=%s prompt=%s... resolution=%s aspect_ratio=%s ref_count=%d",
-                shot_id, project_id, prompt[:50], resolution, aspect_ratio, len(reference_image_urls or [])
+                "开始生成图像：project_id=%s prompt=%s... resolution=%s aspect_ratio=%s ref_count=%d",
+                project_id, prompt[:50], resolution, aspect_ratio, len(reference_image_urls or [])
             )
-
-            # 获取关联的 Shot 信息（如果有）
-            shot = None
-            if shot_id:
-                shot_repo = ShotRepository(session)
-                shot = await shot_repo.get(shot_id)
-                if shot:
-                    # 更新镜头状态
-                    await shot_repo.update(shot, {"status": "generating"})
-                    await session.commit()
-                    # 如果没有 project_id，尝试从 shot 获取
-                    if not project_id and hasattr(shot, 'storyboard') and shot.storyboard:
-                        project_id = shot.storyboard.scene.project_id
 
             # 根据是否有参考图选择生成方法
             if reference_image_urls and len(reference_image_urls) > 0:
@@ -161,10 +147,7 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
 
             # 上传图片到 OSS
             file_format = "png" if "png" in (result.mime_type or "") else "jpg"
-            asset_code = f"img_{task_db_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-
-            if shot:
-                asset_code = f"{shot.shot_code}_image"
+            asset_code = f"img_{uuid.uuid4().hex[:8]}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
             # 生成 OSS 路径和文件名
             filename = f"{asset_code}.{file_format}"
@@ -181,54 +164,22 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
             if save_to_library and project_id:
                 asset_repo = AssetRepository(session)
 
-                if shot:
-                    # 有关联镜头：保存到镜头素材库
-                    await asset_repo.deprecate_shot_assets(shot.id, "image")
-
-                    # 计算版本号
-                    existing = await asset_repo.get_by_shot(shot.id, current_only=False)
-                    image_versions = [a.version for a in existing if a.asset_type == "image"]
-                    next_version = (max(image_versions) + 1) if image_versions else 1
-
-                    new_asset = await asset_repo.create(
-                        project_id=project_id,
-                        shot_id=shot.id,
-                        asset_code=f"{shot.shot_code}_image_v{next_version}",
-                        asset_type="image",
-                        file_url=image_url,
-                        file_format=file_format,
-                        file_size_bytes=len(result.image_data or b""),
-                        source="generated",
-                        generator="gemini",
-                        version=next_version,
-                        is_current=True,
-                        tags=[shot.shot_code, "image", "generated"],
-                    )
-                    asset_id = new_asset.id
-
-                    # 更新镜头状态
-                    await ShotRepository(session).update(shot, {"status": "review"})
-                else:
-                    # 无关联镜头：保存为项目全局素材
-                    import uuid
-                    asset_code = f"img_{uuid.uuid4().hex[:8]}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-
-                    new_asset = await asset_repo.create(
-                        project_id=project_id,
-                        shot_id=None,
-                        asset_code=asset_code,
-                        asset_type="image",
-                        file_url=image_url,
-                        file_format=file_format,
-                        file_size_bytes=len(result.image_data or b""),
-                        source="generated",
-                        generator="gemini",
-                        version=1,
-                        is_current=True,
-                        tags=["image", "generated", "global"],
-                    )
-                    asset_id = new_asset.id
-                    logger.info(f"素材已保存到项目 {project_id} 全局素材库，asset_id={asset_id}")
+                new_asset = await asset_repo.create(
+                    project_id=project_id,
+                    shot_id=None,
+                    asset_code=asset_code,
+                    asset_type="image",
+                    file_url=image_url,
+                    file_format=file_format,
+                    file_size_bytes=len(result.image_data or b""),
+                    source="generated",
+                    generator="gemini",
+                    version=1,
+                    is_current=True,
+                    tags=["image", "generated"],
+                )
+                asset_id = new_asset.id
+                logger.info(f"素材已保存到项目 {project_id} 素材库，asset_id={asset_id}")
 
             # 更新任务状态
             await task_repo.update(gen_task, {
@@ -252,14 +203,6 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
                 "error_message": str(exc),
                 "completed_at": datetime.now(timezone.utc),
             })
-
-            # 恢复镜头状态
-            shot_id = (gen_task.input_params or {}).get("shot_id")
-            if shot_id:
-                shot = await ShotRepository(session).get(shot_id)
-                if shot:
-                    await ShotRepository(session).update(shot, {"status": "draft"})
-
             await session.commit()
 
             # 可重试的异常

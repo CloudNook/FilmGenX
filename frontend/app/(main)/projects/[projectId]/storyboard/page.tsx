@@ -1,16 +1,19 @@
 'use client';
 
 import { use, useState, useEffect, useCallback } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { AppLayout } from '@/components/layout';
 import {
   projectsApi,
   scenesApi,
   storyboardsApi,
   shotsApi,
+  tasksApi,
   type ProjectResponse,
   type SceneResponse,
   type StoryboardResponse,
   type ShotResponse,
+  type TaskResponse,
 } from '@/lib/api';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -71,25 +74,6 @@ const shotStatusColors: Record<string, string> = {
   completed: 'bg-success/20 text-success',
 };
 
-const shotTypes = [
-  { value: 'extreme_wide', label: '大远景' },
-  { value: 'wide', label: '远景' },
-  { value: 'medium_wide', label: '中远景' },
-  { value: 'medium', label: '中景' },
-  { value: 'medium_close', label: '中近景' },
-  { value: 'close_up', label: '特写' },
-  { value: 'extreme_close_up', label: '大特写' },
-];
-
-const cameraAngles = [
-  { value: 'eye_level', label: '平视' },
-  { value: 'high_angle', label: '俯视' },
-  { value: 'low_angle', label: '仰视' },
-  { value: 'birds_eye', label: '鸟瞰' },
-  { value: 'dutch_angle', label: '倾斜' },
-  { value: 'over_shoulder', label: '过肩' },
-];
-
 export default function StoryboardPage({
   params,
 }: {
@@ -97,6 +81,9 @@ export default function StoryboardPage({
 }) {
   const { projectId } = use(params);
   const projectIdNum = Number(projectId);
+  const searchParams = useSearchParams();
+  const urlSceneId = searchParams.get('scene');
+  const urlShotId = searchParams.get('shot');
 
   // Data state
   const [project, setProject] = useState<ProjectResponse | null>(null);
@@ -116,6 +103,11 @@ export default function StoryboardPage({
   const [selectedShot, setSelectedShot] = useState<ShotResponse | null>(null);
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [isPlaying, setIsPlaying] = useState(false);
+
+  // Video generation state
+  const [generatingVideo, setGeneratingVideo] = useState(false);
+  const [videoTask, setVideoTask] = useState<TaskResponse | null>(null);
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [zoom, setZoom] = useState(100);
 
@@ -151,9 +143,12 @@ export default function StoryboardPage({
       .then((res) => {
         if (!cancelled) {
           setScenes(res.items);
-          // Auto-select the first scene if none selected
-          if (res.items.length > 0 && !selectedScene) {
-            setSelectedScene(String(res.items[0].id));
+          // Auto-select scene from URL or first available
+          if (res.items.length > 0) {
+            const target = urlSceneId
+              ? String(res.items.find(s => s.id === Number(urlSceneId))?.id || res.items[0].id)
+              : String(res.items[0].id);
+            setSelectedScene(target);
           }
         }
       })
@@ -224,7 +219,64 @@ export default function StoryboardPage({
     };
   }, [storyboard]);
 
+  // Auto-select and fetch shot detail from URL
+  useEffect(() => {
+    if (!urlShotId || !storyboard || shots.length === 0) return;
+    const shotIdNum = Number(urlShotId);
+    const found = shots.find((s) => s.id === shotIdNum);
+    if (found) {
+      // Fetch full detail via API
+      shotsApi.get(storyboard.id, shotIdNum).then((detail) => {
+        setSelectedShot(detail);
+      }).catch(() => {
+        setSelectedShot(found);
+      });
+    }
+  }, [urlShotId, storyboard, shots]);
+
   // ---- Handlers ----
+
+  const handleGenerateVideo = useCallback(async () => {
+    if (!selectedShot || !storyboard) return;
+    setGeneratingVideo(true);
+    setVideoUrl(null);
+    setError(null);
+    try {
+      const task = await tasksApi.triggerVideo({
+        shot_id: selectedShot.id,
+        quality: '1080p',
+        sound: 'on',
+        use_image_start: false,
+      });
+      setVideoTask(task);
+      // Poll for completion
+      const pollInterval = setInterval(async () => {
+        try {
+          const updated = await tasksApi.get(task.id);
+          setVideoTask(updated);
+          if (updated.status === 'success') {
+            clearInterval(pollInterval);
+            setGeneratingVideo(false);
+            // Fetch the shot's assets to get the video URL
+            if (updated.result_asset_id) {
+              const refreshedShot = await shotsApi.get(storyboard.id, selectedShot.id);
+              setSelectedShot(refreshedShot);
+            }
+          } else if (updated.status === 'failed') {
+            clearInterval(pollInterval);
+            setGeneratingVideo(false);
+            setError(updated.error_message || '视频生成失败');
+          }
+        } catch {
+          clearInterval(pollInterval);
+          setGeneratingVideo(false);
+        }
+      }, 5000);
+    } catch (err: unknown) {
+      setGeneratingVideo(false);
+      setError(err instanceof Error ? err.message : '视频生成请求失败');
+    }
+  }, [selectedShot, storyboard]);
 
   const handleAddShot = useCallback(async () => {
     if (!storyboard) return;
@@ -297,7 +349,7 @@ export default function StoryboardPage({
   };
 
   const getShotDescription = (shot: ShotResponse): string => {
-    return shot.image_prompt || shot.character_action || shot.shot_code;
+    return shot.image_prompt || shot.shot_code;
   };
 
   const getShotDialogue = (shot: ShotResponse): string | null => {
@@ -306,7 +358,7 @@ export default function StoryboardPage({
 
   const getShotLocation = (shot: ShotResponse): string => {
     const env = shot.environment as Record<string, string> | null;
-    return env?.location || shot.location_id || '';
+    return env?.location || env?.location_id || '';
   };
 
   const getShotMood = (shot: ShotResponse): string => {
@@ -421,7 +473,7 @@ export default function StoryboardPage({
             </div>
 
             {/* Shot List */}
-            <ScrollArea className="flex-1">
+            <ScrollArea className="flex-1 min-h-0">
               {loadingShots ? (
                 <div className="flex items-center justify-center p-8">
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
@@ -431,7 +483,12 @@ export default function StoryboardPage({
                   {shots.map((shot) => (
                     <div
                       key={shot.id}
-                      onClick={() => setSelectedShot(shot)}
+                      onClick={() => {
+                        setSelectedShot(shot);
+                        if (storyboard) {
+                          shotsApi.get(storyboard.id, shot.id).then(setSelectedShot).catch(() => {});
+                        }
+                      }}
                       className={`group cursor-pointer rounded-lg border transition-all ${
                         selectedShot?.id === shot.id
                           ? 'border-primary bg-primary/5'
@@ -583,9 +640,23 @@ export default function StoryboardPage({
                 </div>
 
                 <div className="flex items-center gap-2">
-                  <Button variant="outline" size="sm" className="h-7 border-border">
-                    <Sparkles className="h-3.5 w-3.5 mr-1" />
-                    AI 生成
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 border-border"
+                    onClick={handleGenerateVideo}
+                    disabled={!selectedShot || generatingVideo}
+                  >
+                    {generatingVideo ? (
+                      <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+                    ) : (
+                      <Sparkles className="h-3.5 w-3.5 mr-1" />
+                    )}
+                    {generatingVideo
+                      ? videoTask?.status === 'running'
+                        ? `生成中 ${videoTask.progress}%`
+                        : '排队中...'
+                      : 'AI 生成'}
                   </Button>
                   <Button variant="outline" size="sm" className="h-7 border-border">
                     <Download className="h-3.5 w-3.5 mr-1" />
@@ -603,7 +674,12 @@ export default function StoryboardPage({
                     return (
                       <div
                         key={shot.id}
-                        onClick={() => setSelectedShot(shot)}
+                        onClick={() => {
+                          setSelectedShot(shot);
+                          if (storyboard) {
+                            shotsApi.get(storyboard.id, shot.id).then(setSelectedShot).catch(() => {});
+                          }
+                        }}
                         className={`h-16 rounded cursor-pointer transition-all relative group ${
                           selectedShot?.id === shot.id
                             ? 'ring-2 ring-primary'
@@ -656,213 +732,13 @@ export default function StoryboardPage({
             </div>
 
             {selectedShot ? (
-              <ScrollArea className="flex-1">
-                <div className="p-4 space-y-6">
-                  {/* Basic Info */}
-                  <div className="space-y-3">
-                    <h3 className="text-sm font-medium text-foreground">基本信息</h3>
-                    <div className="space-y-2">
-                      <div>
-                        <label className="text-xs text-muted-foreground">镜头编号</label>
-                        <Input
-                          defaultValue={selectedShot.shot_code}
-                          className="mt-1 bg-secondary border-border text-sm h-8"
-                          onBlur={(e) =>
-                            handleUpdateShot(selectedShot.id, { shot_code: e.target.value })
-                          }
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs text-muted-foreground">描述 / 提示词</label>
-                        <Textarea
-                          defaultValue={selectedShot.image_prompt || ''}
-                          className="mt-1 bg-secondary border-border text-sm resize-none"
-                          rows={3}
-                          onBlur={(e) =>
-                            handleUpdateShot(selectedShot.id, { image_prompt: e.target.value })
-                          }
-                        />
-                      </div>
-                      {getShotDialogue(selectedShot) && (
-                        <div>
-                          <label className="text-xs text-muted-foreground">台词</label>
-                          <Textarea
-                            defaultValue={getShotDialogue(selectedShot) || ''}
-                            className="mt-1 bg-secondary border-border text-sm resize-none"
-                            rows={2}
-                            onBlur={(e) =>
-                              handleUpdateShot(selectedShot.id, { dialogue_text: e.target.value })
-                            }
-                          />
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  <Separator />
-
-                  {/* Camera Settings */}
-                  <div className="space-y-3">
-                    <h3 className="text-sm font-medium text-foreground">镜头设置</h3>
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="text-xs text-muted-foreground">景别</label>
-                        <Select
-                          defaultValue={getShotType(selectedShot)}
-                          onValueChange={(value) =>
-                            handleUpdateShot(selectedShot.id, {
-                              composition: { ...(selectedShot.composition as Record<string, unknown> || {}), shot_type: value },
-                            })
-                          }
-                        >
-                          <SelectTrigger className="mt-1 bg-secondary border-border text-xs h-8">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {shotTypes.map((type) => (
-                              <SelectItem key={type.value} value={type.value}>
-                                {type.label}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <div>
-                        <label className="text-xs text-muted-foreground">机位</label>
-                        <Select
-                          defaultValue={getCameraAngle(selectedShot)}
-                          onValueChange={(value) =>
-                            handleUpdateShot(selectedShot.id, {
-                              camera: { ...(selectedShot.camera as Record<string, unknown> || {}), angle: value },
-                            })
-                          }
-                        >
-                          <SelectTrigger className="mt-1 bg-secondary border-border text-xs h-8">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {cameraAngles.map((angle) => (
-                              <SelectItem key={angle.value} value={angle.value}>
-                                {angle.label}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                    </div>
-                    <div>
-                      <label className="text-xs text-muted-foreground">时长 ({selectedShot.duration_sec}s)</label>
-                      <Slider
-                        defaultValue={[selectedShot.duration_sec]}
-                        max={30}
-                        min={1}
-                        step={1}
-                        className="mt-2"
-                        onValueChange={([val]) =>
-                          handleUpdateShot(selectedShot.id, { duration_sec: val })
-                        }
-                      />
-                    </div>
-                  </div>
-
-                  <Separator />
-
-                  {/* Scene Info */}
-                  <div className="space-y-3">
-                    <h3 className="text-sm font-medium text-foreground">场景信息</h3>
-                    <div className="space-y-2">
-                      <div>
-                        <label className="text-xs text-muted-foreground">场景</label>
-                        <Input
-                          defaultValue={getShotLocation(selectedShot)}
-                          className="mt-1 bg-secondary border-border text-sm h-8"
-                          onBlur={(e) =>
-                            handleUpdateShot(selectedShot.id, {
-                              environment: { ...(selectedShot.environment as Record<string, unknown> || {}), location: e.target.value },
-                            })
-                          }
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs text-muted-foreground">氛围</label>
-                        <Input
-                          defaultValue={getShotMood(selectedShot)}
-                          className="mt-1 bg-secondary border-border text-sm h-8"
-                          onBlur={(e) =>
-                            handleUpdateShot(selectedShot.id, {
-                              environment: { ...(selectedShot.environment as Record<string, unknown> || {}), mood: e.target.value },
-                            })
-                          }
-                        />
-                      </div>
-                    </div>
-                  </div>
-
-                  <Separator />
-
-                  {/* QC Info */}
-                  <div className="space-y-3">
-                    <h3 className="text-sm font-medium text-foreground">质量检查</h3>
-                    <div className="space-y-2 text-xs">
-                      <div className="flex items-center justify-between">
-                        <span className="text-muted-foreground">角色一致性</span>
-                        <Badge variant={selectedShot.qc_character_consistency ? 'default' : 'outline'} className="text-[10px] h-5">
-                          {selectedShot.qc_character_consistency ? '通过' : '待检'}
-                        </Badge>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-muted-foreground">光照匹配</span>
-                        <Badge variant={selectedShot.qc_lighting_match ? 'default' : 'outline'} className="text-[10px] h-5">
-                          {selectedShot.qc_lighting_match ? '通过' : '待检'}
-                        </Badge>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-muted-foreground">动作连贯性</span>
-                        <Badge variant={selectedShot.qc_action_continuity ? 'default' : 'outline'} className="text-[10px] h-5">
-                          {selectedShot.qc_action_continuity ? '通过' : '待检'}
-                        </Badge>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-muted-foreground">整体评分</span>
-                        <span className="text-foreground">{selectedShot.qc_score ?? '-'}</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <Separator />
-
-                  {/* Actions */}
-                  <div className="space-y-2">
-                    <Button className="w-full bg-primary text-primary-foreground hover:bg-primary/90">
-                      <Wand2 className="h-4 w-4 mr-2" />
-                      AI 重新生成
-                    </Button>
-                    <div className="grid grid-cols-2 gap-2">
-                      <Button
-                        variant="outline"
-                        className="border-border"
-                        onClick={() => {
-                          if (selectedShot) {
-                            setSelectedShot(null);
-                            setSelectedShot(selectedShot);
-                          }
-                        }}
-                      >
-                        <RefreshCw className="h-4 w-4 mr-1" />
-                        刷新
-                      </Button>
-                      <Button
-                        variant="outline"
-                        className="border-border text-destructive hover:text-destructive"
-                        onClick={() => handleDeleteShot(selectedShot.id)}
-                      >
-                        <Trash2 className="h-4 w-4 mr-1" />
-                        删除
-                      </Button>
-                    </div>
-                  </div>
-                </div>
-              </ScrollArea>
+              <ShotDetailPanel
+                key={selectedShot.id}
+                shot={selectedShot}
+                storyboardId={storyboard?.id}
+                onSave={handleUpdateShot}
+                onDelete={handleDeleteShot}
+              />
             ) : (
               <div className="flex-1 flex items-center justify-center text-center p-6">
                 <div>
@@ -875,5 +751,546 @@ export default function StoryboardPage({
         </ResizablePanel>
       </ResizablePanelGroup>
     </AppLayout>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ShotDetailPanel — 属性面板（本地编辑 + 手动保存）
+// ---------------------------------------------------------------------------
+
+function ShotDetailPanel({
+  shot,
+  storyboardId,
+  onSave,
+  onDelete,
+}: {
+  shot: ShotResponse;
+  storyboardId?: number;
+  onSave: (shotId: number, data: Record<string, unknown>) => Promise<void>;
+  onDelete: (shotId: number) => Promise<void>;
+}) {
+  // Local editing state (initialized from shot prop)
+  const [form, setForm] = useState<Record<string, unknown>>({});
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const initForm = (s: ShotResponse) => ({
+    shot_code: s.shot_code,
+    sequence: s.sequence,
+    status: s.status || 'draft',
+    image_prompt: s.image_prompt || '',
+    negative_prompt: s.negative_prompt || '',
+    style_preset: s.style_preset || '',
+    dialogue_text: s.dialogue_text || '',
+    dialogue_character: s.dialogue_character || '',
+    dialogue_delivery: s.dialogue_delivery ? { ...s.dialogue_delivery } : {},
+    duration_sec: s.duration_sec,
+    camera: s.camera ? { ...s.camera } : {},
+    composition: s.composition ? { ...s.composition } : {},
+    environment: s.environment ? { ...s.environment } : {},
+    characters_config: s.characters_config ? [...s.characters_config] : [],
+    char_version_ids: s.char_version_ids ? [...s.char_version_ids] : [],
+    sound_design: s.sound_design ? { ...s.sound_design } : {},
+    transition_in: s.transition_in || 'cut',
+    transition_out: s.transition_out || 'cut',
+    transition_notes: s.transition_notes || '',
+    dependencies: s.dependencies ? [...s.dependencies] : [],
+  });
+
+  // Sync from prop when shot changes
+  useEffect(() => {
+    setForm(initForm(shot));
+    setDirty(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shot]);
+
+  // Fetch full detail on mount
+  useEffect(() => {
+    if (!storyboardId || !shot.id) return;
+    shotsApi.get(storyboardId, shot.id).then((detail) => {
+      setForm(initForm(detail));
+      setDirty(false);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storyboardId, shot.id]);
+
+  const updateField = (key: string, value: unknown) => {
+    setForm((prev) => ({ ...prev, [key]: value }));
+    setDirty(true);
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await onSave(shot.id, form);
+      setDirty(false);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const camera = (form.camera as Record<string, string>) || {};
+  const composition = (form.composition as Record<string, string>) || {};
+  const environment = (form.environment as Record<string, string>) || {};
+  const charactersConfig = (form.characters_config as Array<Record<string, string>>) || [];
+  const soundDesign = (form.sound_design as Record<string, string | string[]>) || {};
+  const dialogueDelivery = (form.dialogue_delivery as Record<string, string>) || {};
+
+  return (
+    <ScrollArea className="flex-1 min-h-0">
+      <div className="p-4 space-y-6">
+        {/* Basic Info */}
+        <div className="space-y-3">
+          <h3 className="text-sm font-medium text-foreground">基本信息</h3>
+          <div className="space-y-2">
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-xs text-muted-foreground">镜头编号</label>
+                <Input
+                  value={String(form.shot_code || '')}
+                  onChange={(e) => updateField('shot_code', e.target.value)}
+                  className="mt-1 bg-secondary border-border text-sm h-8"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground">序列号</label>
+                <Input
+                  value={String(form.sequence || '')}
+                  onChange={(e) => updateField('sequence', Number(e.target.value))}
+                  className="mt-1 bg-secondary border-border text-sm h-8"
+                  type="number"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground">状态</label>
+              <Select
+                value={String(form.status || 'draft')}
+                onValueChange={(value) => updateField('status', value)}
+              >
+                <SelectTrigger className="mt-1 bg-secondary border-border text-xs h-8">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="draft">草稿</SelectItem>
+                  <SelectItem value="approved">已批准</SelectItem>
+                  <SelectItem value="rendering">渲染中</SelectItem>
+                  <SelectItem value="completed">已完成</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground">风格预设</label>
+              <Input
+                value={String(form.style_preset || '')}
+                onChange={(e) => updateField('style_preset', e.target.value)}
+                className="mt-1 bg-secondary border-border text-sm h-8"
+                placeholder="cinematic/dramatic/ethereal..."
+              />
+            </div>
+          </div>
+        </div>
+
+        <Separator />
+
+        {/* Image Prompts */}
+        <div className="space-y-3">
+          <h3 className="text-sm font-medium text-foreground">图像提示词</h3>
+          <div className="space-y-2">
+            <div>
+              <label className="text-xs text-muted-foreground">图像提示词（英文）</label>
+              <Textarea
+                value={String(form.image_prompt || '')}
+                onChange={(e) => updateField('image_prompt', e.target.value)}
+                className="mt-1 bg-secondary border-border text-sm resize-none"
+                rows={4}
+              />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground">负面提示词（英文）</label>
+              <Input
+                value={String(form.negative_prompt || '')}
+                onChange={(e) => updateField('negative_prompt', e.target.value)}
+                className="mt-1 bg-secondary border-border text-sm h-8"
+              />
+            </div>
+          </div>
+        </div>
+
+        <Separator />
+
+        {/* Camera Settings */}
+        <div className="space-y-3">
+          <h3 className="text-sm font-medium text-foreground">镜头设置</h3>
+          <div className="space-y-2">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-muted-foreground">景别</label>
+                <Input
+                  value={camera.shot_type || ''}
+                  onChange={(e) =>
+                    updateField('camera', { ...camera, shot_type: e.target.value })
+                  }
+                  className="mt-1 bg-secondary border-border text-xs h-8"
+                  placeholder="MS/WS/CU..."
+                />
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground">机位角度</label>
+                <Input
+                  value={camera.angle || ''}
+                  onChange={(e) =>
+                    updateField('camera', { ...camera, angle: e.target.value })
+                  }
+                  className="mt-1 bg-secondary border-border text-xs h-8"
+                  placeholder="dutch/eye_level..."
+                />
+              </div>
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground">镜头运动</label>
+              <Input
+                value={camera.movement || ''}
+                onChange={(e) =>
+                  updateField('camera', { ...camera, movement: e.target.value })
+                }
+                className="mt-1 bg-secondary border-border text-sm h-8"
+                placeholder="handheld/pan/tilt..."
+              />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground">主体位置</label>
+              <Input
+                value={composition.subject_position || ''}
+                onChange={(e) =>
+                  updateField('composition', { ...composition, subject_position: e.target.value })
+                }
+                className="mt-1 bg-secondary border-border text-sm h-8"
+                placeholder="right_third/center..."
+              />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground">时长 ({Number(form.duration_sec || 3)}s)</label>
+              <Slider
+                value={[Number(form.duration_sec || 3)]}
+                max={30}
+                min={1}
+                step={0.5}
+                className="mt-2"
+                onValueChange={([val]) => updateField('duration_sec', val)}
+              />
+            </div>
+          </div>
+        </div>
+
+        <Separator />
+
+        {/* Characters Config */}
+        <div className="space-y-3">
+          <h3 className="text-sm font-medium text-foreground">角色配置</h3>
+          <div className="space-y-2">
+            {charactersConfig.length > 0 ? (
+              charactersConfig.map((char, idx) => (
+                <div key={idx} className="p-2 bg-secondary/50 rounded-lg space-y-2">
+                  <div>
+                    <label className="text-xs text-muted-foreground">动作</label>
+                    <Textarea
+                      value={char.action || ''}
+                      onChange={(e) => {
+                        const updated = [...charactersConfig];
+                        updated[idx] = { ...updated[idx], action: e.target.value };
+                        updateField('characters_config', updated);
+                      }}
+                      className="mt-1 bg-secondary border-border text-xs resize-none"
+                      rows={2}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted-foreground">表情</label>
+                    <Input
+                      value={char.expression || ''}
+                      onChange={(e) => {
+                        const updated = [...charactersConfig];
+                        updated[idx] = { ...updated[idx], expression: e.target.value };
+                        updateField('characters_config', updated);
+                      }}
+                      className="mt-1 bg-secondary border-border text-xs h-8"
+                    />
+                  </div>
+                </div>
+              ))
+            ) : (
+              <p className="text-xs text-muted-foreground">无角色配置</p>
+            )}
+          </div>
+        </div>
+
+        <Separator />
+
+        {/* Environment */}
+        <div className="space-y-3">
+          <h3 className="text-sm font-medium text-foreground">场景环境</h3>
+          <div className="space-y-2">
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-xs text-muted-foreground">时间</label>
+                <Input
+                  value={environment.time_of_day || ''}
+                  onChange={(e) =>
+                    updateField('environment', { ...environment, time_of_day: e.target.value })
+                  }
+                  className="mt-1 bg-secondary border-border text-xs h-8"
+                  placeholder="morning/night..."
+                />
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground">氛围</label>
+                <Input
+                  value={environment.atmosphere || environment.mood || ''}
+                  onChange={(e) =>
+                    updateField('environment', { ...environment, atmosphere: e.target.value })
+                  }
+                  className="mt-1 bg-secondary border-border text-xs h-8"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground">光照</label>
+              <Input
+                value={environment.lighting || ''}
+                onChange={(e) =>
+                  updateField('environment', { ...environment, lighting: e.target.value })
+                }
+                className="mt-1 bg-secondary border-border text-sm h-8"
+              />
+            </div>
+          </div>
+        </div>
+
+        <Separator />
+
+        {/* Dialogue */}
+        <div className="space-y-3">
+          <h3 className="text-sm font-medium text-foreground">对白</h3>
+          <div className="space-y-2">
+            <div>
+              <label className="text-xs text-muted-foreground">说话角色</label>
+              <Input
+                value={String(form.dialogue_character || '')}
+                onChange={(e) => updateField('dialogue_character', e.target.value)}
+                className="mt-1 bg-secondary border-border text-sm h-8"
+                placeholder="说话角色名"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground">台词内容</label>
+              <Textarea
+                value={String(form.dialogue_text || '')}
+                onChange={(e) => updateField('dialogue_text', e.target.value)}
+                className="mt-1 bg-secondary border-border text-sm resize-none"
+                rows={2}
+                placeholder="台词内容"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground">台词演绎</label>
+              <Input
+                value={dialogueDelivery.tone || dialogueDelivery.style || ''}
+                onChange={(e) =>
+                  updateField('dialogue_delivery', { ...dialogueDelivery, tone: e.target.value })
+                }
+                className="mt-1 bg-secondary border-border text-sm h-8"
+                placeholder="语气/风格..."
+              />
+            </div>
+          </div>
+        </div>
+
+        <Separator />
+
+        {/* Sound Design */}
+        <div className="space-y-3">
+          <h3 className="text-sm font-medium text-foreground">音效设计</h3>
+          <div className="space-y-2">
+            <div>
+              <label className="text-xs text-muted-foreground">环境音</label>
+              <Input
+                value={String(soundDesign.ambient || '')}
+                onChange={(e) =>
+                  updateField('sound_design', { ...soundDesign, ambient: e.target.value })
+                }
+                className="mt-1 bg-secondary border-border text-sm h-8"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground">音效列表</label>
+              <Textarea
+                value={Array.isArray(soundDesign.sfx_list) ? soundDesign.sfx_list.join(', ') : ''}
+                onChange={(e) =>
+                  updateField('sound_design', { ...soundDesign, sfx_list: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })
+                }
+                className="mt-1 bg-secondary border-border text-sm resize-none"
+                rows={2}
+                placeholder="用逗号分隔多个音效"
+              />
+            </div>
+          </div>
+        </div>
+
+        <Separator />
+
+        {/* Transitions */}
+        <div className="space-y-3">
+          <h3 className="text-sm font-medium text-foreground">转场</h3>
+          <div className="space-y-2">
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-xs text-muted-foreground">入画转场</label>
+                <Input
+                  value={String(form.transition_in || 'cut')}
+                  onChange={(e) => updateField('transition_in', e.target.value)}
+                  className="mt-1 bg-secondary border-border text-xs h-8"
+                  placeholder="cut/fade/dissolve..."
+                />
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground">出画转场</label>
+                <Input
+                  value={String(form.transition_out || 'cut')}
+                  onChange={(e) => updateField('transition_out', e.target.value)}
+                  className="mt-1 bg-secondary border-border text-xs h-8"
+                  placeholder="cut/fade/dissolve..."
+                />
+              </div>
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground">转场备注</label>
+              <Input
+                value={String(form.transition_notes || '')}
+                onChange={(e) => updateField('transition_notes', e.target.value)}
+                className="mt-1 bg-secondary border-border text-sm h-8"
+              />
+            </div>
+          </div>
+        </div>
+
+        <Separator />
+
+        {/* Dependencies */}
+        <div className="space-y-3">
+          <h3 className="text-sm font-medium text-foreground">依赖关系</h3>
+          <div className="space-y-2">
+            <div>
+              <label className="text-xs text-muted-foreground">依赖的镜头ID</label>
+              <Input
+                value={Array.isArray(form.dependencies) ? form.dependencies.join(', ') : ''}
+                onChange={(e) =>
+                  updateField('dependencies', e.target.value.split(',').map(s => s.trim()).filter(Boolean))
+                }
+                className="mt-1 bg-secondary border-border text-sm h-8"
+                placeholder="用逗号分隔镜头ID"
+              />
+            </div>
+          </div>
+        </div>
+
+        <Separator />
+
+        {/* QC Info */}
+        <div className="space-y-3">
+          <h3 className="text-sm font-medium text-foreground">质量检查</h3>
+          <div className="space-y-2 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="text-muted-foreground">角色一致性</span>
+              <Badge variant={shot.qc_character_consistency ? 'default' : 'outline'} className="text-[10px] h-5">
+                {shot.qc_character_consistency ? '通过' : '待检'}
+              </Badge>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-muted-foreground">光照匹配</span>
+              <Badge variant={shot.qc_lighting_match ? 'default' : 'outline'} className="text-[10px] h-5">
+                {shot.qc_lighting_match ? '通过' : '待检'}
+              </Badge>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-muted-foreground">动作连贯性</span>
+              <Badge variant={shot.qc_action_continuity ? 'default' : 'outline'} className="text-[10px] h-5">
+                {shot.qc_action_continuity ? '通过' : '待检'}
+              </Badge>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-muted-foreground">已批准</span>
+              <Badge variant={shot.qc_approved ? 'default' : 'outline'} className="text-[10px] h-5">
+                {shot.qc_approved ? '是' : '否'}
+              </Badge>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-muted-foreground">整体评分</span>
+              <span className="text-foreground">{shot.qc_score ?? '-'}</span>
+            </div>
+          </div>
+        </div>
+
+        <Separator />
+
+        {/* Timestamps */}
+        <div className="space-y-3">
+          <h3 className="text-sm font-medium text-foreground">时间戳</h3>
+          <div className="space-y-1 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="text-muted-foreground">创建时间</span>
+              <span className="text-foreground">{shot.created_at ? new Date(shot.created_at).toLocaleString('zh-CN') : '-'}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-muted-foreground">更新时间</span>
+              <span className="text-foreground">{shot.updated_at ? new Date(shot.updated_at).toLocaleString('zh-CN') : '-'}</span>
+            </div>
+          </div>
+        </div>
+
+        <Separator />
+
+        {/* Actions */}
+        <div className="space-y-2">
+          <Button
+            className="w-full bg-primary text-primary-foreground hover:bg-primary/90"
+            disabled={!dirty}
+            onClick={handleSave}
+          >
+            {saving ? (
+              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+            ) : (
+              <Check className="h-4 w-4 mr-2" />
+            )}
+            {saving ? '保存中...' : '保存修改'}
+          </Button>
+          <div className="grid grid-cols-2 gap-2">
+            <Button
+              variant="outline"
+              className="border-border"
+              onClick={() => {
+                if (storyboardId) {
+                  shotsApi.get(storyboardId, shot.id).then((detail) => {
+                    setForm(initForm(detail));
+                    setDirty(false);
+                  });
+                }
+              }}
+            >
+              <RefreshCw className="h-4 w-4 mr-1" />
+              刷新
+            </Button>
+            <Button
+              variant="outline"
+              className="border-border text-destructive hover:text-destructive"
+              onClick={() => onDelete(shot.id)}
+            >
+              <Trash2 className="h-4 w-4 mr-1" />
+              删除
+            </Button>
+          </div>
+        </div>
+      </div>
+    </ScrollArea>
   );
 }

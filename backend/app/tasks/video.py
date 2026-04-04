@@ -3,10 +3,11 @@
 
 流程：
   1. 从数据库加载 GenerationTask + Shot 信息
-  2. 拼装 Evolink API 请求（文生视频 or 图生视频）
-  3. 调用 Evolink API 提交任务，轮询直到完成
-  4. 将视频 URL 写入 Asset 表，更新 Shot 状态
-  5. 更新 GenerationTask 状态为 success / failed
+  2. 构建完整视频提示词（从 shot 各字段拼接）
+  3. 拼装 Evolink API 请求（文生视频 or 图生视频）
+  4. 调用 Evolink API 提交任务，轮询直到完成
+  5. 下载视频并上传到 OSS，将永久 URL 写入 Shot.video_url
+  6. 更新 GenerationTask 状态为 success / failed
 """
 
 import asyncio
@@ -16,6 +17,7 @@ from datetime import datetime, timezone
 from celery import Task
 
 from app.tasks.celery_app import celery_app
+from app.prompts import build_video_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -24,15 +26,25 @@ class VideoGenerationTask(Task):
     """自定义 Task 基类，提供数据库会话的懒加载。"""
 
     abstract = True
-    _session_factory = None
 
-    @property
-    def session_factory(self):
-        """懒加载 AsyncSessionFactory，避免 Worker 启动时触发数据库连接。"""
-        if self._session_factory is None:
-            from app.db.session import AsyncSessionFactory
-            self._session_factory = AsyncSessionFactory
-        return self._session_factory
+    def get_session_factory(self):
+        """每次任务执行时重新创建 session factory，避免事件循环冲突。"""
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+        from app.core.config import settings
+        import json
+
+        engine = create_async_engine(
+            settings.DATABASE_URL,
+            echo=False,
+            pool_size=5,
+            max_overflow=10,
+            json_serializer=lambda obj: json.dumps(obj, ensure_ascii=False),
+        )
+        return async_sessionmaker(
+            engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+        )
 
 
 @celery_app.task(
@@ -50,7 +62,7 @@ def generate_video_task(self, task_db_id: int) -> dict:
         task_db_id: GenerationTask 的数据库 ID。
 
     Returns:
-        {"status": "success", "asset_id": int, "video_url": str}
+        {"status": "success", "video_url": str}
     """
     # 每次执行都创建新的事件循环，避免重试时 "Event loop is closed" 错误
     loop = asyncio.new_event_loop()
@@ -63,7 +75,6 @@ def generate_video_task(self, task_db_id: int) -> dict:
 
 async def _run_video_generation(task: VideoGenerationTask, task_db_id: int) -> dict:
     """视频生成异步核心逻辑。"""
-    from app.models.asset import Asset
     from app.models.task import GenerationTask
     from app.repositories.asset import AssetRepository
     from app.repositories.shot import ShotRepository
@@ -108,10 +119,13 @@ async def _run_video_generation(task: VideoGenerationTask, task_db_id: int) -> d
             else:
                 image_start = None
 
-            # 构建视频提示词：优先使用 shot.image_prompt，降级到基础描述
-            prompt = shot.image_prompt or f"shot {shot.shot_code}"
+            # 构建完整的视频提示词（从 shot 各字段拼接，含负面提示词）
+            prompt = build_video_prompt(shot)
 
             logger.info("开始生成视频：shot=%s quality=%s sound=%s", shot.shot_code, quality, sound)
+            logger.info("=" * 60)
+            logger.info("Kling 视频提示词:\n%s", prompt)
+            logger.info("=" * 60)
 
             if image_start:
                 video_task = await evolink_client.image_to_video(
@@ -131,11 +145,14 @@ async def _run_video_generation(task: VideoGenerationTask, task_db_id: int) -> d
 
             logger.info("Evolink 任务已提交：%s，开始轮询…", video_task.id)
 
-            # 轮询直到完成（最多 10 分钟）
+            # 轮询直到完成（最多 10 分钟），自动下载并上传到 OSS
             result = await evolink_client.wait_for_completion(
                 video_task.id,
                 poll_interval=8.0,
                 timeout=600.0,
+                upload_to_oss=True,
+                oss_directory=f"videos/{shot.shot_code}",
+                oss_filename=f"{shot.shot_code}.mp4",
             )
 
             if not result.video_url:
@@ -143,41 +160,21 @@ async def _run_video_generation(task: VideoGenerationTask, task_db_id: int) -> d
 
             logger.info("视频生成完成：%s  url=%s", shot.shot_code, result.video_url)
 
-            # 写入 Asset 记录（先将旧的 video 素材标记为非当前版本）
-            asset_repo = AssetRepository(session)
-            await asset_repo.deprecate_shot_assets(shot.id, "video")
+            # 更新镜头状态和视频 URL（result.video_url 已是 OSS 永久链接）
+            await shot_repo.update(shot, {
+                "status": "review",
+                "video_url": result.video_url,
+            })
 
-            # 查询当前最大版本号
-            existing = await asset_repo.get_by_shot(shot.id, current_only=False)
-            video_versions = [a.version for a in existing if a.asset_type == "video"]
-            next_version = (max(video_versions) + 1) if video_versions else 1
-
-            new_asset = await asset_repo.create(
-                project_id=shot.storyboard.scene.project_id if hasattr(shot, "storyboard") else 0,
-                shot_id=shot.id,
-                asset_code=f"{shot.shot_code}_video_v{next_version}",
-                asset_type="video",
-                file_url=result.video_url,
-                file_format="mp4",
-                duration_sec=result.video_duration,
-                source="generated",
-                generator="kling",
-                version=next_version,
-                is_current=True,
-                tags=[shot.shot_code, "video", quality],
-            )
-
-            # 更新镜头与任务状态
-            await shot_repo.update(shot, {"status": "review"})
+            # 更新任务状态
             await task_repo.update(gen_task, {
                 "status": "success",
                 "progress": 100,
-                "result_asset_id": new_asset.id,
                 "completed_at": datetime.now(timezone.utc),
             })
             await session.commit()
 
-            return {"status": "success", "asset_id": new_asset.id, "video_url": result.video_url}
+            return {"status": "success", "video_url": result.video_url}
 
         except Exception as exc:
             logger.exception("视频生成失败：task_id=%d error=%s", task_db_id, exc)

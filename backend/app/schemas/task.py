@@ -46,7 +46,7 @@ class ImageGenerationRequest(BaseModel):
     """触发图像生成的请求体。"""
     project_id: Optional[int] = Field(None, description="项目ID，用于保存到项目素材库")
     shot_id: Optional[int] = Field(None, description="关联镜头ID，不传则为全局素材")
-    prompt: str = Field(..., min_length=1, max_length=2000, description="正向提示词，描述想要生成的画面")
+    prompt: str = Field(..., min_length=1, description="正向提示词，描述想要生成的画面")
     negative_prompt: Optional[str] = Field(None, max_length=1000, description="负向提示词，描述不想要出现的元素")
     aspect_ratio: str = Field(
         "16:9",

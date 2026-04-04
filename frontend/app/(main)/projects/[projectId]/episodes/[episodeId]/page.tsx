@@ -38,7 +38,6 @@ import {
 
 const sceneStatusLabels: Record<string, string> = {
   draft: '草稿',
-  scored: '已评分',
   in_production: '制作中',
   completed: '完成',
 };
@@ -225,12 +224,12 @@ export default function EpisodeDetailPage({
           <Card className="bg-card border-border">
             <CardContent className="p-4 flex items-center gap-4">
               <div className="h-10 w-10 rounded-lg bg-warning/10 flex items-center justify-center">
-                <Users className="h-5 w-5 text-warning" />
+                <Sparkles className="h-5 w-5 text-warning" />
               </div>
               <div>
-                <p className="text-sm text-muted-foreground">评分</p>
-                <p className="text-xl font-bold text-foreground">
-                  {scene.score_total ?? '-'}
+                <p className="text-sm text-muted-foreground">核心主题</p>
+                <p className="text-sm font-medium text-foreground line-clamp-1">
+                  {scene.theme || scene.synopsis?.slice(0, 30) || '-'}
                 </p>
               </div>
             </CardContent>
@@ -272,7 +271,7 @@ export default function EpisodeDetailPage({
           <TabsContent value="shots" className="space-y-4">
             <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
               {shots.map((shot) => (
-                <ShotCard key={shot.id} shot={shot} formatDuration={formatDuration} />
+                <ShotCard key={shot.id} shot={shot} projectId={projectId} episodeId={episodeId} formatDuration={formatDuration} />
               ))}
             </div>
             {shots.length === 0 && (
@@ -400,16 +399,29 @@ export default function EpisodeDetailPage({
                     </div>
                   )}
                   <div className="space-y-2">
-                    <label className="text-sm font-medium text-foreground">评分明细</label>
-                    <div className="text-sm text-muted-foreground space-y-1">
-                      <p>戏剧张力: {scene.score_dramatic_tension ?? '-'}</p>
-                      <p>视觉化潜力: {scene.score_visual_potential ?? '-'}</p>
-                      <p>情感共鸣: {scene.score_emotional_resonance ?? '-'}</p>
-                      <p>叙事重要性: {scene.score_narrative_importance ?? '-'}</p>
-                      <p>粉丝熟知度: {scene.score_audience_familiarity ?? '-'}</p>
-                      <p className="font-medium text-foreground">总分: {scene.score_total ?? '-'}</p>
-                    </div>
+                    <label className="text-sm font-medium text-foreground">剧情概述</label>
+                    <p className="text-sm text-muted-foreground line-clamp-3">
+                      {scene.synopsis || '暂无'}
+                    </p>
                   </div>
+                  {scene.primary_location && (
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-foreground">主要地点</label>
+                      <p className="text-sm text-muted-foreground">{scene.primary_location}</p>
+                    </div>
+                  )}
+                  {scene.color_palette && (
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-foreground">主色调</label>
+                      <p className="text-sm text-muted-foreground">{scene.color_palette}</p>
+                    </div>
+                  )}
+                  {scene.bgm_direction && (
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-foreground">音乐方向</label>
+                      <p className="text-sm text-muted-foreground">{scene.bgm_direction}</p>
+                    </div>
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -422,73 +434,79 @@ export default function EpisodeDetailPage({
 
 function ShotCard({
   shot,
+  projectId,
+  episodeId,
   formatDuration,
 }: {
   shot: ShotResponse;
+  projectId: string;
+  episodeId: string;
   formatDuration: (seconds: number) => string;
 }) {
   return (
-    <Card className="bg-card border-border hover:border-primary/50 transition-all duration-200 overflow-hidden">
-      {/* Thumbnail */}
-      <div className="relative aspect-video bg-muted">
-        <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-secondary to-muted">
-          <Camera className="h-8 w-8 text-muted-foreground" />
+    <Link href={`/projects/${projectId}/storyboard?scene=${episodeId}&shot=${shot.id}`}>
+      <Card className="bg-card border-border hover:border-primary/50 transition-all duration-200 overflow-hidden cursor-pointer">
+        {/* Thumbnail */}
+        <div className="relative aspect-video bg-muted">
+          <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-secondary to-muted">
+            <Camera className="h-8 w-8 text-muted-foreground" />
+          </div>
+
+          {/* Overlay Info */}
+          <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
+          <div className="absolute bottom-0 left-0 right-0 p-3">
+            <div className="flex items-center justify-between">
+              <Badge className={`text-xs ${shotStatusColors[shot.status] || 'bg-muted'}`}>
+                {shot.status === 'generating' && <Loader2 className="h-3 w-3 mr-1 animate-spin" />}
+                {shotStatusLabels[shot.status] || shot.status}
+              </Badge>
+              <span className="text-xs text-white/80 flex items-center gap-1">
+                <Clock className="h-3 w-3" />
+                {formatDuration(shot.duration_sec)}
+              </span>
+            </div>
+          </div>
+
+          <Badge className="absolute top-2 left-2 bg-black/60 text-white border-0">
+            {shot.shot_code}
+          </Badge>
         </div>
 
-        {/* Overlay Info */}
-        <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
-        <div className="absolute bottom-0 left-0 right-0 p-3">
+        <CardContent className="p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-sm font-medium text-foreground">镜头 {shot.sequence}</span>
+            {shot.camera?.shot_type ? (
+              <>
+                <span className="text-xs text-muted-foreground">|</span>
+                <span className="text-xs text-muted-foreground">{String(shot.camera.shot_type)}</span>
+              </>
+            ) : null}
+          </div>
+          <p className="text-sm text-muted-foreground line-clamp-2 mb-3">
+            {shot.image_prompt || '暂无描述'}
+          </p>
+
+          {shot.dialogue_text && (
+            <div className="bg-secondary/50 rounded-lg p-2 mb-3">
+              <div className="flex items-center gap-1 text-xs text-muted-foreground mb-1">
+                <Volume2 className="h-3 w-3" />
+                {shot.dialogue_character || '台词'}
+              </div>
+              <p className="text-xs text-foreground line-clamp-2">{shot.dialogue_text}</p>
+            </div>
+          )}
+
           <div className="flex items-center justify-between">
-            <Badge className={`text-xs ${shotStatusColors[shot.status] || 'bg-muted'}`}>
-              {shot.status === 'generating' && <Loader2 className="h-3 w-3 mr-1 animate-spin" />}
-              {shotStatusLabels[shot.status] || shot.status}
-            </Badge>
-            <span className="text-xs text-white/80 flex items-center gap-1">
-              <Clock className="h-3 w-3" />
-              {formatDuration(shot.duration_sec)}
+            <span className="text-xs text-muted-foreground">
+              {shot.camera?.movement ? String(shot.camera.movement) : shot.environment?.atmosphere ? String(shot.environment.atmosphere) : ''}
+            </span>
+            <span className="text-xs text-primary flex items-center">
+              查看详情
+              <ChevronRight className="h-3 w-3 ml-0.5" />
             </span>
           </div>
-        </div>
-
-        <Badge className="absolute top-2 left-2 bg-black/60 text-white border-0">
-          {shot.shot_code}
-        </Badge>
-      </div>
-
-      <CardContent className="p-4">
-        <div className="flex items-center gap-2 mb-2">
-          <span className="text-sm font-medium text-foreground">镜头 {shot.sequence}</span>
-          {shot.camera?.shot_type && (
-            <>
-              <span className="text-xs text-muted-foreground">|</span>
-              <span className="text-xs text-muted-foreground">{shot.camera.shot_type}</span>
-            </>
-          )}
-        </div>
-        <p className="text-sm text-muted-foreground line-clamp-2 mb-3">
-          {shot.image_prompt || shot.character_action || '暂无描述'}
-        </p>
-
-        {shot.dialogue_text && (
-          <div className="bg-secondary/50 rounded-lg p-2 mb-3">
-            <div className="flex items-center gap-1 text-xs text-muted-foreground mb-1">
-              <Volume2 className="h-3 w-3" />
-              {shot.dialogue_character || '台词'}
-            </div>
-            <p className="text-xs text-foreground line-clamp-2">{shot.dialogue_text}</p>
-          </div>
-        )}
-
-        <div className="flex items-center justify-between">
-          <span className="text-xs text-muted-foreground">
-            {shot.camera?.movement || shot.environment?.atmosphere || ''}
-          </span>
-          <Button variant="ghost" size="sm" className="h-7 text-primary">
-            编辑
-            <ChevronRight className="h-3 w-3 ml-1" />
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
+        </CardContent>
+      </Card>
+    </Link>
   );
 }

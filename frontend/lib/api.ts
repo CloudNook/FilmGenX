@@ -235,18 +235,27 @@ export interface SceneResponse {
   project_id: number;
   scene_code: string;
   title: string;
+  synopsis: string | null;
+  theme: string | null;
   novel_chapter_start: string | null;
   novel_chapter_end: string | null;
   novel_excerpt: string | null;
+  story_arc: string | null;
+  key_events: Record<string, unknown>[];
+  emotional_arc: string | null;
+  characters: string[];
+  character_focus: string | null;
+  character_ids: number[];
+  primary_location: string | null;
+  location_atmosphere: string | null;
+  visual_highlights: Record<string, unknown>[];
+  color_palette: string | null;
+  bgm_direction: string | null;
+  storyboard_style_notes: string | null;
+  previous_episode_hint: string | null;
+  next_episode_hint: string | null;
   scene_types: string[];
   priority: string;
-  score_dramatic_tension: number | null;
-  score_visual_potential: number | null;
-  score_emotional_resonance: number | null;
-  score_narrative_importance: number | null;
-  score_audience_familiarity: number | null;
-  score_total: number | null;
-  character_ids: number[];
   estimated_duration_sec: number | null;
   status: string;
   created_at: string;
@@ -256,36 +265,26 @@ export interface SceneResponse {
 export interface SceneCreate {
   scene_code: string;
   title: string;
+  synopsis?: string;
+  theme?: string;
   novel_chapter_start?: string;
   novel_chapter_end?: string;
   novel_excerpt?: string;
   scene_types?: string[];
   priority?: string;
-  scores?: {
-    dramatic_tension?: number;
-    visual_potential?: number;
-    emotional_resonance?: number;
-    narrative_importance?: number;
-    audience_familiarity?: number;
-  };
   character_ids?: number[];
   estimated_duration_sec?: number;
 }
 
 export interface SceneUpdate {
   title?: string;
+  synopsis?: string;
+  theme?: string;
   novel_chapter_start?: string;
   novel_chapter_end?: string;
   novel_excerpt?: string;
   scene_types?: string[];
   priority?: string;
-  scores?: {
-    dramatic_tension?: number;
-    visual_potential?: number;
-    emotional_resonance?: number;
-    narrative_importance?: number;
-    audience_familiarity?: number;
-  };
   character_ids?: number[];
   estimated_duration_sec?: number;
   status?: string;
@@ -661,13 +660,8 @@ export interface ShotResponse {
   duration_sec: number;
   camera: Record<string, unknown> | null;
   composition: Record<string, unknown> | null;
-  character_id: number | null;
-  char_version_id: number | null;
-  character_action: string | null;
-  character_expression: string | null;
-  character_emotion_intensity: number | null;
-  character_sfx: Record<string, unknown> | null;
-  location_id: string | null;
+  char_version_ids: number[];
+  characters_config: Record<string, unknown>[] | null;
   environment: Record<string, unknown> | null;
   dialogue_character: string | null;
   dialogue_text: string | null;

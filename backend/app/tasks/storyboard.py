@@ -34,9 +34,42 @@ class CameraConfig(BaseModel):
 
 
 class CompositionConfig(BaseModel):
-    subject_position: str
-    foreground: Optional[str] = None
-    background: Optional[str] = None
+    subject_position: str = Field(description="主体位置，如 center/left_third/right_third")
+    foreground: Optional[str] = Field(None, description="前景元素描述")
+    midground: Optional[str] = Field(None, description="中景元素描述")
+    background: Optional[str] = Field(None, description="背景元素描述")
+    leading_lines: Optional[str] = Field(None, description="引导线方向，如 diagonal_left/converging/horizontal")
+
+
+class EnvironmentConfig(BaseModel):
+    """场景环境配置。"""
+    time_of_day: str = Field(description="时间段：dawn/morning/noon/afternoon/sunset/dusk/night")
+    weather: Optional[str] = Field(None, description="天气：clear/cloudy/rain/storm/snow/fog")
+    lighting: str = Field(description="光照描述，如'暖色调逆光'、'冷色调侧光'")
+    atmosphere: str = Field(description="氛围描述，如'压抑肃杀'、'热烈激昂'、'宁静祥和'")
+
+
+class DialogueDeliverySchema(BaseModel):
+    """台词演绎参数。"""
+    tone: str = Field(description="语气，如'坚定'、'愤怒'、'悲伤'、'调侃'")
+    pace: str = Field(description="语速，如'缓慢'、'正常'、'快速'、'渐快'")
+    pause_positions: Optional[str] = Field(None, description="停顿位置描述，如'第2句后停顿1秒'")
+    emphasis_words: Optional[str] = Field(None, description="重音/强调的词语")
+    emotion_tags: Optional[List[str]] = Field(None, description="情感标签，如['愤怒','决绝']")
+
+
+class SoundDesignSchema(BaseModel):
+    """音效设计。"""
+    ambient: str = Field(description="环境音描述，如'风声、远处爆炸声'")
+    sfx_list: Optional[List[str]] = Field(None, description="具体音效列表，如['火焰燃烧声','金属碰撞声','地面碎裂声']")
+    music: Optional[str] = Field(None, description="背景音乐描述，如'激昂鼓点渐入'、'空灵琴音'")
+
+
+class DependencySchema(BaseModel):
+    """镜头依赖关系。"""
+    type: str = Field(description="依赖类型：character_continuity/prop_continuity/lighting_match/camera_match")
+    depends_on_shot_id: Optional[int] = Field(None, description="依赖的镜头序号（sequence）")
+    dependency_detail: Optional[str] = Field(None, description="依赖详情说明")
 
 
 class EmotionPoint(BaseModel):
@@ -51,20 +84,46 @@ class PacingRatio(BaseModel):
     resolution: int = Field(ge=0, le=100)
 
 
+class CharacterInShotSchema(BaseModel):
+    """镜头中的单个角色配置。"""
+    action: str = Field(description="角色动作描述，如'右手握拳高举，斗气火焰缠绕'")
+    expression: Optional[str] = Field(None, description="角色表情描述，如'怒目圆睁，嘴角紧抿'")
+    emotion_intensity: Optional[int] = Field(None, ge=1, le=10, description="情绪强度 1-10")
+
+
 class ShotSchema(BaseModel):
     sequence: int
     shot_code: str = Field(description="格式：{scene_code}_S001")
     duration_sec: float = Field(ge=0.5, le=30.0)
     camera: CameraConfig
     composition: CompositionConfig
-    character_action: str
-    character_expression: Optional[str] = None
-    character_emotion_intensity: Optional[int] = Field(None, ge=1, le=10)
-    dialogue_text: Optional[str] = None
-    transition_in: str = Field(default="cut", description="cut/fade/dissolve/wipe")
-    transition_out: str = Field(default="cut")
-    image_prompt: str = Field(description="英文图像生成提示词")
-    negative_prompt: Optional[str] = None
+    environment: EnvironmentConfig = Field(description="场景环境配置")
+
+    # 角色配置
+    characters_config: Optional[List[CharacterInShotSchema]] = Field(
+        None, description="镜头中各角色的动作/表情/情绪配置，1-3个角色"
+    )
+
+    # 台词
+    dialogue_character: Optional[str] = Field(None, description="说话角色名")
+    dialogue_text: Optional[str] = Field(None, description="台词内容（中文）")
+    dialogue_delivery: Optional[DialogueDeliverySchema] = Field(None, description="台词演绎参数")
+
+    # 音效
+    sound_design: Optional[SoundDesignSchema] = Field(None, description="音效设计方案")
+
+    # 转场
+    transition_in: str = Field(default="cut", description="入场转场：cut/fade/dissolve/wipe/smash")
+    transition_out: str = Field(default="cut", description="出场转场：cut/fade/dissolve/wipe/smash")
+    transition_notes: Optional[str] = Field(None, description="转场备注说明")
+
+    # 镜头依赖
+    dependencies: Optional[List[DependencySchema]] = Field(None, description="与其他镜头的依赖关系")
+
+    # 生成提示词
+    image_prompt: str = Field(description="英文图像生成提示词，包含 anime style, high quality, dynamic lighting")
+    negative_prompt: Optional[str] = Field(None, description="英文负面提示词")
+    style_preset: Optional[str] = Field(None, description="风格预设，如 cinematic/dramatic/ethereal/intense")
 
 
 class StoryboardSchema(BaseModel):
@@ -163,6 +222,9 @@ async def _run_storyboard_generation(task_db_id: int) -> dict:
                     k: v for k, v in shot_data.items()
                     if v is not None and k in _shot_columns
                 }
+                # 确保 char_version_ids 有默认值
+                if "char_version_ids" not in safe:
+                    safe["char_version_ids"] = []
                 await shot_repo.create(storyboard_id=storyboard.id, **safe)
 
             # 更新总时长
@@ -198,20 +260,48 @@ class StoryboardRequest(BaseModel):
     """传给 LLM 的分镜生成请求，结构化表示所有输入信息。"""
     scene_code: str
     title: str
-    scene_types: List[str]
-    novel_chapter_start: Optional[str]
-    novel_chapter_end: Optional[str]
-    novel_excerpt: Optional[str]
-    shot_count: int
-    style_notes: Optional[str]
+    synopsis: Optional[str] = None
+    story_arc: Optional[str] = None
+    key_events: Optional[list] = None
+    emotional_arc: Optional[str] = None
+    characters: Optional[List[str]] = None
+    primary_location: Optional[str] = None
+    location_atmosphere: Optional[str] = None
+    visual_highlights: Optional[list] = None
+    color_palette: Optional[str] = None
+    scene_types: List[str] = []
+    novel_chapter_start: Optional[str] = None
+    novel_chapter_end: Optional[str] = None
+    novel_excerpt: Optional[str] = None
+    shot_count: int = 6
+    style_notes: Optional[str] = None
 
     def to_prompt(self) -> str:
         lines = [
             f"片段标题：{self.title}",
             f"scene_code：{self.scene_code}",
-            f"类型：{', '.join(self.scene_types)}",
-            f"章节范围：{self.novel_chapter_start or '未知'} — {self.novel_chapter_end or '未知'}",
         ]
+        if self.synopsis:
+            lines.append(f"剧情概述：{self.synopsis}")
+        if self.story_arc:
+            lines.append(f"叙事弧：{self.story_arc}")
+        if self.key_events:
+            events = [f"  {i+1}. {e}" for i, e in enumerate(self.key_events)]
+            lines.append(f"关键事件：\n" + "\n".join(events))
+        if self.emotional_arc:
+            lines.append(f"情绪走势：{self.emotional_arc}")
+        if self.characters:
+            lines.append(f"涉及角色：{', '.join(self.characters)}")
+        if self.primary_location:
+            lines.append(f"主要地点：{self.primary_location}")
+        if self.location_atmosphere:
+            lines.append(f"场景氛围：{self.location_atmosphere}")
+        if self.color_palette:
+            lines.append(f"主色调：{self.color_palette}")
+        if self.scene_types:
+            lines.append(f"类型：{', '.join(self.scene_types)}")
+        if self.novel_chapter_start:
+            lines.append(f"章节范围：{self.novel_chapter_start} — {self.novel_chapter_end or '未知'}")
         if self.novel_excerpt:
             lines.append(f"\n原著摘录：\n{self.novel_excerpt}")
         lines.append(f"\n请生成 {self.shot_count} 个镜头的分镜脚本。")
@@ -224,6 +314,15 @@ def _build_storyboard_request(scene, shot_count: int, style_notes: str) -> Story
     return StoryboardRequest(
         scene_code=scene.scene_code,
         title=scene.title,
+        synopsis=getattr(scene, 'synopsis', None),
+        story_arc=getattr(scene, 'story_arc', None),
+        key_events=getattr(scene, 'key_events', None),
+        emotional_arc=getattr(scene, 'emotional_arc', None),
+        characters=getattr(scene, 'characters', None),
+        primary_location=getattr(scene, 'primary_location', None),
+        location_atmosphere=getattr(scene, 'location_atmosphere', None),
+        visual_highlights=getattr(scene, 'visual_highlights', None),
+        color_palette=getattr(scene, 'color_palette', None),
         scene_types=scene.scene_types or [],
         novel_chapter_start=scene.novel_chapter_start,
         novel_chapter_end=scene.novel_chapter_end,

@@ -271,7 +271,7 @@ function SceneCard({
             <div className="flex items-center gap-4 text-sm text-muted-foreground mb-3">
               <span className="flex items-center gap-1">
                 <Film className="h-3.5 w-3.5" />
-                评分 {scene.score_total ?? '-'}
+                {scene.scene_types[0] || '场景'}
               </span>
               {scene.estimated_duration_sec && (
                 <span className="flex items-center gap-1">

@@ -1,14 +1,14 @@
 import json
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
 
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=False,
-    pool_size=10,
-    max_overflow=20,
+    poolclass=NullPool,  # 禁用连接池，避免 Celery fork 进程问题
     json_serializer=lambda obj: json.dumps(obj, ensure_ascii=False),
 )
 

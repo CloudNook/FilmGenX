@@ -22,8 +22,9 @@ import os
 import uuid
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
+import httpx
 import oss2
 
 from app.core.config import settings
@@ -202,6 +203,53 @@ class OSSClient:
     def exists(self, object_key: str) -> bool:
         """检查 OSS 上的文件是否存在。"""
         return oss2.ObjectIterator(self._get_bucket(), prefix=object_key, max_keys=1).__iter__().__next__() is not None if False else self._get_bucket().object_exists(object_key)
+
+    def download_and_upload(
+        self,
+        url: str,
+        *,
+        directory: Optional[str] = None,
+        filename: Optional[str] = None,
+        unique: bool = True,
+        timeout: float = 60.0,
+    ) -> str:
+        """下载临时 URL 文件并上传到 OSS。
+
+        用于处理 AI 生成服务（如 Kling、Evolink）返回的临时 URL，
+        将文件持久化存储到自己的 CDN。
+
+        Args:
+            url:       临时文件 URL。
+            directory: OSS 目标目录，如 "videos/shots"。
+            filename:  自定义文件名。为空时从 URL 路径推断。
+            unique:    True 时在文件名前加 UUID 前缀，防止同名覆盖。
+            timeout:   下载超时时间（秒），默认 60 秒。
+
+        Returns:
+            OSS 上的永久访问 URL。
+
+        Raises:
+            httpx.HTTPError: 下载失败时抛出。
+        """
+        # 从 URL 推断文件名
+        if not filename:
+            parsed = urlparse(url)
+            path = parsed.path.rstrip("/")
+            filename = path.split("/")[-1] if "/" in path else "downloaded_file"
+
+        # 下载文件
+        with httpx.Client(timeout=timeout) as client:
+            response = client.get(url)
+            response.raise_for_status()
+            data = response.content
+
+        # 上传到 OSS
+        return self.upload_bytes(
+            data,
+            filename=filename,
+            directory=directory,
+            unique=unique,
+        )
 
 
 # 全局单例，直接 import 使用

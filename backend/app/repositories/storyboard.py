@@ -37,3 +37,18 @@ class StoryboardRepository(BaseRepository[Storyboard]):
             )
         )
         return result.scalar_one_or_none()
+
+    async def get_project_id(self, storyboard_id: int) -> Optional[int]:
+        """获取分镜脚本所属项目的ID（通过 scene 关联）。"""
+        from app.models.scene import Scene
+
+        result = await self.session.execute(
+            select(Scene.project_id)
+            .select_from(Storyboard)
+            .join(Scene, Storyboard.scene_id == Scene.id)
+            .where(
+                Storyboard.id == storyboard_id,
+                Storyboard.is_deleted.is_(False),
+            )
+        )
+        return result.scalar_one_or_none()

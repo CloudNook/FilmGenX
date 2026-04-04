@@ -394,8 +394,7 @@ export function ImageUploadDialog({
                   placeholder="描述想要生成的画面..."
                   value={prompt}
                   onChange={(e) => setPrompt(e.target.value)}
-                  rows={3}
-                  className="mt-1.5 resize-none"
+                  className="mt-1.5 h-32 max-h-[400px] resize-y"
                 />
               </div>
 

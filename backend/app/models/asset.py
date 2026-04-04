@@ -47,7 +47,7 @@ class Asset(Base):
         comment="素材类型：image / video / audio / reference"
     )
     file_url: Mapped[str] = mapped_column(
-        String(500),
+        Text,
         nullable=False,
         comment="文件存储路径或URL"
     )
