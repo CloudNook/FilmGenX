@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import type { EpisodeOutline } from '@/lib/api';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -63,10 +63,12 @@ export function OutlineCard({
   const [synopsisOpen, setSynopsisOpen] = useState(true);
   const [styleOpen, setStyleOpen] = useState(false);
 
-  // Sync draft when outline changes externally
-  if (!isEditing && draft !== outline) {
-    setDraft({ ...outline });
-  }
+  // Sync draft when outline changes externally (must use useEffect to avoid render-time setState)
+  useEffect(() => {
+    if (!isEditing) {
+      setDraft({ ...outline });
+    }
+  }, [outline, isEditing]);
 
   const total =
     (isEditing ? draft : outline).scores.dramatic_tension +

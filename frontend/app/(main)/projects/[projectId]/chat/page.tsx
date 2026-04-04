@@ -5,6 +5,11 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { AppLayout } from '@/components/layout';
 import {
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from '@/components/ui/resizable';
+import {
   projectsApi,
   conversationsApi,
   readSSEStream,
@@ -38,32 +43,6 @@ import {
   CheckCircle2,
   Bot,
 } from 'lucide-react';
-
-// ---------------------------------------------------------------------------
-// System Prompt — 专注高光时刻剧本生成
-// ---------------------------------------------------------------------------
-
-const HIGHLIGHT_SYSTEM_PROMPT = `你是 FilmGenX 的编剧总监助手，专注于为网络小说生成高光时刻动画剧本。
-
-你的核心能力：
-1. 分析小说原文，识别最具戏剧张力和视觉表现力的关键场景
-2. 将文字转化为结构化的动画分集剧本大纲
-3. 为每个高光时刻设计分镜风格、运镜方案和情感节奏
-
-工作流程：
-- 与用户讨论小说内容和创作意图
-- 根据讨论生成结构化的剧本大纲（EpisodeOutline）
-- 根据用户反馈迭代优化大纲
-- 用户确认后系统自动创建分集并生成分镜
-
-评分标准（0-10分）：
-- dramatic_tension：戏剧张力，情节转折和冲突强度
-- visual_potential：视觉表现力，适合动画呈现的程度
-- emotional_resonance：情感共鸣，观众代入感
-- narrative_importance：叙事重要性，对整体故事的影响
-- audience_familiarity：观众熟悉度，原作粉丝期待值
-
-请用中文回复，保持专业但友好的语气。`;
 
 // ---------------------------------------------------------------------------
 // Page Component
@@ -203,7 +182,6 @@ export default function ChatPage({
         selectedConvId,
         userContent,
         llmConfig,
-        HIGHLIGHT_SYSTEM_PROMPT,
       );
 
       if (!response.ok) throw new Error(`Chat request failed: ${response.status}`);
@@ -247,7 +225,6 @@ export default function ChatPage({
         projectIdNum,
         selectedConvId,
         llmConfig,
-        HIGHLIGHT_SYSTEM_PROMPT,
       );
 
       if (!response.ok) throw new Error(`Summarize failed: ${response.status}`);
@@ -362,8 +339,9 @@ export default function ChatPage({
       ]}
     >
       <div className="flex h-[calc(100vh-4rem)] w-full min-h-0 overflow-hidden">
-        {/* ===== Left Sidebar - Conversation List ===== */}
-        <div className="w-72 border-r border-border bg-card flex flex-col min-h-0">
+        <ResizablePanelGroup direction="horizontal">
+          {/* ===== Left Sidebar - Conversation List ===== */}
+          <ResizablePanel defaultSize={20} minSize={15} maxSize={40} className="bg-card flex flex-col min-h-0">
           <div className="p-4 shrink-0 border-b border-border">
             <Button
               className="w-full bg-primary text-primary-foreground hover:bg-primary/90"
@@ -436,10 +414,12 @@ export default function ChatPage({
               ))}
             </div>
           </ScrollArea>
-        </div>
+          </ResizablePanel>
 
-        {/* ===== Main Chat Area ===== */}
-        <div className="flex-1 flex flex-col min-h-0 bg-background">
+          <ResizableHandle withHandle />
+
+          {/* ===== Main Chat Area ===== */}
+          <ResizablePanel defaultSize={55} minSize={30} className="flex flex-col min-h-0 bg-background">
           {/* Chat Header with Workflow Stepper */}
           <div className="h-14 shrink-0 border-b border-border px-6 flex items-center justify-between bg-card">
             <div className="flex items-center gap-3">
@@ -708,20 +688,25 @@ export default function ChatPage({
               </p>
             </div>
           </div>
-        </div>
+          </ResizablePanel>
 
-        {/* ===== Right Sidebar - Context Panel ===== */}
-        <ContextPanel
-          conv={selectedConv}
-          llmConfig={llmConfig}
-          onLlmConfigChange={setLlmConfig}
-          isSummarizing={isSummarizing}
-          isStreaming={isStreaming}
-          onSummarize={handleSummarize}
-          onConfirm={handleConfirm}
-          onSaveOutline={handleSaveOutline}
-          projectId={projectId}
-        />
+          <ResizableHandle withHandle />
+
+          {/* ===== Right Sidebar - Context Panel ===== */}
+          <ResizablePanel defaultSize={25} minSize={20} maxSize={50}>
+            <ContextPanel
+              conv={selectedConv}
+              llmConfig={llmConfig}
+              onLlmConfigChange={setLlmConfig}
+              isSummarizing={isSummarizing}
+              isStreaming={isStreaming}
+              onSummarize={handleSummarize}
+              onConfirm={handleConfirm}
+              onSaveOutline={handleSaveOutline}
+              projectId={projectId}
+            />
+          </ResizablePanel>
+        </ResizablePanelGroup>
       </div>
     </AppLayout>
   );

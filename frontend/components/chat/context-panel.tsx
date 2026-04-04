@@ -78,7 +78,7 @@ export function ContextPanel({
   }, [outline, onConfirm]);
 
   return (
-    <div className="w-72 border-l border-border bg-card flex flex-col">
+    <div className="w-full h-full bg-card flex flex-col min-h-0">
       {/* Header */}
       <div className="p-4 border-b border-border">
         <div className="flex items-center justify-between mb-2">
@@ -101,7 +101,7 @@ export function ContextPanel({
         <WorkflowStepper status={status} />
       </div>
 
-      <ScrollArea className="flex-1">
+      <ScrollArea className="flex-1 min-h-0">
         <div className="p-4 space-y-4">
           {/* ========== ACTIVE STATE ========== */}
           {(status === 'active' || !conv) && (

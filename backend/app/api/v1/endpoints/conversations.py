@@ -9,8 +9,12 @@
   - 确认后创建 Scene 并触发分镜 Celery 任务
 """
 
+import json
+import logging
 from datetime import datetime, timezone
 from typing import AsyncGenerator
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
@@ -35,6 +39,36 @@ from app.schemas.conversation import (
 )
 
 router = APIRouter()
+
+# ---------------------------------------------------------------------------
+# 项目专属系统提示词（《斗破苍穹》）
+# ---------------------------------------------------------------------------
+
+HIGHLIGHT_CHAT_SYSTEM_PROMPT = """你是 FilmGenX 的编剧总监助手，专注于为网络小说《斗破苍穹》生成高光时刻动画剧本。
+
+《斗破苍穹》背景：天斗大陆，斗气为尊。主角萧炎天才少年因斗气功法被废而沦为废才，
+后得到戒指中封印的药老（药尘）帮助，重新踏上修炼之路，最终成为一代斗帝。
+核心角色：萧炎、药老（药尘）、萧薰儿、云韵、纳兰嫣然、美杜莎、林动、迦南等。
+
+你的核心能力：
+1. 分析《斗破苍穹》原著，识别最具戏剧张力和视觉表现力的高光场景
+2. 将文字转化为结构化的动画分集剧本大纲
+3. 为每个高光时刻设计分镜风格、运镜方案和情感节奏
+
+工作流程：
+- 与用户讨论小说内容和创作意图
+- 根据讨论生成结构化的剧本大纲（EpisodeOutline）
+- 根据用户反馈迭代优化大纲
+- 用户确认后系统自动创建分集并生成分镜
+
+评分标准（0-10分）：
+- dramatic_tension：戏剧张力，情节转折和冲突强度
+- visual_potential：视觉表现力，适合动画呈现的程度
+- emotional_resonance：情感共鸣，观众代入感
+- narrative_importance：叙事重要性，对整体故事的影响
+- audience_familiarity：观众熟悉度，原作粉丝期待值
+
+请用中文回复，保持专业但友好的语气。"""
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +261,7 @@ async def chat_message(
         async for chunk in call_llm_stream(
             messages=llm_messages,
             llm_config=body.llm_config,
-            system_prompt=body.system_prompt,
+            system_prompt=body.system_prompt or HIGHLIGHT_CHAT_SYSTEM_PROMPT,
         ):
             full_response += chunk
             # SSE 格式：data: <chunk>\n\n
@@ -289,8 +323,13 @@ async def summarize_outline(
         for m in messages
     ]
 
+    print(f"[DEBUG] Summarize: conversation_id={conversation_id}, messages={len(llm_messages)}, "
+          f"system_prompt={'(default)' if not body.system_prompt.strip() else '(custom)'}, "
+          f"model={body.llm_config.get('model')}")
+    for i, m in enumerate(llm_messages):
+        print(f"[DEBUG]   msg[{i}] role={m['role']} content={m['content'][:80]}...")
+
     # 下一版本号
-    import json
     next_version = 1
     if conv.latest_outline:
         next_version = conv.latest_outline.get("version", 0) + 1
@@ -302,27 +341,80 @@ async def summarize_outline(
         summarize_prompt = body.system_prompt.strip() or _get_default_summarize_prompt()
         summarize_prompt += f"\n\n当前是第 {next_version} 次总结。"
 
-        full_response = ""
-        async for chunk in call_llm_stream(
-            messages=llm_messages,
-            llm_config=body.llm_config,
-            system_prompt=summarize_prompt,
-        ):
-            full_response += chunk
-            yield f"data: {chunk}\n\n"
+        print(f"[DEBUG] Summarize prompt (first 200 chars): {summarize_prompt[:200]}")
 
-        # 解析 <outline>...</outline> 中的 JSON
+        # Gemini 要求最后一条消息必须是 user 角色，否则返回空响应
+        messages_for_summary = llm_messages.copy()
+        if not messages_for_summary or messages_for_summary[-1]["role"] != "user":
+            messages_for_summary.append({"role": "user", "content": "请根据以上对话内容生成剧本大纲。"})
+
+        full_response = ""
+        try:
+            async for chunk in call_llm_stream(
+                messages=messages_for_summary,
+                llm_config=body.llm_config,
+                system_prompt=summarize_prompt,
+            ):
+                full_response += chunk
+                yield f"data: {chunk}\n\n"
+        except Exception as e:
+            logger.error("LLM stream error: %s", e)
+            yield f"data: [ERROR] LLM 调用失败: {e}\n\n"
+            return
+
+        # 解析 LLM 返回中的 JSON（支持多种格式）
         import re
+
+        logger.info("LLM summarize raw response:\n%s", full_response)
+
+        outline_json = None
+
+        # 1. 尝试 <outline>...</outline> 标签
         match = re.search(r"<outline>(.*?)</outline>", full_response, re.DOTALL)
-        if not match:
-            # 尝试直接解析整个响应为 JSON
+        if match:
+            try:
+                outline_json = json.loads(match.group(1))
+            except json.JSONDecodeError:
+                pass
+
+        # 2. 尝试 ```json ... ``` 代码块
+        if outline_json is None:
+            match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", full_response, re.DOTALL)
+            if match:
+                try:
+                    outline_json = json.loads(match.group(1))
+                except json.JSONDecodeError:
+                    pass
+
+        # 3. 尝试提取第一个完整的 { ... } 对象
+        if outline_json is None:
+            brace_start = full_response.find("{")
+            if brace_start != -1:
+                # 从第一个 { 开始，找到匹配的 }
+                depth = 0
+                for i in range(brace_start, len(full_response)):
+                    if full_response[i] == "{":
+                        depth += 1
+                    elif full_response[i] == "}":
+                        depth -= 1
+                        if depth == 0:
+                            try:
+                                outline_json = json.loads(full_response[brace_start : i + 1])
+                            except json.JSONDecodeError:
+                                pass
+                            break
+
+        # 4. 直接尝试解析整个响应
+        if outline_json is None:
             try:
                 outline_json = json.loads(full_response)
             except json.JSONDecodeError:
-                yield f"data: [ERROR] 无法解析剧本大纲 JSON\n\n"
-                return
-        else:
-            outline_json = json.loads(match.group(1))
+                pass
+
+        if outline_json is None:
+            logger.error(f"Failed to parse outline JSON. Raw response: {full_response[:500]}")
+            yield "data: [ERROR] 无法解析剧本大纲 JSON，请重试\n\n"
+            return
 
         # 更新 version
         outline_json["version"] = next_version
@@ -365,9 +457,9 @@ def _get_default_summarize_prompt() -> str:
 
 输出格式：
 1. 先用1-2句话说明这次相比上一版的主要变化（若是第一版则跳过）
-2. 输出 <outline> 标签包裹的 JSON，格式如下：
+2. 输出一个 JSON 对象，用 ```json 和 ``` 包裹，格式如下：
 
-<outline>
+```json
 {
   "title": "本集标题",
   "episode_code": "项目前缀_EP序号",
@@ -375,7 +467,7 @@ def _get_default_summarize_prompt() -> str:
   "theme": "一句话核心主题",
   "novel_chapter_start": "起始章节",
   "novel_chapter_end": "结束章节",
-  "novel_excerpt": "关键原著摘录，1-3段，用\\\\n\\\\n分隔",
+  "novel_excerpt": "关键原著摘录，1-3段，用\\n\\n分隔",
   "scene_types": ["emotional_peak", "character_introduction"],
   "priority": "S",
   "estimated_duration_sec": 120,
@@ -391,7 +483,7 @@ def _get_default_summarize_prompt() -> str:
   "storyboard_shot_count": 10,
   "version": 2
 }
-</outline>
+```
 
 注意：
 - version 会自动填充，无需在 JSON 中指定

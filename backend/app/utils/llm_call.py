@@ -70,15 +70,24 @@ async def call_llm_stream(
 
     # 流式调用
     try:
+        print(f"[DEBUG] Gemini call: model={model_name}, contents={len(contents)} msgs, "
+              f"system_prompt={'yes' if system_prompt else 'no'}, temp={temperature}")
+
         response = await client.aio.models.generate_content_stream(
             model=model_name,
             contents=contents,
             config=types.GenerateContentConfig(**config_kwargs),
         )
 
+        chunk_count = 0
         async for chunk in response:
+            chunk_count += 1
             if chunk.text:
+                print(f"[DEBUG] Gemini chunk #{chunk_count}: {chunk.text[:60]}...")
                 yield chunk.text
+            else:
+                print(f"[DEBUG] Gemini chunk #{chunk_count}: NO TEXT, candidates={getattr(chunk, 'candidates', None)}")
+        print(f"[DEBUG] Gemini stream done, total chunks={chunk_count}")
     except Exception as e:
         logger.error(f"Gemini API error: {e}")
         raise
