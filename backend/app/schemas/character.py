@@ -126,7 +126,6 @@ class CharacterVersionBrief(BaseResponse):
 
 class CharacterCreate(BaseModel):
     """创建角色请求体。"""
-    char_code: str = Field(..., max_length=30, description="角色业务ID，如 CHAR_XIAO_YAN")
     name: str = Field(..., max_length=50, description="角色名称")
     name_aliases: List[str] = Field(default_factory=list, description="别名列表")
     consistent_features: Optional[Dict[str, Any]] = Field(None, description="跨版本固定特征")

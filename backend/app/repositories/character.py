@@ -31,13 +31,13 @@ class CharacterRepository(BaseRepository[Character]):
             page_size=page_size,
         )
 
-    async def get_by_code(self, char_code: str) -> Optional[Character]:
-        """按业务ID查询。"""
+    async def get_by_code(self, char_code: str, *, include_deleted: bool = False) -> Optional[Character]:
+        """按业务ID查询。include_deleted=True 时也查软删除记录（用于唯一性校验）。"""
+        filters = [Character.char_code == char_code]
+        if not include_deleted:
+            filters.append(Character.is_deleted.is_(False))
         result = await self.session.execute(
-            select(Character).where(
-                Character.char_code == char_code,
-                Character.is_deleted.is_(False),
-            )
+            select(Character).where(*filters)
         )
         return result.scalar_one_or_none()
 

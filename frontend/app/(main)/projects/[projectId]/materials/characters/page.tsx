@@ -693,7 +693,6 @@ export default function CharactersPage({
   const [searchQuery, setSearchQuery] = useState('');
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [newCharName, setNewCharName] = useState('');
-  const [newCharCode, setNewCharCode] = useState('');
   const [newCharDesc, setNewCharDesc] = useState('');
   const [creating, setCreating] = useState(false);
 
@@ -728,11 +727,10 @@ export default function CharactersPage({
   }, [loadCharDetail]);
 
   const handleCreateCharacter = useCallback(async () => {
-    if (!newCharName.trim() || !newCharCode.trim()) return;
+    if (!newCharName.trim()) return;
     setCreating(true);
     try {
       const char = await charactersApi.create(projectIdNum, {
-        char_code: newCharCode.trim(),
         name: newCharName.trim(),
         role_description: newCharDesc.trim() || undefined,
       });
@@ -740,7 +738,6 @@ export default function CharactersPage({
       setSelectedCharId(char.id);
       setIsCreateDialogOpen(false);
       setNewCharName('');
-      setNewCharCode('');
       setNewCharDesc('');
       toast.success('角色创建成功');
     } catch (err) {
@@ -748,7 +745,7 @@ export default function CharactersPage({
     } finally {
       setCreating(false);
     }
-  }, [projectIdNum, newCharName, newCharCode, newCharDesc]);
+  }, [projectIdNum, newCharName, newCharDesc]);
 
   const handleDeleteCharacter = useCallback(async (charId: number) => {
     if (!confirm('确定要删除这个角色吗？')) return;
@@ -829,15 +826,6 @@ export default function CharactersPage({
                     />
                   </div>
                   <div className="space-y-2">
-                    <label className="text-sm font-medium">角色编号 *</label>
-                    <Input
-                      placeholder="如 CHAR_XIAO_YAN"
-                      className="bg-secondary border-border"
-                      value={newCharCode}
-                      onChange={(e) => setNewCharCode(e.target.value)}
-                    />
-                  </div>
-                  <div className="space-y-2">
                     <label className="text-sm font-medium">角色描述</label>
                     <Textarea
                       placeholder="描述角色的背景、身份等信息..."
@@ -855,7 +843,7 @@ export default function CharactersPage({
                   <Button
                     className="bg-primary text-primary-foreground hover:bg-primary/90"
                     onClick={handleCreateCharacter}
-                    disabled={!newCharName.trim() || !newCharCode.trim() || creating}
+                    disabled={!newCharName.trim() || creating}
                   >
                     {creating ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
                     创建角色

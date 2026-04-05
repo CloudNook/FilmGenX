@@ -559,7 +559,7 @@ export const charactersApi = {
     );
   },
 
-  create(projectId: number, data: { char_code: string; name: string; [key: string]: unknown }) {
+  create(projectId: number, data: { name: string; [key: string]: unknown }) {
     return request<CharacterResponse>(
       `/projects/${projectId}/characters`,
       { method: 'POST', body: data },

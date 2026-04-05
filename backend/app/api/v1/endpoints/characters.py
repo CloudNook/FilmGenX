@@ -53,11 +53,18 @@ async def create_character(
     db: AsyncSession = Depends(get_db),
     user_id: int = Depends(get_current_user_id),
 ):
+    import random
+    import string
     await _require_project(project_id, user_id, db)
     repo = CharacterRepository(db)
-    if await repo.get_by_code(body.char_code):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"char_code '{body.char_code}' 已存在")
-    character = await repo.create(project_id=project_id, **body.model_dump())
+
+    # 自动生成 6 位随机 char_code
+    while True:
+        char_code = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
+        if not await repo.get_by_code(char_code, include_deleted=True):
+            break
+
+    character = await repo.create(project_id=project_id, char_code=char_code, **body.model_dump())
     await db.commit()
     return character
 
