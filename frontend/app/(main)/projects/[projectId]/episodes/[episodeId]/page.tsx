@@ -1,6 +1,6 @@
 'use client';
 
-import { use, useEffect, useState } from 'react';
+import { use, useEffect, useState, type ComponentType, type ReactNode } from 'react';
 import Link from 'next/link';
 import { AppLayout } from '@/components/layout';
 import {
@@ -21,7 +21,6 @@ import { Progress } from '@/components/ui/progress';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
-  Play,
   Edit,
   Clock,
   Film,
@@ -34,10 +33,12 @@ import {
   Settings,
   CheckCircle2,
   Loader2,
+  MapPin,
 } from 'lucide-react';
 
 const sceneStatusLabels: Record<string, string> = {
   draft: '草稿',
+  scored: '已评分',
   in_production: '制作中',
   completed: '完成',
 };
@@ -65,6 +66,33 @@ const shotStatusColors: Record<string, string> = {
   rejected: 'bg-destructive/20 text-destructive',
 };
 
+const sceneTypeLabels: Record<string, string> = {
+  battle: '战斗',
+  climax: '高潮',
+  visual_spectacle: '视觉奇观',
+  dialogue: '对白',
+  emotional: '情感',
+  transition: '转场',
+};
+
+function formatSceneTypeLabel(type: string) {
+  return sceneTypeLabels[type] || type.replace(/_/g, ' ');
+}
+
+function formatChapterRange(start: string | null, end: string | null) {
+  if (start && end) return `${start} - ${end}`;
+  return start || end || '';
+}
+
+function getRecordText(
+  record: Record<string, unknown> | null,
+  key: string,
+): string | null {
+  if (!record) return null;
+  const value = record[key];
+  return typeof value === 'string' && value.trim() ? value : null;
+}
+
 export default function EpisodeDetailPage({
   params,
 }: {
@@ -86,22 +114,22 @@ export default function EpisodeDetailPage({
     Promise.all([
       projectsApi.get(projectIdNum).catch(() => null),
       scenesApi.get(projectIdNum, episodeIdNum).catch(() => null),
-      charactersApi.list(projectIdNum).then(r => r.items).catch(() => []),
+      charactersApi.list(projectIdNum).then((r) => r.items).catch(() => []),
     ]).then(async ([p, s, chars]) => {
       setProject(p);
       setScene(s);
       setCharacters(chars);
 
-      // Load storyboard + shots if scene exists
       if (s) {
         try {
-          const sb = await storyboardsApi.get(s.id);
-          const shotList = await shotsApi.list(sb.id);
+          const storyboard = await storyboardsApi.get(s.id);
+          const shotList = await shotsApi.list(storyboard.id);
           setShots(shotList);
         } catch {
-          // no storyboard yet
+          // storyboard not created yet
         }
       }
+
       setLoading(false);
     });
   }, [projectIdNum, episodeIdNum]);
@@ -109,7 +137,7 @@ export default function EpisodeDetailPage({
   if (loading) {
     return (
       <AppLayout projectId={projectId}>
-        <div className="flex items-center justify-center h-full">
+        <div className="flex h-full items-center justify-center">
           <Loader2 className="h-8 w-8 animate-spin text-primary" />
         </div>
       </AppLayout>
@@ -119,15 +147,18 @@ export default function EpisodeDetailPage({
   if (!project || !scene) {
     return (
       <AppLayout projectId={projectId}>
-        <div className="flex items-center justify-center h-full">
+        <div className="flex h-full items-center justify-center">
           <p className="text-muted-foreground">片段不存在</p>
         </div>
       </AppLayout>
     );
   }
 
-  const completedShots = shots.filter(s => s.status === 'approved').length;
+  const completedShots = shots.filter((shot) => shot.status === 'approved').length;
+  const generatingShots = shots.filter((shot) => shot.status === 'generating').length;
+  const reviewShots = shots.filter((shot) => shot.status === 'review').length;
   const progress = shots.length > 0 ? Math.round((completedShots / shots.length) * 100) : 0;
+  const chapterRange = formatChapterRange(scene.novel_chapter_start, scene.novel_chapter_end);
 
   const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -135,9 +166,10 @@ export default function EpisodeDetailPage({
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Characters in this scene
   const sceneCharIds = new Set(scene.character_ids);
-  const episodeCharacters = characters.filter(c => sceneCharIds.has(c.id));
+  const linkedCharacters = characters.filter((character) => sceneCharIds.has(character.id));
+  const linkedCharacterNames = new Set(linkedCharacters.map((character) => character.name));
+  const plainCharacterNames = scene.characters.filter((name) => !linkedCharacterNames.has(name));
 
   return (
     <AppLayout
@@ -149,286 +181,477 @@ export default function EpisodeDetailPage({
         { label: scene.title },
       ]}
     >
-      <div className="p-6 space-y-6">
-        {/* Header */}
-        <div className="flex items-start justify-between">
-          <div className="space-y-2">
-            <div className="flex items-center gap-3">
-              <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
-                <span className="text-xl font-bold text-primary">
-                  {scene.scene_code.replace(/^[A-Z]+_/, '')}
-                </span>
-              </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <h1 className="text-2xl font-bold text-foreground">{scene.title}</h1>
-                  <Badge className={sceneStatusColors[scene.status] || 'bg-muted'}>
+      <div className="space-y-6 p-6">
+        <section className="relative overflow-hidden rounded-[28px] border border-border bg-gradient-to-br from-primary/10 via-background to-secondary/30 p-6 sm:p-7">
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(255,255,255,0.2),transparent_30%),radial-gradient(circle_at_bottom_left,rgba(59,130,246,0.12),transparent_35%)]" />
+          <div className="relative space-y-6">
+            <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+              <div className="min-w-0 space-y-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant="outline" className="border-border/80 bg-background/70 font-mono text-[11px] tracking-[0.18em]">
+                    {scene.scene_code}
+                  </Badge>
+                  <Badge className={sceneStatusColors[scene.status] || 'bg-muted text-muted-foreground'}>
                     {sceneStatusLabels[scene.status] || scene.status}
                   </Badge>
-                  <Badge variant="outline" className="border-border">
+                  <Badge variant="outline" className="border-border/80 bg-background/70">
                     优先级 {scene.priority}
                   </Badge>
                 </div>
-                <p className="text-muted-foreground">
-                  {scene.novel_chapter_start && scene.novel_chapter_end
-                    ? `第 ${scene.novel_chapter_start} - ${scene.novel_chapter_end} 章`
-                    : ''}
-                </p>
-              </div>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button variant="outline" className="border-border">
-              <Edit className="h-4 w-4 mr-2" />
-              编辑信息
-            </Button>
-            <Link href={`/projects/${projectId}/storyboard?scene=${episodeId}`}>
-              <Button className="bg-primary text-primary-foreground hover:bg-primary/90">
-                <Sparkles className="h-4 w-4 mr-2" />
-                分镜工作台
-              </Button>
-            </Link>
-          </div>
-        </div>
 
-        {/* Stats */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <Card className="bg-card border-border">
-            <CardContent className="p-4 flex items-center gap-4">
-              <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center">
-                <Film className="h-5 w-5 text-primary" />
-              </div>
-              <div>
-                <p className="text-sm text-muted-foreground">镜头数</p>
-                <p className="text-xl font-bold text-foreground">
-                  {completedShots}/{shots.length}
-                </p>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card className="bg-card border-border">
-            <CardContent className="p-4 flex items-center gap-4">
-              <div className="h-10 w-10 rounded-lg bg-info/10 flex items-center justify-center">
-                <Clock className="h-5 w-5 text-info" />
-              </div>
-              <div>
-                <p className="text-sm text-muted-foreground">预估时长</p>
-                <p className="text-xl font-bold text-foreground">
-                  {scene.estimated_duration_sec ? formatDuration(scene.estimated_duration_sec) : '--:--'}
-                </p>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card className="bg-card border-border">
-            <CardContent className="p-4 flex items-center gap-4">
-              <div className="h-10 w-10 rounded-lg bg-warning/10 flex items-center justify-center">
-                <Sparkles className="h-5 w-5 text-warning" />
-              </div>
-              <div>
-                <p className="text-sm text-muted-foreground">核心主题</p>
-                <p className="text-sm font-medium text-foreground line-clamp-1">
-                  {scene.theme || scene.synopsis?.slice(0, 30) || '-'}
-                </p>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card className="bg-card border-border">
-            <CardContent className="p-4">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm text-muted-foreground">完成进度</span>
-                <span className="text-sm font-medium text-foreground">{progress}%</span>
-              </div>
-              <Progress value={progress} className="h-2" />
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Tabs */}
-        <Tabs defaultValue="shots" className="space-y-4">
-          <TabsList className="bg-card border border-border">
-            <TabsTrigger value="shots" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
-              <Film className="h-4 w-4 mr-2" />
-              镜头列表 ({shots.length})
-            </TabsTrigger>
-            <TabsTrigger value="script" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
-              <FileText className="h-4 w-4 mr-2" />
-              原著摘录
-            </TabsTrigger>
-            <TabsTrigger value="characters" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
-              <Users className="h-4 w-4 mr-2" />
-              角色 ({episodeCharacters.length})
-            </TabsTrigger>
-            <TabsTrigger value="settings" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
-              <Settings className="h-4 w-4 mr-2" />
-              设置
-            </TabsTrigger>
-          </TabsList>
-
-          {/* Shots Tab */}
-          <TabsContent value="shots" className="space-y-4">
-            <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
-              {shots.map((shot) => (
-                <ShotCard key={shot.id} shot={shot} projectId={projectId} episodeId={episodeId} formatDuration={formatDuration} />
-              ))}
-            </div>
-            {shots.length === 0 && (
-              <Card className="bg-card border-border">
-                <CardContent className="py-12 text-center">
-                  <Film className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
-                  <h3 className="text-lg font-semibold text-foreground mb-2">暂无镜头</h3>
-                  <p className="text-muted-foreground mb-4">
-                    前往分镜工作台创建第一个镜头
+                <div className="space-y-3">
+                  <h1 className="text-3xl font-semibold tracking-tight text-foreground sm:text-4xl">
+                    {scene.title}
+                  </h1>
+                  <p className="max-w-4xl text-sm leading-7 text-muted-foreground sm:text-base">
+                    {scene.synopsis || '暂无剧情概述'}
                   </p>
-                  <Link href={`/projects/${projectId}/storyboard?scene=${episodeId}`}>
-                    <Button className="bg-primary text-primary-foreground hover:bg-primary/90">
-                      <Sparkles className="h-4 w-4 mr-2" />
-                      打开分镜工作台
-                    </Button>
-                  </Link>
-                </CardContent>
-              </Card>
-            )}
-          </TabsContent>
+                </div>
 
-          {/* Script / Novel Excerpt Tab */}
-          <TabsContent value="script">
-            <Card className="bg-card border-border">
-              <CardHeader>
-                <CardTitle className="flex items-center justify-between">
-                  <span>原著摘录</span>
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                {scene.novel_excerpt ? (
-                  <div className="prose prose-invert max-w-none">
-                    <p className="text-foreground whitespace-pre-wrap leading-relaxed">
-                      {scene.novel_excerpt}
-                    </p>
+                <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-muted-foreground">
+                  {chapterRange && (
+                    <span className="flex items-center gap-1.5">
+                      <Film className="h-4 w-4" />
+                      {chapterRange}
+                    </span>
+                  )}
+                  {scene.estimated_duration_sec && (
+                    <span className="flex items-center gap-1.5">
+                      <Clock className="h-4 w-4" />
+                      预估 {formatDuration(scene.estimated_duration_sec)}
+                    </span>
+                  )}
+                  {scene.primary_location && (
+                    <span className="flex items-center gap-1.5">
+                      <MapPin className="h-4 w-4" />
+                      {scene.primary_location}
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  {scene.theme && (
+                    <Badge className="bg-primary/15 text-primary hover:bg-primary/15">
+                      主题: {scene.theme}
+                    </Badge>
+                  )}
+                  {scene.scene_types.map((type) => (
+                    <Badge key={type} variant="outline" className="border-border/70 bg-background/60">
+                      {formatSceneTypeLabel(type)}
+                    </Badge>
+                  ))}
+                  {scene.characters.slice(0, 5).map((character) => (
+                    <Badge key={character} className="bg-secondary/80 text-secondary-foreground hover:bg-secondary/80">
+                      {character}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex shrink-0 flex-col gap-2 sm:flex-row lg:flex-col">
+                <Button variant="outline" className="border-border/80 bg-background/70">
+                  <Edit className="mr-2 h-4 w-4" />
+                  编辑信息
+                </Button>
+                <Link href={`/projects/${projectId}/storyboard?scene=${episodeId}`}>
+                  <Button className="w-full bg-primary text-primary-foreground hover:bg-primary/90 lg:w-auto">
+                    <Sparkles className="mr-2 h-4 w-4" />
+                    分镜工作台
+                  </Button>
+                </Link>
+              </div>
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              <OverviewMetric
+                icon={Film}
+                label="镜头完成"
+                value={`${completedShots}/${shots.length || 0}`}
+                hint={shots.length > 0 ? '已通过镜头数' : '尚未生成分镜'}
+                tone="primary"
+              />
+              <OverviewMetric
+                icon={Sparkles}
+                label="制作进度"
+                value={`${progress}%`}
+                hint={generatingShots > 0 ? `${generatingShots} 个镜头生成中` : '当前无生成任务'}
+                tone="warning"
+              />
+              <OverviewMetric
+                icon={Users}
+                label="角色规模"
+                value={`${scene.characters.length || linkedCharacters.length}`}
+                hint={scene.character_focus || '人物冲突与成长信息待补充'}
+                tone="info"
+              />
+              <OverviewMetric
+                icon={CheckCircle2}
+                label="审核状态"
+                value={`${reviewShots}`}
+                hint={reviewShots > 0 ? '镜头待审核确认' : '暂无待审核镜头'}
+                tone="success"
+              />
+            </div>
+
+            <div className="rounded-2xl border border-border/70 bg-background/70 p-4">
+              <div className="mb-2 flex items-center justify-between text-sm">
+                <span className="text-muted-foreground">分镜完成度</span>
+                <span className="font-medium text-foreground">{progress}%</span>
+              </div>
+              <Progress value={progress} className="h-2.5" />
+            </div>
+          </div>
+        </section>
+
+        <div className="grid gap-6 xl:grid-cols-[minmax(0,1.55fr)_360px]">
+          <div className="min-w-0">
+            <Tabs defaultValue="shots" className="space-y-5">
+              <TabsList className="h-auto flex-wrap justify-start gap-2 rounded-2xl border border-border bg-card p-1">
+                <TabsTrigger value="shots" className="rounded-xl data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
+                  <Film className="mr-2 h-4 w-4" />
+                  镜头列表 ({shots.length})
+                </TabsTrigger>
+                <TabsTrigger value="script" className="rounded-xl data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
+                  <FileText className="mr-2 h-4 w-4" />
+                  剧情文本
+                </TabsTrigger>
+                <TabsTrigger value="characters" className="rounded-xl data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
+                  <Users className="mr-2 h-4 w-4" />
+                  角色 ({linkedCharacters.length + plainCharacterNames.length})
+                </TabsTrigger>
+                <TabsTrigger value="settings" className="rounded-xl data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
+                  <Settings className="mr-2 h-4 w-4" />
+                  制作设定
+                </TabsTrigger>
+              </TabsList>
+
+              <TabsContent value="shots" className="space-y-4">
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  <MiniStat label="总镜头数" value={String(shots.length)} />
+                  <MiniStat label="已通过" value={String(completedShots)} />
+                  <MiniStat label="生成中" value={String(generatingShots)} />
+                  <MiniStat
+                    label="总时长"
+                    value={formatDuration(shots.reduce((sum, shot) => sum + shot.duration_sec, 0))}
+                  />
+                </div>
+
+                {shots.length > 0 ? (
+                  <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 2xl:grid-cols-3">
+                    {shots.map((shot) => (
+                      <ShotCard
+                        key={shot.id}
+                        shot={shot}
+                        projectId={projectId}
+                        episodeId={episodeId}
+                        formatDuration={formatDuration}
+                      />
+                    ))}
                   </div>
                 ) : (
-                  <p className="text-muted-foreground">暂无原著摘录</p>
+                  <Card className="border-border bg-card">
+                    <CardContent className="py-14 text-center">
+                      <Film className="mx-auto mb-4 h-12 w-12 text-muted-foreground/70" />
+                      <h3 className="mb-2 text-lg font-semibold text-foreground">暂无镜头</h3>
+                      <p className="mb-5 text-muted-foreground">
+                        当前分集还没有生成分镜，前往分镜工作台开始拆镜。
+                      </p>
+                      <Link href={`/projects/${projectId}/storyboard?scene=${episodeId}`}>
+                        <Button className="bg-primary text-primary-foreground hover:bg-primary/90">
+                          <Sparkles className="mr-2 h-4 w-4" />
+                          打开分镜工作台
+                        </Button>
+                      </Link>
+                    </CardContent>
+                  </Card>
+                )}
+              </TabsContent>
+
+              <TabsContent value="script" className="space-y-4">
+                <div className="grid gap-4 lg:grid-cols-[minmax(0,1.2fr)_320px]">
+                  <Card className="border-border bg-card">
+                    <CardHeader>
+                      <CardTitle>原著摘录</CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      {chapterRange && (
+                        <div className="flex flex-wrap gap-2 text-sm text-muted-foreground">
+                          <Badge variant="outline" className="border-border">{chapterRange}</Badge>
+                        </div>
+                      )}
+                      {scene.novel_excerpt ? (
+                        <p className="whitespace-pre-wrap text-sm leading-7 text-foreground">
+                          {scene.novel_excerpt}
+                        </p>
+                      ) : (
+                        <p className="text-sm text-muted-foreground">暂无原著摘录</p>
+                      )}
+                    </CardContent>
+                  </Card>
+
+                  <Card className="border-border bg-card">
+                    <CardHeader>
+                      <CardTitle>剧情摘要</CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-4 text-sm leading-7">
+                      <InfoLine label="核心主题" value={scene.theme || '暂无'} />
+                      <InfoLine label="剧情弧线" value={scene.story_arc || '暂无'} />
+                      <InfoLine label="情绪曲线" value={scene.emotional_arc || '暂无'} />
+                      <InfoLine label="角色焦点" value={scene.character_focus || '暂无'} />
+                    </CardContent>
+                  </Card>
+                </div>
+              </TabsContent>
+
+              <TabsContent value="characters" className="space-y-4">
+                {linkedCharacters.length > 0 && (
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                    {linkedCharacters.map((character) => (
+                      <Card key={character.id} className="border-border bg-card">
+                        <CardContent className="p-5">
+                          <div className="flex items-start gap-4">
+                            <Avatar className="h-14 w-14 border border-border/70">
+                              <AvatarFallback className="bg-primary/10 text-lg text-primary">
+                                {character.name.slice(0, 1)}
+                              </AvatarFallback>
+                            </Avatar>
+                            <div className="min-w-0 flex-1 space-y-2">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <h3 className="font-semibold text-foreground">{character.name}</h3>
+                                <Badge variant="outline" className="border-border text-xs">
+                                  {character.char_code}
+                                </Badge>
+                              </div>
+                              <p className="text-sm leading-6 text-muted-foreground">
+                                {character.role_description || '暂无角色描述'}
+                              </p>
+                            </div>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    ))}
+                  </div>
+                )}
+
+                {plainCharacterNames.length > 0 && (
+                  <Card className="border-border bg-card">
+                    <CardHeader>
+                      <CardTitle>待关联角色</CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-3">
+                      <p className="text-sm text-muted-foreground">
+                        这些角色已经出现在分集设定里，但还没有和素材库角色建立关联。
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        {plainCharacterNames.map((name) => (
+                          <Badge key={name} className="bg-secondary text-secondary-foreground">
+                            {name}
+                          </Badge>
+                        ))}
+                      </div>
+                    </CardContent>
+                  </Card>
+                )}
+
+                {linkedCharacters.length === 0 && plainCharacterNames.length === 0 && (
+                  <Card className="border-border bg-card">
+                    <CardContent className="py-14 text-center">
+                      <Users className="mx-auto mb-4 h-12 w-12 text-muted-foreground/70" />
+                      <h3 className="mb-2 text-lg font-semibold text-foreground">暂无角色信息</h3>
+                      <p className="text-muted-foreground">
+                        为分集补充角色后，这里会展示角色卡和角色关联情况。
+                      </p>
+                    </CardContent>
+                  </Card>
+                )}
+              </TabsContent>
+
+              <TabsContent value="settings" className="space-y-4">
+                <div className="grid gap-4 md:grid-cols-2">
+                  <DetailPanel title="基础信息">
+                    <InfoLine label="分集编号" value={scene.scene_code} />
+                    <InfoLine label="状态" value={sceneStatusLabels[scene.status] || scene.status} />
+                    <InfoLine label="优先级" value={scene.priority} />
+                    <InfoLine
+                      label="场景类型"
+                      value={scene.scene_types.map(formatSceneTypeLabel).join(' / ') || '暂无'}
+                    />
+                  </DetailPanel>
+
+                  <DetailPanel title="空间与氛围">
+                    <InfoLine label="主要地点" value={scene.primary_location || '暂无'} />
+                    <InfoLine label="环境气质" value={scene.location_atmosphere || '暂无'} />
+                    <InfoLine label="色彩方向" value={scene.color_palette || '暂无'} />
+                    <InfoLine label="音乐方向" value={scene.bgm_direction || '暂无'} />
+                  </DetailPanel>
+
+                  <DetailPanel title="叙事衔接">
+                    <InfoLine label="上集承接" value={scene.previous_episode_hint || '暂无'} />
+                    <InfoLine label="下集铺垫" value={scene.next_episode_hint || '暂无'} />
+                  </DetailPanel>
+
+                  <DetailPanel title="分镜备注">
+                    <p className="text-sm leading-7 text-muted-foreground">
+                      {scene.storyboard_style_notes || '暂无分镜风格备注'}
+                    </p>
+                  </DetailPanel>
+                </div>
+              </TabsContent>
+            </Tabs>
+          </div>
+
+          <aside className="space-y-4">
+            <Card className="border-border bg-card">
+              <CardHeader>
+                <CardTitle>本集速览</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <InfoLine label="核心主题" value={scene.theme || '暂无'} />
+                <InfoLine label="剧情节奏" value={scene.story_arc || '暂无'} />
+                <InfoLine label="情绪曲线" value={scene.emotional_arc || '暂无'} />
+                <InfoLine label="角色焦点" value={scene.character_focus || '暂无'} />
+                <InfoLine label="场景氛围" value={scene.location_atmosphere || '暂无'} />
+              </CardContent>
+            </Card>
+
+            <Card className="border-border bg-card">
+              <CardHeader>
+                <CardTitle>关键事件</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {scene.key_events.length > 0 ? (
+                  scene.key_events.map((event) => (
+                    <div key={`${event.order}-${event.description}`} className="rounded-2xl border border-border/70 bg-muted/30 p-3">
+                      <div className="mb-2 flex items-center justify-between gap-3">
+                        <span className="text-sm font-medium text-foreground">事件 {event.order}</span>
+                        <Badge variant="outline" className="border-border text-[11px]">
+                          {event.emotional_beat}
+                        </Badge>
+                      </div>
+                      <p className="text-sm leading-6 text-muted-foreground">{event.description}</p>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-sm text-muted-foreground">暂无关键事件拆解</p>
                 )}
               </CardContent>
             </Card>
-          </TabsContent>
 
-          {/* Characters Tab */}
-          <TabsContent value="characters">
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {episodeCharacters.map((character) => (
-                <Card key={character.id} className="bg-card border-border">
-                  <CardContent className="p-4">
-                    <div className="flex items-start gap-4">
-                      <Avatar className="h-16 w-16">
-                        <AvatarFallback className="bg-primary/10 text-primary text-xl">
-                          {character.name.slice(0, 1)}
-                        </AvatarFallback>
-                      </Avatar>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-1">
-                          <h3 className="font-semibold text-foreground">{character.name}</h3>
-                          <Badge variant="outline" className="border-border text-xs">
-                            {character.char_code}
-                          </Badge>
-                        </div>
-                        <p className="text-sm text-muted-foreground line-clamp-2">
-                          {character.role_description || '暂无描述'}
-                        </p>
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
-              ))}
-              {episodeCharacters.length === 0 && (
-                <Card className="bg-card border-border col-span-full">
-                  <CardContent className="py-12 text-center">
-                    <Users className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
-                    <h3 className="text-lg font-semibold text-foreground mb-2">暂无角色</h3>
-                    <p className="text-muted-foreground">
-                      在片段设置中添加角色后会在此显示
-                    </p>
-                  </CardContent>
-                </Card>
-              )}
-            </div>
-          </TabsContent>
-
-          {/* Settings Tab */}
-          <TabsContent value="settings">
-            <Card className="bg-card border-border">
+            <Card className="border-border bg-card">
               <CardHeader>
-                <CardTitle>片段设置</CardTitle>
+                <CardTitle>视觉与分镜</CardTitle>
               </CardHeader>
-              <CardContent className="space-y-6">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-foreground">片段编号</label>
-                    <p className="text-sm text-muted-foreground">{scene.scene_code}</p>
+              <CardContent className="space-y-4">
+                {scene.visual_highlights.length > 0 ? (
+                  <div className="space-y-3">
+                    {scene.visual_highlights.slice(0, 4).map((highlight) => (
+                      <div key={highlight.name} className="rounded-2xl border border-border/70 bg-muted/30 p-3">
+                        <p className="mb-1 text-sm font-medium text-foreground">{highlight.name}</p>
+                        <p className="text-sm leading-6 text-muted-foreground">{highlight.description}</p>
+                      </div>
+                    ))}
                   </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-foreground">状态</label>
-                    <Badge className={sceneStatusColors[scene.status] || 'bg-muted'}>
-                      {sceneStatusLabels[scene.status] || scene.status}
-                    </Badge>
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-foreground">优先级</label>
-                    <p className="text-sm text-muted-foreground">{scene.priority}</p>
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-foreground">类型</label>
-                    <div className="flex gap-2">
-                      {scene.scene_types.map(t => (
-                        <Badge key={t} variant="outline" className="border-border">{t}</Badge>
-                      ))}
-                    </div>
-                  </div>
-                  {scene.novel_chapter_start && (
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium text-foreground">起始章节</label>
-                      <p className="text-sm text-muted-foreground">{scene.novel_chapter_start}</p>
-                    </div>
-                  )}
-                  {scene.novel_chapter_end && (
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium text-foreground">结束章节</label>
-                      <p className="text-sm text-muted-foreground">{scene.novel_chapter_end}</p>
-                    </div>
-                  )}
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-foreground">剧情概述</label>
-                    <p className="text-sm text-muted-foreground line-clamp-3">
-                      {scene.synopsis || '暂无'}
-                    </p>
-                  </div>
-                  {scene.primary_location && (
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium text-foreground">主要地点</label>
-                      <p className="text-sm text-muted-foreground">{scene.primary_location}</p>
-                    </div>
-                  )}
-                  {scene.color_palette && (
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium text-foreground">主色调</label>
-                      <p className="text-sm text-muted-foreground">{scene.color_palette}</p>
-                    </div>
-                  )}
-                  {scene.bgm_direction && (
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium text-foreground">音乐方向</label>
-                      <p className="text-sm text-muted-foreground">{scene.bgm_direction}</p>
-                    </div>
-                  )}
+                ) : (
+                  <p className="text-sm text-muted-foreground">暂无视觉亮点描述</p>
+                )}
+
+                <div className="rounded-2xl border border-border/70 bg-secondary/30 p-3">
+                  <p className="mb-1 text-sm font-medium text-foreground">分镜风格提示</p>
+                  <p className="text-sm leading-6 text-muted-foreground">
+                    {scene.storyboard_style_notes || '暂无分镜风格提示'}
+                  </p>
                 </div>
               </CardContent>
             </Card>
-          </TabsContent>
-        </Tabs>
+          </aside>
+        </div>
       </div>
     </AppLayout>
+  );
+}
+
+function OverviewMetric({
+  icon: Icon,
+  label,
+  value,
+  hint,
+  tone,
+}: {
+  icon: ComponentType<{ className?: string }>;
+  label: string;
+  value: string;
+  hint: string;
+  tone: 'primary' | 'warning' | 'info' | 'success';
+}) {
+  const toneClasses: Record<typeof tone, string> = {
+    primary: 'bg-primary/10 text-primary',
+    warning: 'bg-warning/10 text-warning',
+    info: 'bg-info/10 text-info',
+    success: 'bg-success/10 text-success',
+  };
+
+  return (
+    <div className="rounded-2xl border border-border/70 bg-background/70 p-4">
+      <div className="mb-3 flex items-center gap-3">
+        <div className={`flex h-10 w-10 items-center justify-center rounded-xl ${toneClasses[tone]}`}>
+          <Icon className="h-5 w-5" />
+        </div>
+        <div>
+          <p className="text-sm text-muted-foreground">{label}</p>
+          <p className="text-xl font-semibold text-foreground">{value}</p>
+        </div>
+      </div>
+      <p className="line-clamp-2 text-xs leading-5 text-muted-foreground">{hint}</p>
+    </div>
+  );
+}
+
+function MiniStat({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="rounded-2xl border border-border bg-card px-4 py-3">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="mt-1 text-lg font-semibold text-foreground">{value}</p>
+    </div>
+  );
+}
+
+function DetailPanel({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <Card className="border-border bg-card">
+      <CardHeader>
+        <CardTitle>{title}</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">{children}</CardContent>
+    </Card>
+  );
+}
+
+function InfoLine({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="space-y-1">
+      <p className="text-xs font-medium uppercase tracking-[0.12em] text-muted-foreground">
+        {label}
+      </p>
+      <p className="text-sm leading-6 text-foreground">{value}</p>
+    </div>
   );
 }
 
@@ -443,66 +666,96 @@ function ShotCard({
   episodeId: string;
   formatDuration: (seconds: number) => string;
 }) {
+  const shotType = getRecordText(shot.camera, 'shot_type');
+  const movement = getRecordText(shot.camera, 'movement');
+  const atmosphere = getRecordText(shot.environment, 'atmosphere');
+
   return (
     <Link href={`/projects/${projectId}/storyboard?scene=${episodeId}&shot=${shot.id}`}>
-      <Card className="bg-card border-border hover:border-primary/50 transition-all duration-200 overflow-hidden cursor-pointer">
-        {/* Thumbnail */}
-        <div className="relative aspect-video bg-muted">
-          <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-secondary to-muted">
-            <Camera className="h-8 w-8 text-muted-foreground" />
+      <Card className="cursor-pointer overflow-hidden border-border bg-card transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/50 hover:shadow-md">
+        <div className="relative aspect-video overflow-hidden bg-muted">
+          <div className="absolute inset-0 bg-gradient-to-br from-primary/15 via-secondary/20 to-muted" />
+          <div className="absolute inset-0 flex items-center justify-center">
+            <Camera className="h-10 w-10 text-muted-foreground/70" />
           </div>
+          <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/15 to-transparent" />
 
-          {/* Overlay Info */}
-          <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
+          <Badge className="absolute left-3 top-3 border-0 bg-black/60 text-white">
+            {shot.shot_code}
+          </Badge>
+
           <div className="absolute bottom-0 left-0 right-0 p-3">
-            <div className="flex items-center justify-between">
-              <Badge className={`text-xs ${shotStatusColors[shot.status] || 'bg-muted'}`}>
-                {shot.status === 'generating' && <Loader2 className="h-3 w-3 mr-1 animate-spin" />}
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <Badge className={`text-xs ${shotStatusColors[shot.status] || 'bg-muted text-muted-foreground'}`}>
+                {shot.status === 'generating' && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
                 {shotStatusLabels[shot.status] || shot.status}
               </Badge>
-              <span className="text-xs text-white/80 flex items-center gap-1">
+              <span className="flex items-center gap-1 text-xs text-white/80">
                 <Clock className="h-3 w-3" />
                 {formatDuration(shot.duration_sec)}
               </span>
             </div>
+            <p className="line-clamp-2 text-sm text-white/90">
+              {shot.image_prompt || '暂无镜头描述'}
+            </p>
           </div>
-
-          <Badge className="absolute top-2 left-2 bg-black/60 text-white border-0">
-            {shot.shot_code}
-          </Badge>
         </div>
 
-        <CardContent className="p-4">
-          <div className="flex items-center gap-2 mb-2">
-            <span className="text-sm font-medium text-foreground">镜头 {shot.sequence}</span>
-            {shot.camera?.shot_type ? (
-              <>
-                <span className="text-xs text-muted-foreground">|</span>
-                <span className="text-xs text-muted-foreground">{String(shot.camera.shot_type)}</span>
-              </>
-            ) : null}
+        <CardContent className="space-y-3 p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-foreground">镜头 {shot.sequence}</p>
+              <p className="text-xs text-muted-foreground">
+                {shotType || movement || atmosphere || '等待补充分镜语言'}
+              </p>
+            </div>
+            {shot.qc_approved && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-success/10 px-2 py-1 text-xs text-success">
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                QC通过
+              </span>
+            )}
           </div>
-          <p className="text-sm text-muted-foreground line-clamp-2 mb-3">
-            {shot.image_prompt || '暂无描述'}
-          </p>
 
-          {shot.dialogue_text && (
-            <div className="bg-secondary/50 rounded-lg p-2 mb-3">
-              <div className="flex items-center gap-1 text-xs text-muted-foreground mb-1">
-                <Volume2 className="h-3 w-3" />
-                {shot.dialogue_character || '台词'}
-              </div>
-              <p className="text-xs text-foreground line-clamp-2">{shot.dialogue_text}</p>
+          {(shotType || movement || atmosphere) && (
+            <div className="flex flex-wrap gap-2">
+              {shotType && (
+                <Badge variant="outline" className="border-border text-xs">
+                  {shotType}
+                </Badge>
+              )}
+              {movement && (
+                <Badge variant="outline" className="border-border text-xs">
+                  {movement}
+                </Badge>
+              )}
+              {atmosphere && (
+                <Badge variant="outline" className="border-border text-xs">
+                  {atmosphere}
+                </Badge>
+              )}
             </div>
           )}
 
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-muted-foreground">
-              {shot.camera?.movement ? String(shot.camera.movement) : shot.environment?.atmosphere ? String(shot.environment.atmosphere) : ''}
+          {shot.dialogue_text && (
+            <div className="rounded-xl border border-border/70 bg-secondary/40 p-3">
+              <div className="mb-1 flex items-center gap-1 text-xs text-muted-foreground">
+                <Volume2 className="h-3 w-3" />
+                {shot.dialogue_character || '台词'}
+              </div>
+              <p className="line-clamp-2 text-sm text-foreground">{shot.dialogue_text}</p>
+            </div>
+          )}
+
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-muted-foreground">
+              {shot.transition_in || shot.transition_out
+                ? `${shot.transition_in || '切入'} / ${shot.transition_out || '切出'}`
+                : '查看分镜详情与镜头参数'}
             </span>
-            <span className="text-xs text-primary flex items-center">
+            <span className="flex items-center text-primary">
               查看详情
-              <ChevronRight className="h-3 w-3 ml-0.5" />
+              <ChevronRight className="ml-0.5 h-3 w-3" />
             </span>
           </div>
         </CardContent>

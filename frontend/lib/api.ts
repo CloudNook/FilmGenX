@@ -241,14 +241,14 @@ export interface SceneResponse {
   novel_chapter_end: string | null;
   novel_excerpt: string | null;
   story_arc: string | null;
-  key_events: Record<string, unknown>[];
+  key_events: KeyEvent[];
   emotional_arc: string | null;
   characters: string[];
   character_focus: string | null;
   character_ids: number[];
   primary_location: string | null;
   location_atmosphere: string | null;
-  visual_highlights: Record<string, unknown>[];
+  visual_highlights: VisualHighlight[];
   color_palette: string | null;
   bgm_direction: string | null;
   storyboard_style_notes: string | null;
