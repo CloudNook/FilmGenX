@@ -32,4 +32,5 @@ class ShotGroupResponse(BaseResponse):
     total_duration_sec: Optional[float]
     video_url: Optional[str]
     status: str
+    plan_intent: Optional[str] = None
     shots: Optional[List[dict]] = Field(None, description="成员分镜摘要列表")

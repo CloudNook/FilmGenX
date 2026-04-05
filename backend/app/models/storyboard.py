@@ -41,6 +41,18 @@ class Storyboard(Base):
         comment="draft | generating | review | approved"
     )
 
+    # 三阶段生成状态
+    generation_phase: Mapped[Optional[str]] = mapped_column(
+        String(30), nullable=True,
+        comment="phase1_planning | phase2_creating | phase3_directing | completed"
+    )
+
+    # Phase 1 规划数据（ShotGroupPlan JSON）
+    plan_data: Mapped[Optional[dict]] = mapped_column(
+        JSON, nullable=True,
+        comment="Phase 1 Planner AI 输出的分组规划数据"
+    )
+
     # Relations
     scene: Mapped["Scene"] = relationship("Scene", back_populates="storyboard")
     shots: Mapped[List["Shot"]] = relationship(

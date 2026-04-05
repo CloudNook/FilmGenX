@@ -727,6 +727,8 @@ export interface StoryboardResponse {
   total_duration_sec: number | null;
   version: number;
   status: string;
+  generation_phase: string | null;
+  plan_data: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 }
@@ -758,6 +760,7 @@ export const storyboardsApi = {
 export interface ShotResponse {
   id: number;
   storyboard_id: number;
+  shot_group_id: number | null;
   shot_code: string;
   sequence: number;
   duration_sec: number;
@@ -846,6 +849,7 @@ export interface ShotGroupResponse {
   total_duration_sec: number | null;
   video_url: string | null;
   status: string;
+  plan_intent: string | null;
   shots: ShotGroupMember[] | null;
   created_at: string;
   updated_at: string;

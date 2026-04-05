@@ -15,7 +15,6 @@ import {
   type StoryboardResponse,
   type ShotResponse,
   type ShotGroupResponse,
-  type TaskResponse,
 } from '@/lib/api';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -113,12 +112,23 @@ export default function StoryboardPage({
 
   // Video generation state
   const [generatingVideo, setGeneratingVideo] = useState(false);
-  const [videoTask, setVideoTask] = useState<TaskResponse | null>(null);
-  const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [zoom, setZoom] = useState(100);
   const resolvedUrlShotKeyRef = useRef<string | null>(null);
   const selectedShotRequestIdRef = useRef(0);
+
+  const getGroupForShot = useCallback(
+    (shot: Pick<ShotResponse, 'id' | 'shot_group_id'> | null) => {
+      if (!shot) return null;
+      return (
+        shotGroups.find((group) =>
+          (shot.shot_group_id != null && group.id === shot.shot_group_id) ||
+          group.shots?.some((member) => member.id === shot.id),
+        ) || null
+      );
+    },
+    [shotGroups],
+  );
 
   // ---- Data fetching ----
 
@@ -232,6 +242,19 @@ export default function StoryboardPage({
     };
   }, [storyboard]);
 
+  useEffect(() => {
+    if (selectedShot) {
+      const relatedGroup = getGroupForShot(selectedShot);
+      setSelectedGroup((prev) => (prev?.id === relatedGroup?.id ? prev : relatedGroup));
+      return;
+    }
+
+    if (selectedGroup) {
+      const refreshedGroup = shotGroups.find((group) => group.id === selectedGroup.id) || null;
+      setSelectedGroup((prev) => (prev?.id === refreshedGroup?.id ? prev : refreshedGroup));
+    }
+  }, [selectedShot, selectedGroup, shotGroups, getGroupForShot]);
+
   // Load shot groups when storyboard loads
   useEffect(() => {
     if (!storyboard) {
@@ -310,48 +333,91 @@ export default function StoryboardPage({
 
   // ---- Handlers ----
 
+  const runMultiShotGeneration = useCallback(
+    async (group: ShotGroupResponse, focusShotId?: number) => {
+      if (!storyboard) return;
+
+      setGeneratingGroupVideo(true);
+      setError(null);
+
+      try {
+        await tasksApi.triggerMultiShotVideo({
+          shot_group_id: group.id,
+          quality: '1080p',
+          sound: 'on',
+        });
+        // Immediately refresh group & shots to get 'generating' status
+        const [refreshedGroup, refreshedShots] = await Promise.all([
+          shotGroupsApi.get(storyboard.id, group.id),
+          shotsApi.list(storyboard.id),
+        ]);
+        setShotGroups((prev) => prev.map((g) => (g.id === refreshedGroup.id ? refreshedGroup : g)));
+        setSelectedGroup(refreshedGroup);
+        setShots(refreshedShots);
+        if (focusShotId) {
+          const refreshedShot = refreshedShots.find((s) => s.id === focusShotId);
+          if (refreshedShot) {
+            setSelectedShot(refreshedShot);
+          }
+        }
+      } catch (err: unknown) {
+        setGeneratingGroupVideo(false);
+        setError(err instanceof Error ? err.message : '组视频生成请求失败');
+      }
+    },
+    [storyboard],
+  );
+
   const handleGenerateVideo = useCallback(async () => {
     if (!selectedShot || !storyboard) return;
+
+    const shotGroup = getGroupForShot(selectedShot);
+    if (shotGroup) {
+      await runMultiShotGeneration(shotGroup, selectedShot.id);
+      return;
+    }
+
     setGeneratingVideo(true);
-    setVideoUrl(null);
     setError(null);
     try {
-      const task = await tasksApi.triggerVideo({
+      await tasksApi.triggerVideo({
         shot_id: selectedShot.id,
         quality: '1080p',
         sound: 'on',
         use_image_start: false,
       });
-      setVideoTask(task);
-      // Poll for completion
-      const pollInterval = setInterval(async () => {
-        try {
-          const updated = await tasksApi.get(task.id);
-          setVideoTask(updated);
-          if (updated.status === 'success') {
-            clearInterval(pollInterval);
-            setGeneratingVideo(false);
-            // Fetch the shot's assets to get the video URL
-            if (updated.result_asset_id) {
-              const refreshedShot = await shotsApi.get(storyboard.id, selectedShot.id);
-              setSelectedShot(refreshedShot);
-              setShots((prev) => prev.map((shot) => (shot.id === refreshedShot.id ? refreshedShot : shot)));
-            }
-          } else if (updated.status === 'failed') {
-            clearInterval(pollInterval);
-            setGeneratingVideo(false);
-            setError(updated.error_message || '视频生成失败');
-          }
-        } catch {
-          clearInterval(pollInterval);
-          setGeneratingVideo(false);
-        }
-      }, 5000);
+      // Immediately refresh shot to get 'generating' status
+      const refreshedShot = await shotsApi.get(storyboard.id, selectedShot.id);
+      setSelectedShot(refreshedShot);
+      setShots((prev) => prev.map((s) => (s.id === refreshedShot.id ? refreshedShot : s)));
     } catch (err: unknown) {
       setGeneratingVideo(false);
       setError(err instanceof Error ? err.message : '视频生成请求失败');
     }
-  }, [selectedShot, storyboard]);
+  }, [getGroupForShot, runMultiShotGeneration, selectedShot, storyboard]);
+
+  // Poll shot detail while status is 'generating'
+  useEffect(() => {
+    if (!selectedShot || !storyboard || selectedShot.status !== 'generating') {
+      return;
+    }
+    const interval = setInterval(async () => {
+      try {
+        const detail = await shotsApi.get(storyboard.id, selectedShot.id);
+        setSelectedShot((prev) => (prev?.id === detail.id ? detail : prev));
+        setShots((prev) => prev.map((s) => (s.id === detail.id ? detail : s)));
+        if (detail.status !== 'generating') {
+          setGeneratingVideo(false);
+          if (detail.status === 'draft') {
+            setError('视频生成失败');
+          }
+        }
+      } catch {
+        // ignore poll errors
+      }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [selectedShot?.id, selectedShot?.status, storyboard]);
 
   // Toggle shot selection for grouping
   const toggleShotSelection = useCallback((shotId: number) => {
@@ -400,41 +466,8 @@ export default function StoryboardPage({
   // Generate video for a shot group
   const handleGenerateGroupVideo = useCallback(async () => {
     if (!selectedGroup || !storyboard) return;
-    setGeneratingGroupVideo(true);
-    setError(null);
-    try {
-      const task = await tasksApi.triggerMultiShotVideo({
-        shot_group_id: selectedGroup.id,
-        quality: '1080p',
-        sound: 'on',
-      });
-      // Poll for completion
-      const pollInterval = setInterval(async () => {
-        try {
-          const updated = await tasksApi.get(task.id);
-          if (updated.status === 'success') {
-            clearInterval(pollInterval);
-            setGeneratingGroupVideo(false);
-            // Refresh group and shots
-            const refreshedGroup = await shotGroupsApi.get(storyboard.id, selectedGroup.id);
-            setSelectedGroup(refreshedGroup);
-            const refreshedShots = await shotsApi.list(storyboard.id);
-            setShots(refreshedShots);
-          } else if (updated.status === 'failed') {
-            clearInterval(pollInterval);
-            setGeneratingGroupVideo(false);
-            setError(updated.error_message || '视频生成失败');
-          }
-        } catch {
-          clearInterval(pollInterval);
-          setGeneratingGroupVideo(false);
-        }
-      }, 5000);
-    } catch (err: unknown) {
-      setGeneratingGroupVideo(false);
-      setError(err instanceof Error ? err.message : '请求失败');
-    }
-  }, [selectedGroup, storyboard]);
+    await runMultiShotGeneration(selectedGroup, selectedShot?.id);
+  }, [runMultiShotGeneration, selectedGroup, selectedShot?.id, storyboard]);
 
   // Delete a shot group
   const handleDeleteGroup = useCallback(async (groupId: number) => {
@@ -500,6 +533,41 @@ export default function StoryboardPage({
     },
     [storyboard, selectedShot],
   );
+
+  const selectedShotGroup = selectedShot ? getGroupForShot(selectedShot) : null;
+  const activeGroup = selectedGroup || selectedShotGroup;
+
+  // Derive generating state from API status (not simulated)
+  const isShotGenerating = selectedShot?.status === 'generating';
+  const isGroupGenerating = activeGroup?.status === 'generating';
+  const isAnyGenerating = isShotGenerating || isGroupGenerating;
+
+  // Poll group detail while status is 'generating'
+  useEffect(() => {
+    if (!activeGroup || !storyboard || activeGroup.status !== 'generating') {
+      return;
+    }
+    const interval = setInterval(async () => {
+      try {
+        const [refreshedGroup, refreshedShots] = await Promise.all([
+          shotGroupsApi.get(storyboard.id, activeGroup.id),
+          shotsApi.list(storyboard.id),
+        ]);
+        setShotGroups((prev) => prev.map((g) => (g.id === refreshedGroup.id ? refreshedGroup : g)));
+        setSelectedGroup((prev) => (prev?.id === refreshedGroup.id ? refreshedGroup : prev));
+        setShots(refreshedShots);
+        if (refreshedGroup.status !== 'generating') {
+          setGeneratingGroupVideo(false);
+          if (refreshedGroup.status === 'draft') {
+            setError('组视频生成失败');
+          }
+        }
+      } catch {
+        // ignore poll errors
+      }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [activeGroup?.id, activeGroup?.status, storyboard]);
 
   // ---- Derived data ----
 
@@ -899,20 +967,24 @@ export default function StoryboardPage({
                 </div>
 
                 <div className="flex items-center gap-2">
-                  {selectedGroup && (
+                  {activeGroup && (
                     <Button
                       variant="outline"
                       size="sm"
                       className="h-7 border-primary/50 text-primary hover:bg-primary/10"
                       onClick={handleGenerateGroupVideo}
-                      disabled={generatingGroupVideo}
+                      disabled={isAnyGenerating}
                     >
-                      {generatingGroupVideo ? (
+                      {isGroupGenerating ? (
                         <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
                       ) : (
                         <Group className="h-3.5 w-3.5 mr-1" />
                       )}
-                      {generatingGroupVideo ? '生成中...' : `组生成 (${selectedGroup.shots?.length || 0}镜头)`}
+                      {isGroupGenerating
+                        ? '生成中...'
+                        : activeGroup.status === 'review'
+                          ? `重新生成 (${activeGroup.shots?.length || 0}镜头)`
+                          : `Kling Multi-Shot (${activeGroup.shots?.length || 0}镜头)`}
                     </Button>
                   )}
                   <Button
@@ -920,18 +992,30 @@ export default function StoryboardPage({
                     size="sm"
                     className="h-7 border-border"
                     onClick={handleGenerateVideo}
-                    disabled={!selectedShot || generatingVideo}
+                    disabled={!selectedShot || isAnyGenerating}
                   >
-                    {generatingVideo ? (
+                    {isShotGenerating ? (
                       <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
                     ) : (
-                      <Sparkles className="h-3.5 w-3.5 mr-1" />
+                      <>
+                        {selectedShotGroup ? (
+                          <Group className="h-3.5 w-3.5 mr-1" />
+                        ) : (
+                          <Sparkles className="h-3.5 w-3.5 mr-1" />
+                        )}
+                      </>
                     )}
-                    {generatingVideo
-                      ? videoTask?.status === 'running'
-                        ? `生成中 ${videoTask.progress}%`
-                        : '排队中...'
-                      : 'AI 生成'}
+                    {selectedShotGroup
+                      ? isGroupGenerating
+                        ? '组生成中...'
+                        : selectedShotGroup.status === 'review'
+                          ? `重新生成 ${selectedShotGroup.group_code}`
+                          : `按组生成 ${selectedShotGroup.group_code}`
+                      : isShotGenerating
+                        ? '生成中...'
+                        : selectedShot?.status === 'review'
+                          ? '重新生成'
+                          : 'AI 生成'}
                   </Button>
                   <Button variant="outline" size="sm" className="h-7 border-border">
                     <Download className="h-3.5 w-3.5 mr-1" />

@@ -9,7 +9,6 @@
   - 确认后创建 Scene 并触发分镜 Celery 任务
 """
 
-import json
 import logging
 from datetime import datetime, timezone
 from typing import AsyncGenerator
@@ -40,7 +39,7 @@ from app.schemas.conversation import (
 
 router = APIRouter()
 
-from app.prompts import CHAT_SYSTEM_PROMPT, SUMMARIZE_SYSTEM_PROMPT, OutlineLLMSchema
+from app.prompts import CHAT_SYSTEM_PROMPT, SUMMARIZE_SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +276,7 @@ async def summarize_outline(
     流程：
       1. 构建总结提示词（含全部对话历史）
       2. 调用 LLM 流式生成
-      3. 解析 <outline>...</outline> 中的 JSON
+      3. 流结束后解析完整 JSON
       4. 保存 outline_draft 消息
       5. 更新 Conversation.latest_outline 和 status=draft_ready
     """
@@ -299,7 +298,7 @@ async def summarize_outline(
         next_version = conv.latest_outline.get("version", 0) + 1
 
     async def stream_summarize() -> AsyncGenerator[str, None]:
-        from app.utils.llm_call import call_llm
+        from app.utils.llm_call import call_llm_stream, parse_llm_json
 
         summarize_prompt = SUMMARIZE_SYSTEM_PROMPT + f"\n\n当前是第 {next_version} 次总结。"
 
@@ -308,19 +307,26 @@ async def summarize_outline(
         if not messages_for_summary or messages_for_summary[-1]["role"] != "user":
             messages_for_summary.append({"role": "user", "content": "请根据以上对话内容生成剧本大纲。"})
 
+        full_response = ""
         try:
-            raw = await call_llm(
+            async for chunk in call_llm_stream(
                 messages=messages_for_summary,
                 llm_config=body.llm_config,
                 system_prompt=summarize_prompt,
-                response_schema=OutlineLLMSchema,
-            )
+            ):
+                full_response += chunk
+                yield f"data: {chunk}\n\n"
         except Exception as e:
             logger.error("LLM summarize error: %s", e)
             yield f"data: [ERROR] LLM 调用失败: {e}\n\n"
             return
 
-        outline_json = json.loads(raw)
+        outline_json = parse_llm_json(full_response)
+        if outline_json is None:
+            logger.error("Failed to parse summarize outline JSON: %s", full_response[:500])
+            yield "data: [ERROR] 总结结果不是合法 JSON\n\n"
+            return
+
         outline_json["version"] = next_version
         outline_json["generated_at"] = datetime.now(timezone.utc).isoformat()
 
@@ -456,13 +462,13 @@ async def confirm_conversation(
         content=f"✅ 分集已创建（scene_id={scene.id}），分镜生成任务已启动，计划生成 {shot_count} 个镜头。",
     )
 
-    # 5. 创建 GenerationTask 并派发 Celery
-    from app.tasks.storyboard import generate_storyboard_task
+    # 5. 创建 GenerationTask 并派发 Celery（v2 三阶段流水线）
+    from app.tasks.storyboard import generate_storyboard_v2_task
 
     task_repo = TaskRepository(db)
     task = await task_repo.create(
         shot_id=None,
-        task_type="storyboard_generation",
+        task_type="storyboard_generation_v2",
         status="pending",
         input_params={
             "scene_id": scene.id,
@@ -476,7 +482,7 @@ async def confirm_conversation(
     await db.commit()
 
     # commit 之后再派发，确保 task.id 已落库
-    celery_result = generate_storyboard_task.delay(task.id)
+    celery_result = generate_storyboard_v2_task.delay(task.id)
     await task_repo.update(task, {"celery_task_id": celery_result.id})
     await db.commit()
 

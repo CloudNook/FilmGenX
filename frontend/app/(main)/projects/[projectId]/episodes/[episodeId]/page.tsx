@@ -8,10 +8,12 @@ import {
   scenesApi,
   storyboardsApi,
   shotsApi,
+  shotGroupsApi,
   charactersApi,
   type ProjectResponse,
   type SceneResponse,
   type ShotResponse,
+  type ShotGroupResponse,
   type CharacterResponse,
 } from '@/lib/api';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -34,6 +36,9 @@ import {
   CheckCircle2,
   Loader2,
   MapPin,
+  Layers,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 
 const sceneStatusLabels: Record<string, string> = {
@@ -105,6 +110,8 @@ export default function EpisodeDetailPage({
   const [project, setProject] = useState<ProjectResponse | null>(null);
   const [scene, setScene] = useState<SceneResponse | null>(null);
   const [shots, setShots] = useState<ShotResponse[]>([]);
+  const [shotGroups, setShotGroups] = useState<ShotGroupResponse[]>([]);
+  const [expandedGroups, setExpandedGroups] = useState<Set<number>>(new Set());
   const [characters, setCharacters] = useState<CharacterResponse[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -123,8 +130,14 @@ export default function EpisodeDetailPage({
       if (s) {
         try {
           const storyboard = await storyboardsApi.get(s.id);
-          const shotList = await shotsApi.list(storyboard.id);
+          const [shotList, groupList] = await Promise.all([
+            shotsApi.list(storyboard.id),
+            shotGroupsApi.list(storyboard.id),
+          ]);
           setShots(shotList);
+          setShotGroups(groupList);
+          // 默认展开所有组
+          setExpandedGroups(new Set(groupList.map((g) => g.id)));
         } catch {
           // storyboard not created yet
         }
@@ -159,6 +172,26 @@ export default function EpisodeDetailPage({
   const reviewShots = shots.filter((shot) => shot.status === 'review').length;
   const progress = shots.length > 0 ? Math.round((completedShots / shots.length) * 100) : 0;
   const chapterRange = formatChapterRange(scene.novel_chapter_start, scene.novel_chapter_end);
+
+  const toggleGroup = (groupId: number) => {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupId)) next.delete(groupId);
+      else next.add(groupId);
+      return next;
+    });
+  };
+
+  // 构建分组映射：groupId → shots
+  const groupedShotMap = new Map<number, ShotResponse[]>();
+  const groupedShotIds = new Set<number>();
+  for (const group of shotGroups) {
+    const memberIds = new Set((group.shots || []).map((s) => s.id));
+    const groupShots = shots.filter((s) => memberIds.has(s.id));
+    groupedShotMap.set(group.id, groupShots);
+    groupShots.forEach((s) => groupedShotIds.add(s.id));
+  }
+  const ungroupedShots = shots.filter((s) => !groupedShotIds.has(s.id));
 
   const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -328,8 +361,8 @@ export default function EpisodeDetailPage({
               <TabsContent value="shots" className="space-y-4">
                 <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                   <MiniStat label="总镜头数" value={String(shots.length)} />
+                  <MiniStat label="分镜组" value={String(shotGroups.length)} />
                   <MiniStat label="已通过" value={String(completedShots)} />
-                  <MiniStat label="生成中" value={String(generatingShots)} />
                   <MiniStat
                     label="总时长"
                     value={formatDuration(shots.reduce((sum, shot) => sum + shot.duration_sec, 0))}
@@ -337,16 +370,93 @@ export default function EpisodeDetailPage({
                 </div>
 
                 {shots.length > 0 ? (
-                  <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 2xl:grid-cols-3">
-                    {shots.map((shot) => (
-                      <ShotCard
-                        key={shot.id}
-                        shot={shot}
-                        projectId={projectId}
-                        episodeId={episodeId}
-                        formatDuration={formatDuration}
-                      />
-                    ))}
+                  <div className="space-y-4">
+                    {/* 分镜组展示 */}
+                    {shotGroups.map((group) => {
+                      const groupShots = groupedShotMap.get(group.id) || [];
+                      const isExpanded = expandedGroups.has(group.id);
+                      return (
+                        <div
+                          key={group.id}
+                          className="overflow-hidden rounded-2xl border border-border bg-card"
+                        >
+                          {/* 分镜组头部 */}
+                          <button
+                            onClick={() => toggleGroup(group.id)}
+                            className="flex w-full items-center justify-between gap-4 bg-muted/40 px-5 py-3.5 text-left transition-colors hover:bg-muted/60"
+                          >
+                            <div className="flex items-center gap-3">
+                              <Layers className="h-4 w-4 text-primary" />
+                              <span className="font-mono text-sm font-semibold text-foreground">
+                                {group.group_code}
+                              </span>
+                              {group.name && (
+                                <span className="text-sm text-foreground">{group.name}</span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-3">
+                              {group.plan_intent && (
+                                <span className="hidden max-w-xs truncate text-xs text-muted-foreground sm:inline">
+                                  {group.plan_intent.slice(0, 60)}{group.plan_intent.length > 60 ? '...' : ''}
+                                </span>
+                              )}
+                              <Badge variant="outline" className="border-border text-xs">
+                                {groupShots.length} 镜头
+                              </Badge>
+                              <Badge variant="outline" className="border-border text-xs">
+                                {formatDuration(group.total_duration_sec || 0)}
+                              </Badge>
+                              <Badge className={`text-xs ${shotStatusColors[group.status] || 'bg-muted text-muted-foreground'}`}>
+                                {shotStatusLabels[group.status] || group.status}
+                              </Badge>
+                              {isExpanded ? (
+                                <ChevronUp className="h-4 w-4 text-muted-foreground" />
+                              ) : (
+                                <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                              )}
+                            </div>
+                          </button>
+
+                          {/* 分镜组内的镜头 */}
+                          {isExpanded && (
+                            <div className="grid grid-cols-1 gap-3 p-4 lg:grid-cols-2 2xl:grid-cols-3">
+                              {groupShots.map((shot) => (
+                                <ShotCard
+                                  key={shot.id}
+                                  shot={shot}
+                                  projectId={projectId}
+                                  episodeId={episodeId}
+                                  formatDuration={formatDuration}
+                                />
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+
+                    {/* 未分组的独立镜头 */}
+                    {ungroupedShots.length > 0 && (
+                      <div>
+                        {shotGroups.length > 0 && (
+                          <div className="mb-3 flex items-center gap-2 text-sm text-muted-foreground">
+                            <Film className="h-4 w-4" />
+                            独立镜头（未分组）
+                          </div>
+                        )}
+                        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 2xl:grid-cols-3">
+                          {ungroupedShots.map((shot) => (
+                            <ShotCard
+                              key={shot.id}
+                              shot={shot}
+                              projectId={projectId}
+                              episodeId={episodeId}
+                              formatDuration={formatDuration}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <Card className="border-border bg-card">

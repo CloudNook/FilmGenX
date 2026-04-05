@@ -12,6 +12,7 @@
 
 import asyncio
 import logging
+import math
 from datetime import datetime, timezone
 
 from celery import Task
@@ -20,6 +21,15 @@ from app.tasks.celery_app import celery_app
 from app.prompts import build_video_prompt, build_compact_video_prompt
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_kling_duration(seconds: float | None) -> int:
+    """将时长规范为 Kling 可接受的整数秒。
+
+    使用 floor 向下取整（如 3.5s → 3s），并确保最小为 1 秒。
+    """
+    raw = seconds if seconds is not None else 3.0
+    return max(1, math.floor(raw))
 
 
 class VideoGenerationTask(Task):
@@ -138,17 +148,29 @@ async def _run_video_generation(task: VideoGenerationTask, task_db_id: int) -> d
                 logger.info("检测到已提交的 Evolink 任务，继续轮询：%s", evolink_task_id)
             else:
                 if image_start:
+                    normalized_duration = _normalize_kling_duration(shot.duration_sec)
+                    if normalized_duration < 3 or normalized_duration > 15:
+                        raise ValueError(
+                            f"镜头 {shot.shot_code} 提交 Kling 的时长必须在 3-15 秒之间，"
+                            f"当前规范化后为 {normalized_duration}s"
+                        )
                     video_task = await evolink_client.image_to_video(
                         prompt=prompt,
                         image_start=image_start,
-                        duration=max(3, min(15, int(shot.duration_sec))),
+                        duration=normalized_duration,
                         quality=quality,
                         sound=sound,
                     )
                 else:
+                    normalized_duration = _normalize_kling_duration(shot.duration_sec)
+                    if normalized_duration < 3 or normalized_duration > 15:
+                        raise ValueError(
+                            f"镜头 {shot.shot_code} 提交 Kling 的时长必须在 3-15 秒之间，"
+                            f"当前规范化后为 {normalized_duration}s"
+                        )
                     video_task = await evolink_client.text_to_video(
                         prompt=prompt,
-                        duration=max(3, min(15, int(shot.duration_sec))),
+                        duration=normalized_duration,
                         quality=quality,
                         sound=sound,
                     )
@@ -298,17 +320,22 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
             await session.commit()
 
             # 构建多镜头提示词
+            shot_durations = [_normalize_kling_duration(shot.duration_sec) for shot in member_shots]
             multi_prompts = []
-            for i, shot in enumerate(member_shots):
+            for i, (shot, normalized_duration) in enumerate(zip(member_shots, shot_durations, strict=False)):
                 prompt_text = build_compact_video_prompt(shot)
                 multi_prompts.append(MultiShotPrompt(
                     index=i + 1,
                     prompt=prompt_text,
-                    duration=str(max(1, int(shot.duration_sec or 3))),
+                    duration=str(normalized_duration),
                 ))
 
-            total_duration = sum(s.duration_sec or 3.0 for s in member_shots)
-            total_duration = max(3, min(15, int(total_duration)))
+            total_duration = sum(shot_durations)
+            if total_duration < 3 or total_duration > 15:
+                raise ValueError(
+                    "Kling multi-shot 总时长必须等于各镜头整数时长之和，且在 3-15 秒之间；"
+                    f"当前各镜头时长={shot_durations}，总时长={total_duration}s"
+                )
 
             group_code = group.group_code
 
@@ -316,8 +343,11 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
                 "开始多镜头视频生成：group=%s shots=%d total_duration=%ds",
                 group_code, len(member_shots), total_duration,
             )
+            logger.info("=" * 60)
+            logger.info("Kling Multi-Shot 提示词明细：group=%s", group_code)
             for mp in multi_prompts:
-                logger.info("  镜头 %d (%ss): %s", mp.index, mp.duration, mp.prompt[:100])
+                logger.info("  镜头 %d (%ss) 提示词:\n%s", mp.index, mp.duration, mp.prompt)
+            logger.info("=" * 60)
 
             evolink_task_id = params.get("evolink_task_id")
 

@@ -121,6 +121,7 @@ class ShotUpdate(BaseModel):
 class ShotResponse(BaseResponse):
     """单镜头详情响应。"""
     storyboard_id: int
+    shot_group_id: Optional[int] = None
     shot_code: str
     sequence: int
     duration_sec: float

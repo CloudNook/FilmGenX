@@ -53,3 +53,5 @@ class StoryboardResponse(BaseResponse):
     total_duration_sec: Optional[float]
     version: int
     status: str
+    generation_phase: Optional[str] = None
+    plan_data: Optional[dict] = None

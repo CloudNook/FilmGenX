@@ -43,6 +43,18 @@ class ShotGroup(Base):
         comment="draft | generating | review | approved | rejected"
     )
 
+    # Phase 1 规划意图（来自 Planner AI）
+    plan_intent: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True,
+        comment="Phase 1 规划的叙事意图（narrative_intent 字段）"
+    )
+
+    # Phase 2 Celery 任务 ID（预留，用于追踪并行创作进度）
+    phase2_task_id: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True,
+        comment="Phase 2 Creator AI 对应的 Celery 任务ID（预留）"
+    )
+
     # Relations
     storyboard: Mapped["Storyboard"] = relationship("Storyboard", back_populates="shot_groups")
     shots: Mapped[List["Shot"]] = relationship(

@@ -44,6 +44,29 @@ def _validate_group_constraints(shots: list) -> None:
         )
 
 
+def _build_group_response(group, member_shots=None):
+    """从 ORM 对象构建 ShotGroupResponse，避免 Pydantic 直接访问 lazy-loaded 关系。"""
+    shots = member_shots if member_shots is not None else getattr(group, 'shots', [])
+    group_data = {
+        "id": group.id,
+        "storyboard_id": group.storyboard_id,
+        "group_code": group.group_code,
+        "name": group.name,
+        "sequence": group.sequence,
+        "total_duration_sec": group.total_duration_sec,
+        "video_url": group.video_url,
+        "status": group.status,
+        "plan_intent": getattr(group, 'plan_intent', None),
+        "created_at": group.created_at,
+        "updated_at": group.updated_at,
+        "shots": [
+            {"id": s.id, "shot_code": s.shot_code, "sequence": s.sequence, "duration_sec": s.duration_sec}
+            for s in (shots or [])
+        ],
+    }
+    return ShotGroupResponse.model_validate(group_data)
+
+
 @router.get("", response_model=List[ShotGroupResponse], summary="获取分镜组列表")
 async def list_groups(
     storyboard_id: int,
@@ -52,16 +75,7 @@ async def list_groups(
 ):
     await _require_storyboard(storyboard_id, db)
     groups = await ShotGroupRepository(db).get_by_storyboard(storyboard_id)
-    # 手动附带 shots 摘要
-    result = []
-    for g in groups:
-        resp = ShotGroupResponse.model_validate(g)
-        resp.shots = [
-            {"id": s.id, "shot_code": s.shot_code, "sequence": s.sequence, "duration_sec": s.duration_sec}
-            for s in g.shots
-        ]
-        result.append(resp)
-    return result
+    return [_build_group_response(g) for g in groups]
 
 
 @router.post("", response_model=ShotGroupResponse, status_code=status.HTTP_201_CREATED, summary="创建分镜组")
@@ -106,11 +120,7 @@ async def create_group(
     await db.commit()
     await db.refresh(group)
 
-    resp = ShotGroupResponse.model_validate(group)
-    resp.shots = [
-        {"id": s.id, "shot_code": s.shot_code, "sequence": s.sequence, "duration_sec": s.duration_sec}
-        for s in shots
-    ]
+    resp = _build_group_response(group, shots)
     return resp
 
 
@@ -127,12 +137,7 @@ async def get_group(
     if not group:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="分镜组不存在")
 
-    resp = ShotGroupResponse.model_validate(group)
-    resp.shots = [
-        {"id": s.id, "shot_code": s.shot_code, "sequence": s.sequence, "duration_sec": s.duration_sec}
-        for s in group.shots
-    ]
-    return resp
+    return _build_group_response(group)
 
 
 @router.patch("/{group_id}", response_model=ShotGroupResponse, summary="更新分镜组")
@@ -181,15 +186,10 @@ async def update_group(
     await db.commit()
     await db.refresh(group)
 
-    resp = ShotGroupResponse.model_validate(group)
     # 重新加载成员
     all_shots = await shot_repo.get_by_storyboard(storyboard_id)
     member_shots = [s for s in all_shots if s.shot_group_id == group.id]
-    resp.shots = [
-        {"id": s.id, "shot_code": s.shot_code, "sequence": s.sequence, "duration_sec": s.duration_sec}
-        for s in member_shots
-    ]
-    return resp
+    return _build_group_response(group, member_shots)
 
 
 @router.delete("/{group_id}", status_code=status.HTTP_204_NO_CONTENT, summary="删除分镜组")
