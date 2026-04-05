@@ -21,6 +21,8 @@ class AssetRepository(BaseRepository[Asset]):
         *,
         asset_type: Optional[str] = None,
         shot_id: Optional[int] = None,
+        location_id: Optional[int] = None,
+        location_version_id: Optional[int] = None,
         source: Optional[str] = None,
         is_current: Optional[bool] = None,
         page: int = 1,
@@ -32,6 +34,10 @@ class AssetRepository(BaseRepository[Asset]):
             filters.append(Asset.asset_type == asset_type)
         if shot_id is not None:
             filters.append(Asset.shot_id == shot_id)
+        if location_id is not None:
+            filters.append(Asset.location_id == location_id)
+        if location_version_id is not None:
+            filters.append(Asset.location_version_id == location_version_id)
         if source:
             filters.append(Asset.source == source)
         if is_current is not None:

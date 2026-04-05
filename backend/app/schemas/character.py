@@ -60,6 +60,7 @@ class CharacterVersionCreate(BaseModel):
     key_features: List[str] = Field(default_factory=list, description="标志性细节列表")
     reference_image_urls: List[str] = Field(default_factory=list, description="参考图URL列表")
     base_image_prompt: Optional[str] = Field(None, description="该版本的基础图像提示词（英文）")
+    three_view_url: Optional[str] = Field(None, description="三视图URL（单张图片）")
 
 
 class CharacterVersionUpdate(BaseModel):
@@ -78,10 +79,8 @@ class CharacterVersionUpdate(BaseModel):
     key_features: Optional[List[str]] = None
     reference_image_urls: Optional[List[str]] = None
     base_image_prompt: Optional[str] = None
-    # 三视图
-    view_front_url: Optional[str] = None
-    view_side_url: Optional[str] = None
-    view_back_url: Optional[str] = None
+    # 三视图（单张图片）
+    three_view_url: Optional[str] = None
     # 状态图片
     state_images: Optional[Dict[str, str]] = None
 
@@ -103,10 +102,8 @@ class CharacterVersionResponse(BaseResponse):
     dou_qi_level: Optional[str]
     key_features: list
     reference_image_urls: list
-    # 三视图
-    view_front_url: Optional[str] = None
-    view_side_url: Optional[str] = None
-    view_back_url: Optional[str] = None
+    # 三视图（单张图片）
+    three_view_url: Optional[str] = None
     # 状态图片
     state_images: Optional[dict] = None
     base_image_prompt: Optional[str]
@@ -117,7 +114,7 @@ class CharacterVersionBrief(BaseResponse):
     character_id: int
     version_code: str
     label: str
-    view_front_url: Optional[str] = None
+    three_view_url: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

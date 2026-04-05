@@ -8,7 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user_id, get_db
-from app.repositories.location import LocationRepository
+from app.repositories.character import CharacterRepository, CharacterVersionRepository
+from app.repositories.location import LocationRepository, LocationVersionRepository
 from app.repositories.project import ProjectRepository
 from app.repositories.task import TaskRepository
 from app.schemas.task import (
@@ -146,6 +147,43 @@ async def trigger_image_generation(
         location = await LocationRepository(db).get_by_id_and_project(body.location_id, body.project_id)
         if not location:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="场景不存在")
+
+    if body.location_id is not None and body.location_version_id is not None:
+        version = await LocationVersionRepository(db).get_by_id_and_location(
+            body.location_version_id,
+            body.location_id,
+        )
+        if not version:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="场景版本不存在")
+    elif body.location_version_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="location_version_id 生成时必须传 location_id",
+        )
+
+    # Validate character parameters
+    if body.character_id is not None:
+        if body.project_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="character_id 生成时必须传 project_id",
+            )
+        character = await CharacterRepository(db).get_by_id_and_project(body.character_id, body.project_id)
+        if not character:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="角色不存在")
+
+    if body.character_id is not None and body.character_version_id is not None:
+        char_version = await CharacterVersionRepository(db).get_by_id_and_character(
+            body.character_version_id,
+            body.character_id,
+        )
+        if not char_version:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="角色版本不存在")
+    elif body.character_version_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="character_version_id 生成时必须传 character_id",
+        )
 
     task = await task_repo.create(
         shot_id=body.shot_id,

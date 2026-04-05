@@ -119,6 +119,33 @@ async def upload_view_image(
     return version
 
 
+@router.post("/three-view", response_model=CharacterVersionResponse, summary="上传三视图（单张图片）")
+async def upload_three_view_image(
+    project_id: int,
+    character_id: int,
+    version_id: int,
+    file: UploadFile = File(..., description="三视图图片文件"),
+    db: AsyncSession = Depends(get_db),
+    user_id: int = Depends(get_current_user_id),
+):
+    """上传角色三视图（单张图片，包含正面/侧面/背面）。"""
+    version = await _require_version(project_id, character_id, version_id, user_id, db)
+
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="仅支持图片文件")
+
+    content = await file.read()
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    filename = f"char_{character_id}_v{version_id}_three_view_{timestamp}.jpg"
+    image_url = oss_client.upload_bytes(content, filename, directory="characters/views")
+
+    version_repo = CharacterVersionRepository(db)
+    await version_repo.update(version, {"three_view_url": image_url})
+    await db.commit()
+
+    return version
+
+
 @router.post("/state/{state_type}", response_model=CharacterVersionResponse, summary="上传状态图")
 async def upload_state_image(
     project_id: int,
@@ -210,6 +237,30 @@ async def delete_view_image(
 
     version_repo = CharacterVersionRepository(db)
     await version_repo.update(version, {field_map[view_type]: None})
+    await db.commit()
+
+    return version
+
+
+@router.delete("/three-view", response_model=CharacterVersionResponse, summary="删除三视图")
+async def delete_three_view_image(
+    project_id: int,
+    character_id: int,
+    version_id: int,
+    db: AsyncSession = Depends(get_db),
+    user_id: int = Depends(get_current_user_id),
+):
+    """删除三视图图片。"""
+    version = await _require_version(project_id, character_id, version_id, user_id, db)
+
+    if version.three_view_url:
+        try:
+            oss_client.delete_by_url(version.three_view_url)
+        except Exception:
+            pass
+
+    version_repo = CharacterVersionRepository(db)
+    await version_repo.update(version, {"three_view_url": None})
     await db.commit()
 
     return version

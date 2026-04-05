@@ -10,7 +10,9 @@ import {
   assetsApi,
   type ProjectResponse,
   type CharacterResponse,
+  type CharacterDetailResponse,
   type LocationResponse,
+  type LocationDetailResponse,
   type AssetResponse,
 } from '@/lib/api';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -28,6 +30,7 @@ import {
   Loader2,
   Plus,
   Sparkles,
+  Layers,
 } from 'lucide-react';
 import { ImageUploadDialog } from '@/components/assets/ImageUploadDialog';
 
@@ -44,7 +47,11 @@ export default function MaterialsPage({
 
   // Stats
   const [characterCount, setCharacterCount] = useState(0);
+  const [characterVersionCount, setCharacterVersionCount] = useState(0);
+  const [characterImageCount, setCharacterImageCount] = useState(0);
   const [locationCount, setLocationCount] = useState(0);
+  const [locationVersionCount, setLocationVersionCount] = useState(0);
+  const [locationImageCount, setLocationImageCount] = useState(0);
   const [assetStats, setAssetStats] = useState<Record<string, number>>({});
 
   // Preview lists
@@ -58,20 +65,63 @@ export default function MaterialsPage({
   useEffect(() => {
     if (isNaN(projectIdNum)) return;
 
-    Promise.all([
-      projectsApi.get(projectIdNum).catch(() => null),
-      charactersApi.list(projectIdNum, 1, 5).then(r => { setCharacterCount(r.total); return r.items; }).catch(() => []),
-      locationsApi.list(projectIdNum, 1, 5).then(r => { setLocationCount(r.total); return r.items; }).catch(() => []),
-      assetsApi.stats(projectIdNum).catch(() => ({})),
-      assetsApi.list(projectIdNum, 1, 6).then(r => r.items).catch(() => []),
-    ]).then(([p, chars, locs, stats, assets]) => {
+    async function loadData() {
+      const [p, charsRes, locsRes, stats, assets] = await Promise.all([
+        projectsApi.get(projectIdNum).catch(() => null),
+        charactersApi.list(projectIdNum, 1, 100).catch(() => ({ items: [], total: 0 })),
+        locationsApi.list(projectIdNum, 1, 100).catch(() => ({ items: [], total: 0 })),
+        assetsApi.stats(projectIdNum).catch(() => ({})),
+        assetsApi.list(projectIdNum, 1, 6).then(r => r.items).catch(() => []),
+      ]);
+
       setProject(p);
-      setRecentCharacters(chars);
-      setRecentLocations(locs);
+      setCharacterCount(charsRes.total);
+      setLocationCount(locsRes.total);
       setAssetStats(stats);
+      setRecentCharacters(charsRes.items.slice(0, 5));
+      setRecentLocations(locsRes.items.slice(0, 5));
       setRecentAssets(assets);
+
+      // 统计角色版本和图片数量
+      let charVersions = 0;
+      let charImages = 0;
+      for (const char of charsRes.items) {
+        try {
+          const detail = await charactersApi.get(projectIdNum, char.id);
+          charVersions += detail.versions?.length || 0;
+          for (const version of detail.versions || []) {
+            if (version.three_view_url) charImages++;
+            charImages += version.reference_image_urls?.length || 0;
+          }
+        } catch {
+          // ignore
+        }
+      }
+      setCharacterVersionCount(charVersions);
+      setCharacterImageCount(charImages);
+
+      // 统计场景版本和图片数量
+      let locVersions = 0;
+      let locImages = 0;
+      for (const loc of locsRes.items) {
+        try {
+          const detail = await locationsApi.get(projectIdNum, loc.id);
+          locImages += detail.reference_image_urls?.length || 0;
+          locVersions += detail.versions?.length || 0;
+          for (const version of detail.versions || []) {
+            locImages += version.reference_image_urls?.length || 0;
+          }
+        } catch {
+          // ignore
+        }
+      }
+      setLocationVersionCount(locVersions);
+      setLocationImageCount(locImages);
+
       setLoading(false);
-    });
+    }
+
+    loadData();
   }, [projectIdNum]);
 
   if (loading) {
@@ -101,6 +151,8 @@ export default function MaterialsPage({
       description: '管理项目中的角色档案、版本和特征设定',
       href: `/projects/${projectId}/materials/characters`,
       count: characterCount,
+      versionCount: characterVersionCount,
+      imageCount: characterImageCount,
       color: 'text-primary',
       bgColor: 'bg-primary/10',
     },
@@ -110,6 +162,8 @@ export default function MaterialsPage({
       description: '管理项目中的场景地点、环境设定和变体',
       href: `/projects/${projectId}/materials/locations`,
       count: locationCount,
+      versionCount: locationVersionCount,
+      imageCount: locationImageCount,
       color: 'text-info',
       bgColor: 'bg-info/10',
     },
@@ -191,6 +245,18 @@ export default function MaterialsPage({
                 </CardHeader>
                 <CardContent>
                   <p className="text-sm text-muted-foreground">{category.description}</p>
+                  {'versionCount' in category && (
+                    <div className="flex gap-4 mt-3 text-sm">
+                      <div className="flex items-center gap-1 text-muted-foreground">
+                        <Layers className="h-3.5 w-3.5" />
+                        <span>{category.versionCount} 版本</span>
+                      </div>
+                      <div className="flex items-center gap-1 text-muted-foreground">
+                        <Image className="h-3.5 w-3.5" />
+                        <span>{category.imageCount} 图片</span>
+                      </div>
+                    </div>
+                  )}
                   <div className="flex items-center text-primary text-sm mt-4">
                     <span>进入管理</span>
                     <ArrowRight className="h-4 w-4 ml-1" />
@@ -201,41 +267,91 @@ export default function MaterialsPage({
           ))}
         </div>
 
-        {/* Quick Stats */}
-        <Card className="bg-card border-border">
-          <CardHeader>
-            <CardTitle className="text-lg">素材统计</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        {/* Quick Stats - 与上方卡片对齐 */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          {/* 角色统计 */}
+          <Card className="bg-gradient-to-br from-primary/10 to-primary/5 border border-primary/10">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-lg flex items-center gap-2 text-primary">
+                <Users className="h-5 w-5" />
+                角色统计
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-3 gap-4">
+                <div className="text-center">
+                  <p className="text-3xl font-bold text-foreground">{characterCount}</p>
+                  <p className="text-xs text-muted-foreground mt-1">角色</p>
+                </div>
+                <div className="text-center border-x border-primary/20">
+                  <p className="text-3xl font-bold text-foreground">{characterVersionCount}</p>
+                  <p className="text-xs text-muted-foreground mt-1">版本</p>
+                </div>
+                <div className="text-center">
+                  <p className="text-3xl font-bold text-foreground">{characterImageCount}</p>
+                  <p className="text-xs text-muted-foreground mt-1">图片</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* 场景统计 */}
+          <Card className="bg-gradient-to-br from-info/10 to-info/5 border border-info/10">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-lg flex items-center gap-2 text-info">
+                <MapPin className="h-5 w-5" />
+                场景统计
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-3 gap-4">
+                <div className="text-center">
+                  <p className="text-3xl font-bold text-foreground">{locationCount}</p>
+                  <p className="text-xs text-muted-foreground mt-1">场景</p>
+                </div>
+                <div className="text-center border-x border-info/20">
+                  <p className="text-3xl font-bold text-foreground">{locationVersionCount}</p>
+                  <p className="text-xs text-muted-foreground mt-1">版本</p>
+                </div>
+                <div className="text-center">
+                  <p className="text-3xl font-bold text-foreground">{locationImageCount}</p>
+                  <p className="text-xs text-muted-foreground mt-1">图片</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* 素材库统计 */}
+          <Card className="bg-gradient-to-br from-success/10 to-success/5 border border-success/10">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-lg flex items-center gap-2 text-success">
+                <Image className="h-5 w-5" />
+                素材统计
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
               {Object.entries(assetStats).length > 0 ? (
-                Object.entries(assetStats).map(([type, count]) => {
-                  const Icon = getAssetIcon(type);
-                  return (
-                    <div key={type} className="flex items-center gap-3 p-3 rounded-lg bg-secondary/50">
-                      <Icon className="h-5 w-5 text-muted-foreground" />
-                      <div>
-                        <p className="text-sm font-medium text-foreground">{getAssetTypeLabel(type)}</p>
-                        <p className="text-lg font-bold text-foreground">{count}</p>
-                      </div>
+                <div className="grid grid-cols-3 gap-4">
+                  {Object.entries(assetStats).slice(0, 3).map(([type, count]) => (
+                    <div key={type} className="text-center">
+                      <p className="text-3xl font-bold text-foreground">{count}</p>
+                      <p className="text-xs text-muted-foreground mt-1">{getAssetTypeLabel(type)}</p>
                     </div>
-                  );
-                })
+                  ))}
+                </div>
               ) : (
-                <p className="text-muted-foreground col-span-4 text-center py-4">
-                  暂无素材数据
-                </p>
+                <div className="text-center py-4 text-muted-foreground text-sm">暂无素材</div>
               )}
-            </div>
-          </CardContent>
-        </Card>
+            </CardContent>
+          </Card>
+        </div>
 
         {/* Recent Items */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Recent Characters */}
           <Card className="bg-card border-border">
             <CardHeader className="flex flex-row items-center justify-between pb-3">
-              <CardTitle className="text-base">最近角色</CardTitle>
+              <CardTitle className="text-lg">最近角色</CardTitle>
               <Link href={`/projects/${projectId}/materials/characters`}>
                 <Button variant="ghost" size="sm" className="text-primary">
                   查看全部
@@ -250,8 +366,8 @@ export default function MaterialsPage({
                   <p className="text-sm">暂无角色</p>
                 </div>
               ) : (
-                <div className="space-y-3">
-                  {recentCharacters.map((char) => (
+                <div className="space-y-2">
+                  {recentCharacters.slice(0, 5).map((char) => (
                     <Link
                       key={char.id}
                       href={`/projects/${projectId}/materials/characters`}
@@ -278,7 +394,7 @@ export default function MaterialsPage({
           {/* Recent Locations */}
           <Card className="bg-card border-border">
             <CardHeader className="flex flex-row items-center justify-between pb-3">
-              <CardTitle className="text-base">最近场景</CardTitle>
+              <CardTitle className="text-lg">最近场景</CardTitle>
               <Link href={`/projects/${projectId}/materials/locations`}>
                 <Button variant="ghost" size="sm" className="text-primary">
                   查看全部
@@ -293,8 +409,8 @@ export default function MaterialsPage({
                   <p className="text-sm">暂无场景</p>
                 </div>
               ) : (
-                <div className="space-y-3">
-                  {recentLocations.map((loc) => (
+                <div className="space-y-2">
+                  {recentLocations.slice(0, 5).map((loc) => (
                     <Link
                       key={loc.id}
                       href={`/projects/${projectId}/materials/locations`}
@@ -319,7 +435,7 @@ export default function MaterialsPage({
           {/* Recent Assets */}
           <Card className="bg-card border-border">
             <CardHeader className="flex flex-row items-center justify-between pb-3">
-              <CardTitle className="text-base">最近素材</CardTitle>
+              <CardTitle className="text-lg">最近素材</CardTitle>
               <Link href={`/projects/${projectId}/materials/assets`}>
                 <Button variant="ghost" size="sm" className="text-primary">
                   查看全部
@@ -334,8 +450,8 @@ export default function MaterialsPage({
                   <p className="text-sm">暂无素材</p>
                 </div>
               ) : (
-                <div className="grid grid-cols-2 gap-2">
-                  {recentAssets.map((asset) => (
+                <div className="grid grid-cols-3 gap-2">
+                  {recentAssets.slice(0, 6).map((asset) => (
                     <Link
                       key={asset.id}
                       href={`/projects/${projectId}/materials/assets`}
@@ -351,13 +467,10 @@ export default function MaterialsPage({
                         <div className="w-full h-full flex items-center justify-center">
                           {(() => {
                             const Icon = getAssetIcon(asset.asset_type);
-                            return <Icon className="h-8 w-8 text-muted-foreground" />;
+                            return <Icon className="h-5 w-5 text-muted-foreground" />;
                           })()}
                         </div>
                       )}
-                      <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent p-2">
-                        <p className="text-xs text-white truncate">{asset.asset_code}</p>
-                      </div>
                     </Link>
                   ))}
                 </div>

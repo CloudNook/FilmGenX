@@ -24,12 +24,6 @@ class AtmosphereConfig(BaseModel):
 
 class LocationCreate(BaseModel):
     """创建场景请求体。"""
-    loc_code: str = Field(
-        ...,
-        max_length=50,
-        pattern=r"^LOC_[A-Z0-9_]+$",
-        description="业务ID，如 LOC_YUNLAN_SQUARE"
-    )
     name: str = Field(..., max_length=100, description="场景名称")
     aliases: List[str] = Field(default_factory=list, description="别名列表")
     location_type: str = Field(
@@ -93,7 +87,6 @@ class LocationResponse(BaseResponse):
     is_active: bool
     usage_count: int
     # 关联
-    versions: List["LocationVersionResponse"] = []
 
 
 class LocationBrief(BaseModel):
@@ -199,11 +192,12 @@ class LocationVersionBrief(BaseModel):
 
 class LocationWithVersionsResponse(LocationResponse):
     """场景详情（含所有变体）。"""
-    versions: List[LocationVersionResponse] = []
+    versions: List[LocationVersionResponse] = Field(default_factory=list)
 
 
 class LocationDetailResponse(LocationResponse):
     """场景完整详情（含默认变体信息）。"""
+    versions: List[LocationVersionResponse] = Field(default_factory=list)
     default_version: Optional[LocationVersionBrief] = None
     version_count: int = 0
 

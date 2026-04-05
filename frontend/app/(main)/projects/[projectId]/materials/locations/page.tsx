@@ -7,6 +7,7 @@ import {
   locationsApi,
   projectsApi,
   tasksApi,
+  type AssetResponse,
   type LocationDetailResponse,
   type LocationResponse,
   type LocationVersionResponse,
@@ -109,6 +110,47 @@ interface PendingImageFile {
   preview: string;
 }
 
+interface SceneImageItem {
+  url: string;
+  assetId: number | null;
+  source: 'uploaded' | 'generated' | 'reference';
+  createdAt?: string;
+  isReferenced: boolean;
+}
+
+function splitMultilineValue(value: string): string[] {
+  return value
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function buildSceneImageItems(referenceUrls: string[], assets: AssetResponse[]): SceneImageItem[] {
+  const assetMap = new Map<string, AssetResponse>();
+  assets.forEach((asset) => {
+    if (!assetMap.has(asset.file_url)) {
+      assetMap.set(asset.file_url, asset);
+    }
+  });
+
+  const referencedSet = new Set(referenceUrls);
+  const orderedUrls = [
+    ...referenceUrls,
+    ...assets.map((asset) => asset.file_url).filter((url) => !referencedSet.has(url)),
+  ];
+
+  return Array.from(new Set(orderedUrls)).map((url) => {
+    const asset = assetMap.get(url);
+    return {
+      url,
+      assetId: asset?.id ?? null,
+      source: asset ? (asset.source as 'uploaded' | 'generated') : 'reference',
+      createdAt: asset?.created_at,
+      isReferenced: referencedSet.has(url),
+    };
+  });
+}
+
 function EmptyState({ title, description }: { title: string; description: string }) {
   return (
     <div className="flex h-full items-center justify-center">
@@ -132,8 +174,24 @@ function FileDropZone({
   title: string;
   description: string;
 }) {
+  const [dragging, setDragging] = useState(false);
+
   return (
-    <label className={`block rounded-xl border-2 border-dashed p-6 transition ${disabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer hover:border-primary/50 hover:bg-secondary/30'}`}>
+    <label
+      className={`block rounded-xl border-2 border-dashed p-6 transition ${disabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer hover:border-primary/50 hover:bg-secondary/30'} ${dragging ? 'border-primary bg-secondary/40' : ''}`}
+      onDragOver={(event) => {
+        if (disabled) return;
+        event.preventDefault();
+        setDragging(true);
+      }}
+      onDragLeave={() => setDragging(false)}
+      onDrop={(event) => {
+        if (disabled) return;
+        event.preventDefault();
+        setDragging(false);
+        onSelect(event.dataTransfer.files);
+      }}
+    >
       <input
         className="hidden"
         type="file"
@@ -170,16 +228,27 @@ export default function LocationsPage({
   const [locations, setLocations] = useState<LocationResponse[]>([]);
   const [selectedLocId, setSelectedLocId] = useState<number | null>(null);
   const [locDetail, setLocDetail] = useState<LocationDetailResponse | null>(null);
+  const [locationAssets, setLocationAssets] = useState<AssetResponse[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
 
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [newLocName, setNewLocName] = useState('');
-  const [newLocCode, setNewLocCode] = useState('');
   const [newLocType, setNewLocType] = useState('outdoor');
   const [newLocDomain, setNewLocDomain] = useState('');
   const [newLocDesc, setNewLocDesc] = useState('');
+  const [versionDialogOpen, setVersionDialogOpen] = useState(false);
+  const [editingVersion, setEditingVersion] = useState<LocationVersionResponse | null>(null);
+  const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<'studio' | 'versions' | 'details'>('studio');
+  const [selectedStudioVersionId, setSelectedStudioVersionId] = useState<number | null | undefined>(undefined);
+  const [studioVersionAssets, setStudioVersionAssets] = useState<AssetResponse[]>([]);
+  const [selectedSourceLocationId, setSelectedSourceLocationId] = useState<number | null>(null);
+  const [selectedSourceVersionId, setSelectedSourceVersionId] = useState<number | null>(null);
+  const [sourceLocationDetail, setSourceLocationDetail] = useState<LocationDetailResponse | null>(null);
+  const [sourceLocationAssets, setSourceLocationAssets] = useState<AssetResponse[]>([]);
+  const [sourceVersionAssets, setSourceVersionAssets] = useState<AssetResponse[]>([]);
+  const [loadingSourceLibrary, setLoadingSourceLibrary] = useState(false);
 
   const [textPrompt, setTextPrompt] = useState('');
   const [textNegativePrompt, setTextNegativePrompt] = useState('');
@@ -212,17 +281,47 @@ export default function LocationsPage({
     return items;
   }, [projectIdNum]);
 
+  const loadLocationAssets = useCallback(async (locationId: number) => {
+    const items = await assetsApi.list(projectIdNum, 1, 100, {
+      assetType: 'image',
+      locationId,
+      isCurrent: true,
+    }).then((response) => response.items);
+    setLocationAssets(items.filter((asset) => asset.location_version_id == null));
+    return items;
+  }, [projectIdNum]);
+
+  const loadStudioVersionAssets = useCallback(async (locationId: number, versionId: number) => {
+    const items = await assetsApi.list(projectIdNum, 1, 100, {
+      assetType: 'image',
+      locationId,
+      locationVersionId: versionId,
+      isCurrent: true,
+    }).then((response) => response.items);
+    setStudioVersionAssets(items);
+    return items;
+  }, [projectIdNum]);
+
   const loadLocationDetail = useCallback(async (locationId: number) => {
     const detail = await locationsApi.get(projectIdNum, locationId);
     setLocDetail(detail);
-    setSelectedReferenceUrls((prev) => {
-      if (prev.length === 0) {
-        return detail.reference_image_urls.slice(0, 5);
-      }
-      return prev.filter((url) => detail.reference_image_urls.includes(url));
-    });
+    await loadLocationAssets(locationId);
     return detail;
-  }, [projectIdNum]);
+  }, [loadLocationAssets, projectIdNum]);
+
+  const activeStudioVersion = useMemo(
+    () => locDetail?.versions.find((version) => version.id === selectedStudioVersionId) ?? null,
+    [locDetail?.versions, selectedStudioVersionId],
+  );
+
+  const studioReferenceUrls = activeStudioVersion?.reference_image_urls || locDetail?.reference_image_urls || [];
+
+  const sourceLocationOptions = useMemo(() => {
+    if (!locDetail) return locations;
+    const currentLocation = locations.find((location) => location.id === locDetail.id);
+    const otherLocations = locations.filter((location) => location.id !== locDetail.id);
+    return currentLocation ? [currentLocation, ...otherLocations] : locations;
+  }, [locDetail, locations]);
 
   useEffect(() => {
     if (Number.isNaN(projectIdNum)) return;
@@ -243,6 +342,128 @@ export default function LocationsPage({
     if (!selectedLocId || Number.isNaN(projectIdNum)) return;
     loadLocationDetail(selectedLocId).catch(() => setLocDetail(null));
   }, [loadLocationDetail, projectIdNum, selectedLocId]);
+
+  useEffect(() => {
+    if (!locDetail) {
+      setSelectedStudioVersionId(undefined);
+      setStudioVersionAssets([]);
+      return;
+    }
+
+    if (selectedStudioVersionId === null) {
+      return;
+    }
+
+    if (selectedStudioVersionId !== undefined && locDetail.versions.some((version) => version.id === selectedStudioVersionId)) {
+      return;
+    }
+
+    setSelectedStudioVersionId(locDetail.default_version?.id ?? locDetail.versions[0]?.id ?? null);
+  }, [locDetail, selectedStudioVersionId]);
+
+  useEffect(() => {
+    if (!locDetail || sourceLocationOptions.length === 0) {
+      setSelectedSourceLocationId(null);
+      setSelectedSourceVersionId(null);
+      setSourceLocationDetail(null);
+      setSourceLocationAssets([]);
+      setSourceVersionAssets([]);
+      return;
+    }
+
+    setSelectedSourceLocationId((current) => {
+      if (current && sourceLocationOptions.some((location) => location.id === current)) {
+        return current;
+      }
+      return locDetail.id;
+    });
+  }, [locDetail, sourceLocationOptions]);
+
+  useEffect(() => {
+    if (!locDetail) return;
+
+    const nextReferenceUrls = activeStudioVersion?.reference_image_urls || locDetail.reference_image_urls || [];
+    setSelectedReferenceUrls((prev) => {
+      if (prev.length === 0) {
+        return nextReferenceUrls.slice(0, 5);
+      }
+      return prev.filter((url) => nextReferenceUrls.includes(url));
+    });
+
+    if (activeStudioVersion) {
+      loadStudioVersionAssets(locDetail.id, activeStudioVersion.id).catch(() => setStudioVersionAssets([]));
+    } else {
+      setStudioVersionAssets([]);
+    }
+  }, [activeStudioVersion, loadStudioVersionAssets, locDetail]);
+
+  useEffect(() => {
+    if (!selectedSourceLocationId || Number.isNaN(projectIdNum)) {
+      setSourceLocationDetail(null);
+      setSourceLocationAssets([]);
+      setSourceVersionAssets([]);
+      setLoadingSourceLibrary(false);
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingSourceLibrary(true);
+
+    Promise.all([
+      locationsApi.get(projectIdNum, selectedSourceLocationId),
+      assetsApi.list(projectIdNum, 1, 100, {
+        assetType: 'image',
+        locationId: selectedSourceLocationId,
+        isCurrent: true,
+      }).then((response) => response.items),
+    ]).then(([detail, items]) => {
+      if (cancelled) return;
+      setSourceLocationDetail(detail);
+      setSourceLocationAssets(items.filter((asset) => asset.location_version_id == null));
+      setSelectedSourceVersionId((current) => (
+        current && detail.versions.some((version) => version.id === current) ? current : null
+      ));
+    }).catch(() => {
+      if (cancelled) return;
+      setSourceLocationDetail(null);
+      setSourceLocationAssets([]);
+      setSourceVersionAssets([]);
+    }).finally(() => {
+      if (!cancelled) {
+        setLoadingSourceLibrary(false);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [projectIdNum, selectedSourceLocationId]);
+
+  useEffect(() => {
+    if (!selectedSourceLocationId || !selectedSourceVersionId || Number.isNaN(projectIdNum)) {
+      setSourceVersionAssets([]);
+      return;
+    }
+
+    let cancelled = false;
+
+    assetsApi.list(projectIdNum, 1, 100, {
+      assetType: 'image',
+      locationId: selectedSourceLocationId,
+      locationVersionId: selectedSourceVersionId,
+      isCurrent: true,
+    }).then((response) => {
+      if (cancelled) return;
+      setSourceVersionAssets(response.items);
+    }).catch(() => {
+      if (cancelled) return;
+      setSourceVersionAssets([]);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [projectIdNum, selectedSourceLocationId, selectedSourceVersionId]);
 
   useEffect(() => {
     uploadFilesRef.current = uploadFiles;
@@ -268,6 +489,49 @@ export default function LocationsPage({
       || (location.domain || '').toLowerCase().includes(keyword)
     ));
   }, [locations, searchQuery]);
+
+  const locationImageItems = useMemo(
+    () => buildSceneImageItems(locDetail?.reference_image_urls || [], locationAssets),
+    [locDetail?.reference_image_urls, locationAssets],
+  );
+
+  const studioImageItems = useMemo(
+    () => buildSceneImageItems(studioReferenceUrls, activeStudioVersion ? studioVersionAssets : locationAssets),
+    [activeStudioVersion, locationAssets, studioReferenceUrls, studioVersionAssets],
+  );
+
+  const reusableVersionImages = useMemo(() => {
+    if (!locDetail) return [];
+
+    return locDetail.versions
+      .filter((version) => version.id !== activeStudioVersion?.id)
+      .flatMap((version) => version.reference_image_urls.map((url) => ({
+        key: `${version.id}-${url}`,
+        url,
+        versionId: version.id,
+        versionLabel: version.label,
+      })))
+      .filter((item, index, arr) => arr.findIndex((candidate) => candidate.url === item.url) === index)
+      .filter((item) => !studioReferenceUrls.includes(item.url));
+  }, [activeStudioVersion?.id, locDetail, studioReferenceUrls]);
+
+  const selectedSourceVersion = useMemo(
+    () => sourceLocationDetail?.versions.find((version) => version.id === selectedSourceVersionId) ?? null,
+    [sourceLocationDetail?.versions, selectedSourceVersionId],
+  );
+
+  const sourceLibraryMatchesCurrentTarget = useMemo(
+    () => selectedSourceLocationId === locDetail?.id && (selectedSourceVersionId ?? null) === (activeStudioVersion?.id ?? null),
+    [activeStudioVersion?.id, locDetail?.id, selectedSourceLocationId, selectedSourceVersionId],
+  );
+
+  const externalSourceImageItems = useMemo(() => {
+    if (sourceLibraryMatchesCurrentTarget) return [];
+    const sourceReferenceUrls = selectedSourceVersion?.reference_image_urls || sourceLocationDetail?.reference_image_urls || [];
+    const sourceAssets = selectedSourceVersion ? sourceVersionAssets : sourceLocationAssets;
+    return buildSceneImageItems(sourceReferenceUrls, sourceAssets)
+      .filter((item) => !studioReferenceUrls.includes(item.url));
+  }, [selectedSourceVersion, sourceLibraryMatchesCurrentTarget, sourceLocationAssets, sourceLocationDetail?.reference_image_urls, sourceVersionAssets, studioReferenceUrls]);
 
   const addPendingFiles = useCallback((files: FileList | null, target: 'upload' | 'img2img') => {
     if (!files || files.length === 0) return;
@@ -317,6 +581,22 @@ export default function LocationsPage({
     return loadLocationDetail(locDetail.id);
   }, [loadLocationDetail, locDetail, projectIdNum]);
 
+  const updateStudioReferenceUrls = useCallback(async (urls: string[]) => {
+    if (!locDetail) return null;
+
+    if (activeStudioVersion) {
+      await locationsApi.updateVersion(projectIdNum, locDetail.id, activeStudioVersion.id, {
+        reference_image_urls: Array.from(new Set(urls)),
+      });
+    } else {
+      await locationsApi.update(projectIdNum, locDetail.id, {
+        reference_image_urls: Array.from(new Set(urls)),
+      });
+    }
+
+    return loadLocationDetail(locDetail.id);
+  }, [activeStudioVersion, loadLocationDetail, locDetail, projectIdNum]);
+
   const uploadFilesToLocation = useCallback(async (files: PendingImageFile[]) => {
     if (!locDetail) return [];
     const uploadedAssets = await Promise.all(
@@ -324,6 +604,14 @@ export default function LocationsPage({
     );
     return uploadedAssets.map((asset) => asset.file_url);
   }, [locDetail, projectIdNum]);
+
+  const uploadFilesToStudio = useCallback(async (files: PendingImageFile[]) => {
+    if (!locDetail) return [];
+    const uploadedAssets = await Promise.all(
+      files.map((item) => assetsApi.upload(projectIdNum, item.file, undefined, locDetail.id, activeStudioVersion?.id)),
+    );
+    return uploadedAssets.map((asset) => asset.file_url);
+  }, [activeStudioVersion?.id, locDetail, projectIdNum]);
 
   const waitForTask = useCallback(async (taskId: number) => {
     for (let attempt = 0; attempt < 60; attempt += 1) {
@@ -338,17 +626,10 @@ export default function LocationsPage({
   }, []);
 
   const handleCreateLocation = useCallback(async () => {
-    if (!newLocName.trim() || !newLocCode.trim()) return;
+    if (!newLocName.trim()) return;
     setCreating(true);
     try {
-      // 自动格式化 loc_code：大写 + 下划线
-      let formattedCode = newLocCode.trim().toUpperCase().replace(/\s+/g, '_').replace(/[^A-Z0-9_]/g, '');
-      if (!formattedCode.startsWith('LOC_')) {
-        formattedCode = 'LOC_' + formattedCode;
-      }
-
       const location = await locationsApi.create(projectIdNum, {
-        loc_code: formattedCode,
         name: newLocName.trim(),
         location_type: newLocType,
         domain: newLocDomain.trim() || undefined,
@@ -358,7 +639,6 @@ export default function LocationsPage({
       setSelectedLocId(location.id);
       setIsCreateDialogOpen(false);
       setNewLocName('');
-      setNewLocCode('');
       setNewLocType('outdoor');
       setNewLocDomain('');
       setNewLocDesc('');
@@ -368,7 +648,7 @@ export default function LocationsPage({
     } finally {
       setCreating(false);
     }
-  }, [newLocCode, newLocDesc, newLocDomain, newLocName, newLocType, projectIdNum]);
+  }, [newLocDesc, newLocDomain, newLocName, newLocType, projectIdNum]);
 
   const handleDeleteLocation = useCallback(async (locationId: number) => {
     if (!window.confirm('确定删除这个场景吗？')) return;
@@ -386,12 +666,50 @@ export default function LocationsPage({
     }
   }, [locations, projectIdNum, selectedLocId]);
 
+  const openCreateVersionDialog = useCallback(() => {
+    setEditingVersion(null);
+    setVersionDialogOpen(true);
+  }, []);
+
+  const openEditVersionDialog = useCallback((version: LocationVersionResponse) => {
+    setEditingVersion(version);
+    setVersionDialogOpen(true);
+  }, []);
+
+  const handleDeleteVersion = useCallback(async (versionId: number) => {
+    if (!locDetail || !window.confirm('确定删除这个场景版本吗？')) return;
+    try {
+      await locationsApi.deleteVersion(projectIdNum, locDetail.id, versionId);
+      if (selectedStudioVersionId === versionId) {
+        setSelectedStudioVersionId(locDetail.default_version?.id ?? null);
+      }
+      await loadLocationDetail(locDetail.id);
+      toast.success('场景版本已删除');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '删除版本失败');
+    }
+  }, [loadLocationDetail, locDetail, projectIdNum, selectedStudioVersionId]);
+
+  const handleSetDefaultVersion = useCallback(async (versionId: number) => {
+    if (!locDetail) return;
+    try {
+      await locationsApi.updateVersion(projectIdNum, locDetail.id, versionId, { is_default: true });
+      await loadLocationDetail(locDetail.id);
+      toast.success('默认版本已更新');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '设置默认版本失败');
+    }
+  }, [loadLocationDetail, locDetail, projectIdNum]);
+
   const handleUploadSceneImages = useCallback(async () => {
     if (!locDetail || uploadFiles.length === 0) return;
     setUploadingSceneImage(true);
     try {
-      const urls = await uploadFilesToLocation(uploadFiles);
-      await updateLocationReferenceUrls([...(locDetail.reference_image_urls || []), ...urls]);
+      const urls = await uploadFilesToStudio(uploadFiles);
+      await updateStudioReferenceUrls([...(studioReferenceUrls || []), ...urls]);
+      if (activeStudioVersion) {
+        await loadStudioVersionAssets(locDetail.id, activeStudioVersion.id);
+      }
       toast.success('场景图上传成功');
       resetPreviewFiles(uploadFiles);
       setUploadFiles([]);
@@ -400,7 +718,7 @@ export default function LocationsPage({
     } finally {
       setUploadingSceneImage(false);
     }
-  }, [locDetail, resetPreviewFiles, updateLocationReferenceUrls, uploadFiles, uploadFilesToLocation]);
+  }, [activeStudioVersion, loadStudioVersionAssets, locDetail, resetPreviewFiles, studioReferenceUrls, updateStudioReferenceUrls, uploadFiles, uploadFilesToStudio]);
 
   const handleGenerateFromPrompt = useCallback(async () => {
     if (!locDetail || !textPrompt.trim()) {
@@ -413,6 +731,7 @@ export default function LocationsPage({
       const task = await tasksApi.triggerImage({
         project_id: projectIdNum,
         location_id: locDetail.id,
+        location_version_id: activeStudioVersion?.id,
         prompt: textPrompt.trim(),
         negative_prompt: textNegativePrompt.trim() || undefined,
         aspect_ratio: textAspectRatio,
@@ -423,6 +742,9 @@ export default function LocationsPage({
       toast.success('场景图生成任务已提交');
       await waitForTask(task.id);
       await loadLocationDetail(locDetail.id);
+      if (activeStudioVersion) {
+        await loadStudioVersionAssets(locDetail.id, activeStudioVersion.id);
+      }
       toast.success('场景图生成完成');
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '生成失败');
@@ -430,7 +752,9 @@ export default function LocationsPage({
       setTextGenerating(false);
     }
   }, [
+    activeStudioVersion,
     loadLocationDetail,
+    loadStudioVersionAssets,
     locDetail,
     projectIdNum,
     textAspectRatio,
@@ -453,15 +777,16 @@ export default function LocationsPage({
 
     setImgGenerating(true);
     try {
-      const uploadedUrls = img2imgFiles.length > 0 ? await uploadFilesToLocation(img2imgFiles) : [];
+      const uploadedUrls = img2imgFiles.length > 0 ? await uploadFilesToStudio(img2imgFiles) : [];
       if (uploadedUrls.length > 0) {
-        await updateLocationReferenceUrls([...(locDetail.reference_image_urls || []), ...uploadedUrls]);
+        await updateStudioReferenceUrls([...(studioReferenceUrls || []), ...uploadedUrls]);
       }
 
       const referenceUrls = Array.from(new Set([...selectedReferenceUrls, ...uploadedUrls])).slice(0, 5);
       const task = await tasksApi.triggerImage({
         project_id: projectIdNum,
         location_id: locDetail.id,
+        location_version_id: activeStudioVersion?.id,
         prompt: imgPrompt.trim(),
         negative_prompt: imgNegativePrompt.trim() || undefined,
         aspect_ratio: imgAspectRatio,
@@ -473,6 +798,9 @@ export default function LocationsPage({
       toast.success('图生图任务已提交');
       await waitForTask(task.id);
       await loadLocationDetail(locDetail.id);
+      if (activeStudioVersion) {
+        await loadStudioVersionAssets(locDetail.id, activeStudioVersion.id);
+      }
       resetPreviewFiles(img2imgFiles);
       setImg2imgFiles([]);
       toast.success('图生图生成完成');
@@ -482,6 +810,7 @@ export default function LocationsPage({
       setImgGenerating(false);
     }
   }, [
+    activeStudioVersion,
     img2imgFiles,
     imgAspectRatio,
     imgNegativePrompt,
@@ -489,12 +818,14 @@ export default function LocationsPage({
     imgResolution,
     imgStylePreset,
     loadLocationDetail,
+    loadStudioVersionAssets,
     locDetail,
     projectIdNum,
     resetPreviewFiles,
     selectedReferenceUrls,
-    updateLocationReferenceUrls,
-    uploadFilesToLocation,
+    studioReferenceUrls,
+    updateStudioReferenceUrls,
+    uploadFilesToStudio,
     waitForTask,
   ]);
 
@@ -520,6 +851,37 @@ export default function LocationsPage({
       toast.error(error instanceof Error ? error.message : '移除失败');
     }
   }, [locDetail, updateLocationReferenceUrls]);
+
+  const handleDeleteLocationImage = useCallback(async (item: SceneImageItem) => {
+    if (!locDetail) return;
+    try {
+      if (item.assetId) {
+        await assetsApi.delete(projectIdNum, item.assetId);
+        await loadLocationDetail(locDetail.id);
+        if (activeStudioVersion) {
+          await loadStudioVersionAssets(locDetail.id, activeStudioVersion.id);
+        }
+        setSelectedReferenceUrls((prev) => prev.filter((url) => url !== item.url));
+        toast.success('场景图片已删除');
+        return;
+      }
+
+      await updateStudioReferenceUrls(studioReferenceUrls.filter((url) => url !== item.url));
+      setSelectedReferenceUrls((prev) => prev.filter((url) => url !== item.url));
+      toast.success('场景参考图已移除');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '删除失败');
+    }
+  }, [activeStudioVersion, loadLocationDetail, loadStudioVersionAssets, locDetail, projectIdNum, studioReferenceUrls, updateStudioReferenceUrls]);
+
+  const handleAddReusableStudioImage = useCallback(async (url: string) => {
+    try {
+      await updateStudioReferenceUrls([...studioReferenceUrls, url]);
+      toast.success('已加入当前场景图库');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '加入图库失败');
+    }
+  }, [studioReferenceUrls, updateStudioReferenceUrls]);
 
   if (loading) {
     return (
@@ -586,10 +948,6 @@ export default function LocationsPage({
                     <Input value={newLocName} onChange={(event) => setNewLocName(event.target.value)} placeholder="例如：云岚宗广场" />
                   </div>
                   <div className="space-y-2">
-                    <label className="text-sm font-medium">场景编号</label>
-                    <Input value={newLocCode} onChange={(event) => setNewLocCode(event.target.value)} placeholder="例如：LOC_YUNLAN_SQUARE" />
-                  </div>
-                  <div className="space-y-2">
                     <label className="text-sm font-medium">场景类型</label>
                     <Select value={newLocType} onValueChange={setNewLocType}>
                       <SelectTrigger>
@@ -615,7 +973,7 @@ export default function LocationsPage({
 
                 <DialogFooter>
                   <Button variant="outline" onClick={() => setIsCreateDialogOpen(false)}>取消</Button>
-                  <Button onClick={handleCreateLocation} disabled={creating || !newLocName.trim() || !newLocCode.trim()}>
+                  <Button onClick={handleCreateLocation} disabled={creating || !newLocName.trim()}>
                     {creating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
                     创建
                   </Button>
@@ -712,7 +1070,7 @@ export default function LocationsPage({
                 </div>
               </div>
 
-              <Tabs defaultValue="studio" className="space-y-4">
+              <Tabs value={activeWorkspaceTab} onValueChange={(value) => setActiveWorkspaceTab(value as 'studio' | 'versions' | 'details')} className="space-y-4">
                 <TabsList>
                   <TabsTrigger value="studio">场景出图工作区</TabsTrigger>
                   <TabsTrigger value="versions">场景版本</TabsTrigger>
@@ -720,17 +1078,52 @@ export default function LocationsPage({
                 </TabsList>
 
                 <TabsContent value="studio" className="space-y-6">
+                  <Card>
+                    <CardContent className="flex flex-col gap-3 p-4 md:flex-row md:items-center md:justify-between">
+                      <div>
+                        <div className="font-medium text-foreground">当前出图目标</div>
+                        <div className="text-sm text-muted-foreground">
+                          选择主场景或某个版本后，上传、生成、图库展示和落库都会自动切换到对应目标。
+                        </div>
+                      </div>
+                      <div className="w-full md:w-72">
+                        <Select
+                          value={selectedStudioVersionId === null ? '__base__' : String(selectedStudioVersionId)}
+                          onValueChange={(value) => {
+                            setSelectedStudioVersionId(value === '__base__' ? null : Number(value));
+                            setSelectedReferenceUrls([]);
+                          }}
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="__base__">主场景图库</SelectItem>
+                            {locDetail.versions.map((version) => (
+                              <SelectItem key={version.id} value={String(version.id)}>
+                                {version.label} ({version.version_code})
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </CardContent>
+                  </Card>
+
                   <div className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
                     <Card>
                       <CardHeader>
-                        <CardTitle>生成与上传</CardTitle>
-                        <CardDescription>支持文生图、本地上传、图生图三种方式维护当前场景图。</CardDescription>
+                        <CardTitle>{activeStudioVersion ? `${activeStudioVersion.label} 生成与上传` : '主场景生成与上传'}</CardTitle>
+                        <CardDescription>
+                          {activeStudioVersion
+                            ? '当前上传、文生图和图生图结果会同步保存到该版本。'
+                            : '当前上传、文生图和图生图结果会保存到主场景图库。'}
+                        </CardDescription>
                       </CardHeader>
-                      <CardContent>
+                      <CardContent className="space-y-4">
                         <Tabs defaultValue="prompt" className="space-y-4">
-                          <TabsList className="grid w-full grid-cols-3">
+                          <TabsList className="grid w-full grid-cols-2">
                             <TabsTrigger value="prompt">提示词生图</TabsTrigger>
-                            <TabsTrigger value="upload">本地上传</TabsTrigger>
                             <TabsTrigger value="img2img">图生图</TabsTrigger>
                           </TabsList>
 
@@ -792,43 +1185,6 @@ export default function LocationsPage({
                             </div>
                           </TabsContent>
 
-                          <TabsContent value="upload" className="space-y-4">
-                            <FileDropZone
-                              onSelect={(files) => addPendingFiles(files, 'upload')}
-                              disabled={uploadingSceneImage}
-                              title="上传本地场景图"
-                              description="支持 JPG、PNG、WebP、GIF，单张不超过 10MB"
-                            />
-
-                            {uploadFiles.length > 0 ? (
-                              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                                {uploadFiles.map((item) => (
-                                  <div key={item.id} className="rounded-xl border bg-secondary/20 p-2">
-                                    <div className="relative overflow-hidden rounded-lg">
-                                      <img src={item.preview} alt={item.file.name} className="aspect-video w-full object-cover" />
-                                      <Button
-                                        variant="secondary"
-                                        size="icon"
-                                        className="absolute right-2 top-2 h-7 w-7"
-                                        onClick={() => removePendingFile(item.id, 'upload')}
-                                      >
-                                        <X className="h-4 w-4" />
-                                      </Button>
-                                    </div>
-                                    <div className="mt-2 truncate text-xs text-muted-foreground">{item.file.name}</div>
-                                  </div>
-                                ))}
-                              </div>
-                            ) : null}
-
-                            <div className="flex justify-end">
-                              <Button onClick={handleUploadSceneImages} disabled={uploadingSceneImage || uploadFiles.length === 0}>
-                                {uploadingSceneImage ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ImagePlus className="mr-2 h-4 w-4" />}
-                                保存到当前场景
-                              </Button>
-                            </div>
-                          </TabsContent>
-
                           <TabsContent value="img2img" className="space-y-4">
                             <div className="space-y-2">
                               <label className="text-sm font-medium">图生图提示词</label>
@@ -882,37 +1238,32 @@ export default function LocationsPage({
 
                             <Separator />
 
-                            <div className="space-y-3">
-                              <div className="flex items-center justify-between">
-                                <div>
-                                  <div className="text-sm font-medium">选择已有参考图</div>
-                                  <div className="text-xs text-muted-foreground">可多选，最多 5 张</div>
+                            {selectedReferenceUrls.length > 0 ? (
+                              <div className="space-y-3">
+                                <div className="flex items-center justify-between">
+                                  <div>
+                                    <div className="text-sm font-medium">选择已有参考图</div>
+                                    <div className="text-xs text-muted-foreground">可多选，最多 5 张</div>
+                                  </div>
+                                  <Badge variant="secondary">{selectedReferenceUrls.length}/5</Badge>
                                 </div>
-                                <Badge variant="secondary">{selectedReferenceUrls.length}/5</Badge>
-                              </div>
 
-                              {locDetail.reference_image_urls.length > 0 ? (
                                 <div className="grid gap-3 sm:grid-cols-2">
-                                  {locDetail.reference_image_urls.map((url) => {
-                                    const selected = selectedReferenceUrls.includes(url);
+                                  {selectedReferenceUrls.map((url) => {
                                     return (
                                       <button
                                         key={url}
                                         type="button"
                                         onClick={() => toggleReferenceSelection(url)}
-                                        className={`overflow-hidden rounded-xl border text-left transition ${selected ? 'border-primary ring-2 ring-primary/20' : 'border-border hover:border-primary/40'}`}
+                                        className="overflow-hidden rounded-xl border border-primary ring-2 ring-primary/20 text-left transition"
                                       >
                                         <img src={url} alt="" className="aspect-video w-full object-cover" />
                                       </button>
                                     );
                                   })}
                                 </div>
-                              ) : (
-                                <div className="rounded-xl border border-dashed p-6 text-center text-sm text-muted-foreground">
-                                  当前场景还没有参考图，可以先在“本地上传”里上传一张，或者直接在下面补充图生图参考图。
-                                </div>
-                              )}
-                            </div>
+                              </div>
+                            ) : null}
 
                             <div className="space-y-3">
                               <div>
@@ -962,44 +1313,231 @@ export default function LocationsPage({
 
                     <Card>
                       <CardHeader>
-                        <CardTitle>当前场景图库</CardTitle>
-                        <CardDescription>这里展示已经绑定到当前场景的参考图，图生图会优先复用它们。</CardDescription>
+                        <CardTitle>{activeStudioVersion ? `${activeStudioVersion.label} 版本图库` : '主场景图库'}</CardTitle>
+                        <CardDescription>
+                          {activeStudioVersion
+                            ? '右侧只展示当前版本的场景素材图；也可以把其他版本的图片加入当前版本图库。'
+                            : '这里展示主场景图库，也可以复用其他版本的场景图加入当前主场景。'}
+                        </CardDescription>
                       </CardHeader>
-                      <CardContent>
-                        {locDetail.reference_image_urls.length === 0 ? (
+                      <CardContent className="space-y-4">
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <div className="text-sm font-medium">
+                                {activeStudioVersion ? '上传到当前版本图库' : '上传到主场景图库'}
+                              </div>
+                              <div className="text-xs text-muted-foreground">
+                                点击或拖拽图片到这里，上传后会保存到当前选中的出图目标。
+                              </div>
+                            </div>
+                            {uploadFiles.length > 0 ? (
+                              <Button onClick={handleUploadSceneImages} disabled={uploadingSceneImage}>
+                                {uploadingSceneImage ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ImagePlus className="mr-2 h-4 w-4" />}
+                                {activeStudioVersion ? '保存到当前版本' : '保存到主场景'}
+                              </Button>
+                            ) : null}
+                          </div>
+
+                          <FileDropZone
+                            onSelect={(files) => addPendingFiles(files, 'upload')}
+                            disabled={uploadingSceneImage}
+                            title={activeStudioVersion ? '上传版本场景图' : '上传主场景图'}
+                            description="支持点击选择和拖拽上传，JPG / PNG / WebP / GIF，单张不超过 10MB"
+                          />
+
+                          {uploadFiles.length > 0 ? (
+                            <div className="grid gap-3 sm:grid-cols-2">
+                              {uploadFiles.map((item) => (
+                                <div key={item.id} className="rounded-xl border bg-secondary/20 p-2">
+                                  <div className="relative overflow-hidden rounded-lg">
+                                    <img src={item.preview} alt={item.file.name} className="aspect-video w-full object-cover" />
+                                    <Button
+                                      variant="secondary"
+                                      size="icon"
+                                      className="absolute right-2 top-2 h-7 w-7"
+                                      onClick={() => removePendingFile(item.id, 'upload')}
+                                    >
+                                      <X className="h-4 w-4" />
+                                    </Button>
+                                  </div>
+                                  <div className="mt-2 truncate text-xs text-muted-foreground">{item.file.name}</div>
+                                </div>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+
+                        <div className="space-y-3 rounded-xl border bg-secondary/10 p-4">
+                            <div>
+                              <div className="text-sm font-medium">引用已有图片</div>
+                              <div className="text-xs text-muted-foreground">
+                                可从当前场景的其他版本，或项目内其他场景/版本图库中选择图片，直接加入当前图库。
+                              </div>
+                            </div>
+
+                          <div className="grid gap-3 md:grid-cols-2">
+                            <div className="space-y-2">
+                              <label className="text-xs font-medium text-muted-foreground">来源场景</label>
+                              <Select
+                                value={selectedSourceLocationId ? String(selectedSourceLocationId) : undefined}
+                                onValueChange={(value) => {
+                                  setSelectedSourceLocationId(Number(value));
+                                  setSelectedSourceVersionId(null);
+                                  setSourceVersionAssets([]);
+                                }}
+                                disabled={sourceLocationOptions.length === 0}
+                              >
+                                <SelectTrigger>
+                                  <SelectValue placeholder="选择来源场景" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {sourceLocationOptions.map((location) => (
+                                    <SelectItem key={location.id} value={String(location.id)}>
+                                      {location.id === locDetail?.id ? `${location.name}（当前场景）` : `${location.name} (${location.loc_code})`}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
+
+                            <div className="space-y-2">
+                              <label className="text-xs font-medium text-muted-foreground">来源图库</label>
+                              <Select
+                                value={selectedSourceVersionId === null ? '__base__' : String(selectedSourceVersionId)}
+                                onValueChange={(value) => {
+                                  setSelectedSourceVersionId(value === '__base__' ? null : Number(value));
+                                  setSourceVersionAssets([]);
+                                }}
+                                disabled={!sourceLocationDetail || sourceLocationOptions.length === 0}
+                              >
+                                <SelectTrigger>
+                                  <SelectValue placeholder="选择主图库或版本图库" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="__base__">主场景图库</SelectItem>
+                                  {sourceLocationDetail?.versions.map((version) => (
+                                    <SelectItem key={version.id} value={String(version.id)}>
+                                      {version.label} ({version.version_code})
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
+                          </div>
+
+                          {sourceLocationOptions.length === 0 ? (
+                            <div className="rounded-xl border border-dashed p-6 text-center text-sm text-muted-foreground">
+                              当前项目还没有可引用的场景或版本图库。
+                            </div>
+                          ) : sourceLibraryMatchesCurrentTarget ? (
+                            <div className="rounded-xl border border-dashed p-6 text-center text-sm text-muted-foreground">
+                              当前选中的来源就是正在编辑的图库本身，请切换到当前场景的其他版本，或选择其他场景/版本进行引用。
+                            </div>
+                          ) : loadingSourceLibrary ? (
+                            <div className="flex items-center justify-center rounded-xl border border-dashed p-6 text-sm text-muted-foreground">
+                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                              正在加载来源图库...
+                            </div>
+                          ) : externalSourceImageItems.length > 0 ? (
+                            <div className="grid gap-3 sm:grid-cols-2">
+                              {externalSourceImageItems.map((item, index) => (
+                                <div key={`${item.url}-${index}`} className="overflow-hidden rounded-xl border bg-card">
+                                  <img src={item.url} alt="" className="aspect-video w-full object-cover" />
+                                  <div className="flex items-center justify-between gap-2 p-3">
+                                    <div className="text-xs text-muted-foreground">
+                                      {selectedSourceVersion ? `${sourceLocationDetail?.name} / ${selectedSourceVersion.label}` : sourceLocationDetail?.name}
+                                    </div>
+                                    <Button size="sm" variant="outline" onClick={() => handleAddReusableStudioImage(item.url)}>
+                                      引用到当前图库
+                                    </Button>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="rounded-xl border border-dashed p-6 text-center text-sm text-muted-foreground">
+                              当前来源图库暂无可引用图片，或者这些图片已经在当前图库中了。
+                            </div>
+                          )}
+                        </div>
+
+                        {studioImageItems.length === 0 ? (
                           <div className="rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">
                             还没有场景图。你可以先输入提示词生成一张，或者上传本地图片。
                           </div>
                         ) : (
                           <div className="grid gap-4 sm:grid-cols-2">
-                            {locDetail.reference_image_urls.map((url, index) => (
-                              <div key={url} className="overflow-hidden rounded-xl border bg-card">
-                                <img src={url} alt={`场景图 ${index + 1}`} className="aspect-video w-full object-cover" />
+                            {studioImageItems.map((item, index) => {
+                              const url = item.url;
+                              return (
+                              <div key={item.url} className="overflow-hidden rounded-xl border bg-card">
+                                <img src={item.url} alt={`场景图 ${index + 1}`} className="aspect-video w-full object-cover" />
                                 <div className="flex items-center justify-between gap-2 p-3">
                                   <div className="text-xs text-muted-foreground">场景图 #{index + 1}</div>
                                   <div className="flex items-center gap-2">
                                     <Button
-                                      variant={selectedReferenceUrls.includes(url) ? 'default' : 'outline'}
+                                      variant={selectedReferenceUrls.includes(item.url) ? 'default' : 'outline'}
                                       size="sm"
-                                      onClick={() => toggleReferenceSelection(url)}
+                                      onClick={() => toggleReferenceSelection(item.url)}
                                     >
                                       {selectedReferenceUrls.includes(url) ? '已选中' : '设为参考图'}
                                     </Button>
-                                    <Button variant="ghost" size="icon" onClick={() => handleRemoveReferenceImage(url)}>
+                                    <Button variant="ghost" size="icon" onClick={() => handleDeleteLocationImage(item)}>
                                       <Trash2 className="h-4 w-4 text-muted-foreground hover:text-destructive" />
                                     </Button>
                                   </div>
                                 </div>
                               </div>
-                            ))}
+                              );
+                            })}
                           </div>
                         )}
+                        {reusableVersionImages.length > 0 ? (
+                          <div className="space-y-3">
+                            <div>
+                              <div className="text-sm font-medium">其他版本可复用场景图</div>
+                              <div className="text-xs text-muted-foreground">可直接加入当前选中目标的场景图库。</div>
+                            </div>
+                            <div className="grid gap-4 sm:grid-cols-2">
+                              {reusableVersionImages.map((item) => (
+                                <div key={item.key} className="overflow-hidden rounded-xl border bg-card">
+                                  <img src={item.url} alt={item.versionLabel} className="aspect-video w-full object-cover" />
+                                  <div className="flex items-center justify-between gap-2 p-3">
+                                    <div>
+                                      <div className="text-xs text-muted-foreground">{item.versionLabel}</div>
+                                      <div className="text-xs text-muted-foreground">来自其他版本</div>
+                                    </div>
+                                    <Button size="sm" variant="outline" onClick={() => handleAddReusableStudioImage(item.url)}>
+                                      加入当前图库
+                                    </Button>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
                       </CardContent>
                     </Card>
                   </div>
                 </TabsContent>
 
                 <TabsContent value="versions" className="space-y-4">
+                  <Card>
+                    <CardContent className="flex flex-col gap-3 p-4 md:flex-row md:items-center md:justify-between">
+                      <div>
+                        <div className="font-medium text-foreground">场景版本管理</div>
+                        <div className="text-sm text-muted-foreground">
+                          为同一个场景维护白天、夜景、战损等多套版本，并分别管理版本场景图。
+                        </div>
+                      </div>
+                      <Button onClick={openCreateVersionDialog}>
+                        <Plus className="mr-2 h-4 w-4" />
+                        新增版本
+                      </Button>
+                    </CardContent>
+                  </Card>
+
                   {locDetail.versions.length === 0 ? (
                     <Card>
                       <CardContent className="py-12 text-center text-sm text-muted-foreground">
@@ -1037,6 +1575,32 @@ export default function LocationsPage({
                             <p className="text-sm text-muted-foreground">
                               {version.description || '暂无版本描述。'}
                             </p>
+
+                            <div className="flex flex-wrap gap-2">
+                              {!version.is_default ? (
+                                <Button variant="outline" size="sm" onClick={() => handleSetDefaultVersion(version.id)}>
+                                  设为默认
+                                </Button>
+                              ) : null}
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => {
+                                  setSelectedStudioVersionId(version.id);
+                                  setActiveWorkspaceTab('studio');
+                                }}
+                              >
+                                <Sparkles className="mr-2 h-4 w-4" />
+                                图片工作台
+                              </Button>
+                              <Button variant="outline" size="sm" onClick={() => openEditVersionDialog(version)}>
+                                编辑版本
+                              </Button>
+                              <Button variant="ghost" size="sm" onClick={() => handleDeleteVersion(version.id)}>
+                                <Trash2 className="mr-2 h-4 w-4 text-muted-foreground" />
+                                删除
+                              </Button>
+                            </div>
 
                             {version.additional_elements.length > 0 ? (
                               <div className="space-y-2">
@@ -1168,10 +1732,788 @@ export default function LocationsPage({
                   </div>
                 </TabsContent>
               </Tabs>
+
+              <LocationVersionDialog
+                open={versionDialogOpen}
+                onOpenChange={setVersionDialogOpen}
+                projectId={projectIdNum}
+                locationId={locDetail.id}
+                version={editingVersion}
+                onSuccess={async () => {
+                  await loadLocationDetail(locDetail.id);
+                }}
+              />
+
             </div>
           )}
         </div>
       </div>
     </AppLayout>
+  );
+}
+
+function LocationVersionDialog({
+  open,
+  onOpenChange,
+  projectId,
+  locationId,
+  version,
+  onSuccess,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  projectId: number;
+  locationId: number;
+  version: LocationVersionResponse | null;
+  onSuccess: () => Promise<void>;
+}) {
+  const [saving, setSaving] = useState(false);
+  const [versionCode, setVersionCode] = useState('');
+  const [label, setLabel] = useState('');
+  const [description, setDescription] = useState('');
+  const [timeOfDay, setTimeOfDay] = useState('');
+  const [weather, setWeather] = useState('');
+  const [additionalElements, setAdditionalElements] = useState('');
+  const [removedElements, setRemovedElements] = useState('');
+  const [promptSuffix, setPromptSuffix] = useState('');
+  const [fullPrompt, setFullPrompt] = useState('');
+  const [applicableSceneCodes, setApplicableSceneCodes] = useState('');
+  const [isDefault, setIsDefault] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setVersionCode(version?.version_code ?? '');
+    setLabel(version?.label ?? '');
+    setDescription(version?.description ?? '');
+    setTimeOfDay(version?.time_of_day ?? '');
+    setWeather(version?.weather ?? '');
+    setAdditionalElements((version?.additional_elements ?? []).join('\n'));
+    setRemovedElements((version?.removed_elements ?? []).join('\n'));
+    setPromptSuffix(version?.prompt_suffix ?? '');
+    setFullPrompt(version?.full_prompt ?? '');
+    setApplicableSceneCodes((version?.applicable_scene_codes ?? []).join('\n'));
+    setIsDefault(version?.is_default ?? false);
+  }, [open, version]);
+
+  const handleSave = useCallback(async () => {
+    const normalizedVersionCode = versionCode.trim().toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
+    if (!label.trim()) {
+      toast.error('请输入版本名称');
+      return;
+    }
+    if (!version && !normalizedVersionCode) {
+      toast.error('请输入版本编码');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const payload = {
+        label: label.trim(),
+        description: description.trim() || undefined,
+        time_of_day: timeOfDay || undefined,
+        weather: weather || undefined,
+        additional_elements: splitMultilineValue(additionalElements),
+        removed_elements: splitMultilineValue(removedElements),
+        prompt_suffix: promptSuffix.trim() || undefined,
+        full_prompt: fullPrompt.trim() || undefined,
+        applicable_scene_codes: splitMultilineValue(applicableSceneCodes),
+        is_default: isDefault,
+      };
+
+      if (version) {
+        await locationsApi.updateVersion(projectId, locationId, version.id, payload);
+        toast.success('场景版本已更新');
+      } else {
+        await locationsApi.createVersion(projectId, locationId, {
+          version_code: normalizedVersionCode,
+          ...payload,
+        });
+        toast.success('场景版本已创建');
+      }
+
+      await onSuccess();
+      onOpenChange(false);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '保存版本失败');
+    } finally {
+      setSaving(false);
+    }
+  }, [
+    additionalElements,
+    applicableSceneCodes,
+    description,
+    fullPrompt,
+    isDefault,
+    label,
+    locationId,
+    onOpenChange,
+    onSuccess,
+    projectId,
+    promptSuffix,
+    removedElements,
+    timeOfDay,
+    version,
+    versionCode,
+    weather,
+  ]);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>{version ? '编辑场景版本' : '新增场景版本'}</DialogTitle>
+          <DialogDescription>
+            版本可用于区分白天、夜景、战损、雨天等不同场景状态，并拥有独立场景图。
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="space-y-2">
+            <label className="text-sm font-medium">版本名称</label>
+            <Input value={label} onChange={(event) => setLabel(event.target.value)} placeholder="例如：夜景" />
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium">版本编码</label>
+            <Input
+              value={versionCode}
+              onChange={(event) => setVersionCode(event.target.value)}
+              placeholder="例如：night"
+              disabled={Boolean(version)}
+            />
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-sm font-medium">时间</label>
+            <Select value={timeOfDay || '__none__'} onValueChange={(value) => setTimeOfDay(value === '__none__' ? '' : value)}>
+              <SelectTrigger>
+                <SelectValue placeholder="未设置" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">未设置</SelectItem>
+                {Object.entries(timeOfDayLabels).map(([value, text]) => (
+                  <SelectItem key={value} value={value}>{text}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium">天气</label>
+            <Select value={weather || '__none__'} onValueChange={(value) => setWeather(value === '__none__' ? '' : value)}>
+              <SelectTrigger>
+                <SelectValue placeholder="未设置" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">未设置</SelectItem>
+                {Object.entries(weatherLabels).map(([value, text]) => (
+                  <SelectItem key={value} value={value}>{text}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <label className="text-sm font-medium">版本描述</label>
+          <Textarea value={description} onChange={(event) => setDescription(event.target.value)} rows={3} />
+        </div>
+
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="space-y-2">
+            <label className="text-sm font-medium">新增元素</label>
+            <Textarea value={additionalElements} onChange={(event) => setAdditionalElements(event.target.value)} rows={4} placeholder="每行一个，或用逗号分隔" />
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium">移除元素</label>
+            <Textarea value={removedElements} onChange={(event) => setRemovedElements(event.target.value)} rows={4} placeholder="每行一个，或用逗号分隔" />
+          </div>
+        </div>
+
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="space-y-2">
+            <label className="text-sm font-medium">追加提示词</label>
+            <Textarea value={promptSuffix} onChange={(event) => setPromptSuffix(event.target.value)} rows={3} />
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium">完整提示词覆盖</label>
+            <Textarea value={fullPrompt} onChange={(event) => setFullPrompt(event.target.value)} rows={3} />
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <label className="text-sm font-medium">适用场景编码</label>
+          <Textarea value={applicableSceneCodes} onChange={(event) => setApplicableSceneCodes(event.target.value)} rows={3} placeholder="每行一个 scene code" />
+        </div>
+
+        <label className="flex items-center gap-2 text-sm text-foreground">
+          <input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} />
+          设为默认版本
+        </label>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+          <Button onClick={handleSave} disabled={saving}>
+            {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+            保存版本
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function LocationVersionStudioDialog({
+  open,
+  onOpenChange,
+  projectId,
+  locationId,
+  version,
+  onRefresh,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  projectId: number;
+  locationId: number;
+  version: LocationVersionResponse | null;
+  onRefresh: () => Promise<void>;
+}) {
+  const [uploadFiles, setUploadFiles] = useState<PendingImageFile[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [prompt, setPrompt] = useState('');
+  const [negativePrompt, setNegativePrompt] = useState('');
+  const [stylePreset, setStylePreset] = useState('');
+  const [aspectRatio, setAspectRatio] = useState('16:9');
+  const [resolution, setResolution] = useState('1K');
+  const [generating, setGenerating] = useState(false);
+  const [imgPrompt, setImgPrompt] = useState('');
+  const [imgNegativePrompt, setImgNegativePrompt] = useState('');
+  const [imgStylePreset, setImgStylePreset] = useState('');
+  const [imgAspectRatio, setImgAspectRatio] = useState('16:9');
+  const [imgResolution, setImgResolution] = useState('1K');
+  const [img2imgFiles, setImg2imgFiles] = useState<PendingImageFile[]>([]);
+  const [versionAssets, setVersionAssets] = useState<AssetResponse[]>([]);
+  const [selectedReferenceUrls, setSelectedReferenceUrls] = useState<string[]>([]);
+  const [imgGenerating, setImgGenerating] = useState(false);
+
+  const resetPreviewFiles = useCallback((files: PendingImageFile[]) => {
+    files.forEach((item) => URL.revokeObjectURL(item.preview));
+  }, []);
+
+  useEffect(() => {
+    if (!open || !version) return;
+    setSelectedReferenceUrls(version.reference_image_urls.slice(0, 5));
+  }, [open, version]);
+
+  const loadVersionAssets = useCallback(async () => {
+    if (!version) {
+      setVersionAssets([]);
+      return [];
+    }
+    const items = await assetsApi.list(projectId, 1, 100, {
+      assetType: 'image',
+      locationId,
+      locationVersionId: version.id,
+      isCurrent: true,
+    }).then((response) => response.items);
+    setVersionAssets(items);
+    return items;
+  }, [locationId, projectId, version]);
+
+  useEffect(() => {
+    if (open) {
+      loadVersionAssets().catch(() => setVersionAssets([]));
+      return;
+    }
+    resetPreviewFiles(uploadFiles);
+    resetPreviewFiles(img2imgFiles);
+    setUploadFiles([]);
+    setImg2imgFiles([]);
+    setPrompt('');
+    setNegativePrompt('');
+    setStylePreset('');
+    setImgPrompt('');
+    setImgNegativePrompt('');
+    setImgStylePreset('');
+    setAspectRatio('16:9');
+    setResolution('1K');
+    setImgAspectRatio('16:9');
+    setImgResolution('1K');
+    setSelectedReferenceUrls([]);
+    setVersionAssets([]);
+  }, [img2imgFiles, loadVersionAssets, open, resetPreviewFiles, uploadFiles]);
+
+  const versionImageItems = useMemo(
+    () => buildSceneImageItems(version?.reference_image_urls || [], versionAssets),
+    [version?.reference_image_urls, versionAssets],
+  );
+
+  const addPendingFiles = useCallback((files: FileList | null, target: 'upload' | 'img2img') => {
+    if (!files || files.length === 0) return;
+
+    const validTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+    const nextFiles: PendingImageFile[] = [];
+
+    Array.from(files).forEach((file) => {
+      if (!validTypes.includes(file.type)) {
+        toast.error(`${file.name} 不是支持的图片格式`);
+        return;
+      }
+      if (file.size > 10 * 1024 * 1024) {
+        toast.error(`${file.name} 超过 10MB 限制`);
+        return;
+      }
+      nextFiles.push({
+        id: `${Date.now()}-${Math.random()}`,
+        file,
+        preview: URL.createObjectURL(file),
+      });
+    });
+
+    if (target === 'upload') {
+      setUploadFiles((prev) => [...prev, ...nextFiles].slice(0, 10));
+    } else {
+      setImg2imgFiles((prev) => [...prev, ...nextFiles].slice(0, 5));
+    }
+  }, []);
+
+  const removePendingFile = useCallback((id: string, target: 'upload' | 'img2img') => {
+    const setter = target === 'upload' ? setUploadFiles : setImg2imgFiles;
+    setter((prev) => {
+      const removed = prev.find((item) => item.id === id);
+      if (removed) {
+        URL.revokeObjectURL(removed.preview);
+      }
+      return prev.filter((item) => item.id !== id);
+    });
+  }, []);
+
+  const syncReferenceUrls = useCallback(async (urls: string[]) => {
+    if (!version) return;
+    await locationsApi.updateVersion(projectId, locationId, version.id, {
+      reference_image_urls: Array.from(new Set(urls)),
+    });
+    await onRefresh();
+  }, [locationId, onRefresh, projectId, version]);
+
+  const uploadFilesToVersion = useCallback(async (files: PendingImageFile[]) => {
+    const assets = await Promise.all(
+      files.map((item) => assetsApi.upload(projectId, item.file, undefined, locationId, version?.id)),
+    );
+    return assets.map((asset) => asset.file_url);
+  }, [locationId, projectId, version?.id]);
+
+  const waitForTask = useCallback(async (taskId: number) => {
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const task = await tasksApi.get(taskId);
+      if (task.status === 'success') return task;
+      if (task.status === 'failed') {
+        throw new Error(task.error_message || '图片生成失败');
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+    }
+    throw new Error('生成耗时较长，请稍后刷新查看结果');
+  }, []);
+
+  const handleUpload = useCallback(async () => {
+    if (!version || uploadFiles.length === 0) return;
+    setUploading(true);
+    try {
+      const urls = await uploadFilesToVersion(uploadFiles);
+      await syncReferenceUrls([...(version.reference_image_urls || []), ...urls]);
+      await loadVersionAssets();
+      toast.success('版本场景图已上传');
+      resetPreviewFiles(uploadFiles);
+      setUploadFiles([]);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '上传失败');
+    } finally {
+      setUploading(false);
+    }
+  }, [loadVersionAssets, resetPreviewFiles, syncReferenceUrls, uploadFiles, uploadFilesToVersion, version]);
+
+  const handlePromptGenerate = useCallback(async () => {
+    if (!version || !prompt.trim()) {
+      toast.error('请输入提示词');
+      return;
+    }
+    setGenerating(true);
+    try {
+      const task = await tasksApi.triggerImage({
+        project_id: projectId,
+        location_id: locationId,
+        location_version_id: version.id,
+        prompt: prompt.trim(),
+        negative_prompt: negativePrompt.trim() || undefined,
+        aspect_ratio: aspectRatio,
+        resolution,
+        style_preset: stylePreset.trim() || undefined,
+      });
+      await waitForTask(task.id);
+      await onRefresh();
+      await loadVersionAssets();
+      toast.success('版本场景图生成完成');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '生成失败');
+    } finally {
+      setGenerating(false);
+    }
+  }, [aspectRatio, loadVersionAssets, locationId, negativePrompt, onRefresh, projectId, prompt, resolution, stylePreset, version, waitForTask]);
+
+  const handleImageGenerate = useCallback(async () => {
+    if (!version || !imgPrompt.trim()) {
+      toast.error('请输入图生图提示词');
+      return;
+    }
+    if (selectedReferenceUrls.length === 0 && img2imgFiles.length === 0) {
+      toast.error('请至少准备一张参考图');
+      return;
+    }
+
+    setImgGenerating(true);
+    try {
+      const uploadedUrls = img2imgFiles.length > 0 ? await uploadFilesToVersion(img2imgFiles) : [];
+      if (uploadedUrls.length > 0) {
+        await syncReferenceUrls([...(version.reference_image_urls || []), ...uploadedUrls]);
+      }
+
+      const task = await tasksApi.triggerImage({
+        project_id: projectId,
+        location_id: locationId,
+        location_version_id: version.id,
+        prompt: imgPrompt.trim(),
+        negative_prompt: imgNegativePrompt.trim() || undefined,
+        aspect_ratio: imgAspectRatio,
+        resolution: imgResolution,
+        style_preset: imgStylePreset.trim() || undefined,
+        reference_image_urls: Array.from(new Set([...selectedReferenceUrls, ...uploadedUrls])).slice(0, 5),
+      });
+      await waitForTask(task.id);
+      await onRefresh();
+      await loadVersionAssets();
+      resetPreviewFiles(img2imgFiles);
+      setImg2imgFiles([]);
+      toast.success('版本图生图完成');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '图生图失败');
+    } finally {
+      setImgGenerating(false);
+    }
+  }, [
+    img2imgFiles,
+    imgAspectRatio,
+    imgNegativePrompt,
+    imgPrompt,
+    imgResolution,
+    imgStylePreset,
+    locationId,
+    onRefresh,
+    projectId,
+    resetPreviewFiles,
+    selectedReferenceUrls,
+    syncReferenceUrls,
+    uploadFilesToVersion,
+    version,
+    waitForTask,
+    loadVersionAssets,
+  ]);
+
+  const handleRemoveReferenceImage = useCallback(async (url: string) => {
+    if (!version) return;
+    try {
+      await syncReferenceUrls(version.reference_image_urls.filter((item) => item !== url));
+      setSelectedReferenceUrls((prev) => prev.filter((item) => item !== url));
+      toast.success('已移除版本场景图');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '移除失败');
+    }
+  }, [syncReferenceUrls, version]);
+
+  const handleDeleteVersionImage = useCallback(async (item: SceneImageItem) => {
+    if (!version) return;
+    try {
+      if (item.assetId) {
+        await assetsApi.delete(projectId, item.assetId);
+        await onRefresh();
+        await loadVersionAssets();
+        setSelectedReferenceUrls((prev) => prev.filter((url) => url !== item.url));
+        toast.success('版本场景图已删除');
+        return;
+      }
+
+      await syncReferenceUrls(version.reference_image_urls.filter((url) => url !== item.url));
+      setSelectedReferenceUrls((prev) => prev.filter((url) => url !== item.url));
+      toast.success('版本参考图已移除');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '删除失败');
+    }
+  }, [loadVersionAssets, onRefresh, projectId, syncReferenceUrls, version]);
+
+  const toggleReferenceSelection = useCallback((url: string) => {
+    setSelectedReferenceUrls((prev) => {
+      if (prev.includes(url)) {
+        return prev.filter((item) => item !== url);
+      }
+      if (prev.length >= 5) {
+        toast.error('最多选择 5 张参考图');
+        return prev;
+      }
+      return [...prev, url];
+    });
+  }, []);
+
+  if (!version) {
+    return null;
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-5xl">
+        <DialogHeader>
+          <DialogTitle>{version.label} 图片工作台</DialogTitle>
+          <DialogDescription>
+            这里管理当前版本的独立场景图，支持手动上传、文生图和图生图。
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">生成与上传</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <Tabs defaultValue="prompt" className="space-y-4">
+                <TabsList className="grid w-full grid-cols-3">
+                  <TabsTrigger value="prompt">提示词生图</TabsTrigger>
+                  <TabsTrigger value="upload">本地上传</TabsTrigger>
+                  <TabsTrigger value="img2img">图生图</TabsTrigger>
+                </TabsList>
+
+                <TabsContent value="prompt" className="space-y-4">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">正向提示词</label>
+                    <Textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={5} />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">负向提示词</label>
+                    <Input value={negativePrompt} onChange={(event) => setNegativePrompt(event.target.value)} />
+                  </div>
+                  <div className="grid gap-4 md:grid-cols-3">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">画幅比例</label>
+                      <Select value={aspectRatio} onValueChange={setAspectRatio}>
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {aspectRatios.map((item) => (
+                            <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">分辨率</label>
+                      <Select value={resolution} onValueChange={setResolution}>
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {resolutions.map((item) => (
+                            <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">风格预设</label>
+                      <Input value={stylePreset} onChange={(event) => setStylePreset(event.target.value)} />
+                    </div>
+                  </div>
+                  <div className="flex justify-end">
+                    <Button onClick={handlePromptGenerate} disabled={generating || !prompt.trim()}>
+                      {generating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wand2 className="mr-2 h-4 w-4" />}
+                      生成版本场景图
+                    </Button>
+                  </div>
+                </TabsContent>
+
+                <TabsContent value="upload" className="space-y-4">
+                  <FileDropZone
+                    onSelect={(files) => addPendingFiles(files, 'upload')}
+                    disabled={uploading}
+                    title="上传版本场景图"
+                    description="支持 JPG、PNG、WebP、GIF，单张不超过 10MB"
+                  />
+                  {uploadFiles.length > 0 ? (
+                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                      {uploadFiles.map((item) => (
+                        <div key={item.id} className="rounded-xl border bg-secondary/20 p-2">
+                          <div className="relative overflow-hidden rounded-lg">
+                            <img src={item.preview} alt={item.file.name} className="aspect-video w-full object-cover" />
+                            <Button variant="secondary" size="icon" className="absolute right-2 top-2 h-7 w-7" onClick={() => removePendingFile(item.id, 'upload')}>
+                              <X className="h-4 w-4" />
+                            </Button>
+                          </div>
+                          <div className="mt-2 truncate text-xs text-muted-foreground">{item.file.name}</div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="flex justify-end">
+                    <Button onClick={handleUpload} disabled={uploading || uploadFiles.length === 0}>
+                      {uploading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ImagePlus className="mr-2 h-4 w-4" />}
+                      保存到当前版本
+                    </Button>
+                  </div>
+                </TabsContent>
+
+                <TabsContent value="img2img" className="space-y-4">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">图生图提示词</label>
+                    <Textarea value={imgPrompt} onChange={(event) => setImgPrompt(event.target.value)} rows={4} />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">负向提示词</label>
+                    <Input value={imgNegativePrompt} onChange={(event) => setImgNegativePrompt(event.target.value)} />
+                  </div>
+                  <div className="grid gap-4 md:grid-cols-3">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">画幅比例</label>
+                      <Select value={imgAspectRatio} onValueChange={setImgAspectRatio}>
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {aspectRatios.map((item) => (
+                            <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">分辨率</label>
+                      <Select value={imgResolution} onValueChange={setImgResolution}>
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {resolutions.map((item) => (
+                            <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">风格预设</label>
+                      <Input value={imgStylePreset} onChange={(event) => setImgStylePreset(event.target.value)} />
+                    </div>
+                  </div>
+
+                  <Separator />
+
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm font-medium">选择已有版本参考图</div>
+                      <Badge variant="secondary">{selectedReferenceUrls.length}/5</Badge>
+                    </div>
+                    {selectedReferenceUrls.length > 0 ? (
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        {selectedReferenceUrls.map((url) => {
+                          return (
+                            <button
+                              key={url}
+                              type="button"
+                              onClick={() => toggleReferenceSelection(url)}
+                              className="overflow-hidden rounded-xl border border-primary ring-2 ring-primary/20 text-left transition"
+                            >
+                              <img src={url} alt="" className="aspect-video w-full object-cover" />
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : version.reference_image_urls.length > 0 ? (
+                      <div className="rounded-xl border border-dashed p-6 text-sm text-muted-foreground">
+                        暂未选中参考图，请在右侧版本图库中点击“设为参考图”。
+                      </div>
+                    ) : (
+                      <div className="rounded-xl border border-dashed p-6 text-sm text-muted-foreground">
+                        当前版本还没有参考图，可先上传再进行图生图。
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="space-y-3">
+                    <div>
+                      <div className="text-sm font-medium">补充新的参考图</div>
+                      <div className="text-xs text-muted-foreground">上传后会自动并入当前版本的场景图库。</div>
+                    </div>
+                    <FileDropZone
+                      onSelect={(files) => addPendingFiles(files, 'img2img')}
+                      disabled={imgGenerating}
+                      title="添加参考图"
+                      description="支持上传 1-5 张图作为图生图参考"
+                    />
+                    {img2imgFiles.length > 0 ? (
+                      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                        {img2imgFiles.map((item) => (
+                          <div key={item.id} className="rounded-xl border bg-secondary/20 p-2">
+                            <div className="relative overflow-hidden rounded-lg">
+                              <img src={item.preview} alt={item.file.name} className="aspect-video w-full object-cover" />
+                              <Button variant="secondary" size="icon" className="absolute right-2 top-2 h-7 w-7" onClick={() => removePendingFile(item.id, 'img2img')}>
+                                <X className="h-4 w-4" />
+                              </Button>
+                            </div>
+                            <div className="mt-2 truncate text-xs text-muted-foreground">{item.file.name}</div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="flex justify-end">
+                    <Button onClick={handleImageGenerate} disabled={imgGenerating || !imgPrompt.trim()}>
+                      {imgGenerating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}
+                      根据参考图生成
+                    </Button>
+                  </div>
+                </TabsContent>
+              </Tabs>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">当前版本图库</CardTitle>
+              <CardDescription>每张图都只属于当前版本，可独立删除和复用。</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {versionImageItems.length === 0 ? (
+                <div className="rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">
+                  当前版本还没有场景图。
+                </div>
+              ) : (
+                <div className="grid gap-4">
+                  {versionImageItems.map((item, index) => {
+                    const url = item.url;
+                    return (
+                    <div key={url} className="overflow-hidden rounded-xl border bg-card">
+                      <img src={url} alt={`版本场景图 ${index + 1}`} className="aspect-video w-full object-cover" />
+                      <div className="flex items-center justify-between gap-2 p-3">
+                        <div className="text-xs text-muted-foreground">版本场景图 #{index + 1}</div>
+                        <div className="flex items-center gap-2">
+                          <Button
+                            variant={selectedReferenceUrls.includes(url) ? 'default' : 'outline'}
+                            size="sm"
+                            onClick={() => toggleReferenceSelection(url)}
+                          >
+                            {selectedReferenceUrls.includes(url) ? '已选中' : '设为参考图'}
+                          </Button>
+                          <Button variant="ghost" size="icon" onClick={() => handleDeleteVersionImage(item)}>
+                            <Trash2 className="h-4 w-4 text-muted-foreground hover:text-destructive" />
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                    );
+                  })}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }

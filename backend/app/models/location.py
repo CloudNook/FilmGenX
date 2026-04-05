@@ -256,3 +256,8 @@ class LocationVersion(Base):
 
     # === Relations ===
     location: Mapped["Location"] = relationship("Location", back_populates="versions")
+    assets: Mapped[List["Asset"]] = relationship(
+        "Asset",
+        back_populates="location_version",
+        primaryjoin="Asset.location_version_id == LocationVersion.id"
+    )

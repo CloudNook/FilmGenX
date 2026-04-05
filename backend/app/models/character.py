@@ -6,6 +6,7 @@ from app.db.base import Base
 
 if TYPE_CHECKING:
     from app.models.project import Project
+    from app.models.asset import Asset
 
 
 class Character(Base):
@@ -74,6 +75,11 @@ class Character(Base):
         back_populates="character",
         cascade="all, delete-orphan",
         order_by="CharacterVersion.id"
+    )
+    assets: Mapped[List["Asset"]] = relationship(
+        "Asset",
+        back_populates="character",
+        cascade="all, delete-orphan",
     )
 
 
@@ -153,21 +159,11 @@ class CharacterVersion(Base):
         comment="该版本的参考图URL列表"
     )
 
-    # 三视图（角色标准视图）
-    view_front_url: Mapped[Optional[str]] = mapped_column(
+    # 三视图（角色标准视图，单张图片）
+    three_view_url: Mapped[Optional[str]] = mapped_column(
         String(500),
         nullable=True,
-        comment="正面视图URL"
-    )
-    view_side_url: Mapped[Optional[str]] = mapped_column(
-        String(500),
-        nullable=True,
-        comment="侧面视图URL"
-    )
-    view_back_url: Mapped[Optional[str]] = mapped_column(
-        String(500),
-        nullable=True,
-        comment="背面视图URL"
+        comment="三视图URL（包含正面、侧面、背面的单张图片）"
     )
 
     # 状态图片（按情绪/动作分类）

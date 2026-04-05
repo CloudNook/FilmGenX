@@ -4,7 +4,7 @@
 
 from typing import List, Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -35,15 +35,23 @@ class LocationRepository(BaseRepository[Location]):
             page_size=page_size,
         )
 
-    async def get_by_code(self, loc_code: str) -> Optional[Location]:
+    async def get_by_code(self, loc_code: str, *, include_deleted: bool = False) -> Optional[Location]:
         """按业务ID查询。"""
-        result = await self.session.execute(
-            select(Location).where(
-                Location.loc_code == loc_code,
-                Location.is_deleted.is_(False),
-            )
-        )
+        filters = [Location.loc_code == loc_code]
+        if not include_deleted:
+            filters.append(Location.is_deleted.is_(False))
+        result = await self.session.execute(select(Location).where(*filters))
         return result.scalar_one_or_none()
+
+    async def count_by_project(self, project_id: int, *, include_deleted: bool = True) -> int:
+        """返回项目下的场景数量，用于生成下一个 loc_code。"""
+        filters = [Location.project_id == project_id]
+        if not include_deleted:
+            filters.append(Location.is_deleted.is_(False))
+        result = await self.session.execute(
+            select(func.count()).select_from(Location).where(*filters)
+        )
+        return result.scalar_one()
 
     async def get_with_versions(self, location_id: int) -> Optional[Location]:
         """获取场景及其所有版本。"""
@@ -83,6 +91,26 @@ class LocationRepository(BaseRepository[Location]):
 class LocationVersionRepository(BaseRepository[LocationVersion]):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(LocationVersion, session)
+
+    async def clear_default_for_location(
+        self,
+        location_id: int,
+        *,
+        exclude_id: Optional[int] = None,
+    ) -> None:
+        """确保同一场景只有一个默认版本。"""
+        cond = [
+            LocationVersion.location_id == location_id,
+            LocationVersion.is_deleted.is_(False),
+        ]
+        if exclude_id is not None:
+            cond.append(LocationVersion.id != exclude_id)
+
+        await self.session.execute(
+            update(LocationVersion)
+            .where(*cond)
+            .values(is_default=False)
+        )
 
     async def get_by_location(self, location_id: int) -> List[LocationVersion]:
         """获取场景所有版本，按 ID 排序。"""

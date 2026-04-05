@@ -29,6 +29,16 @@ async def _require_project(project_id: int, user_id: int, db: AsyncSession):
     return project
 
 
+async def _generate_location_code(repo: LocationRepository, project_id: int) -> str:
+    """按项目自动生成 loc_code。"""
+    next_num = await repo.count_by_project(project_id, include_deleted=True) + 1
+    loc_code = f"P{project_id}_LOC{next_num:03d}"
+    while await repo.get_by_code(loc_code, include_deleted=True):
+        next_num += 1
+        loc_code = f"P{project_id}_LOC{next_num:03d}"
+    return loc_code
+
+
 # ---------------------------------------------------------------------------
 # 场景 CRUD
 # ---------------------------------------------------------------------------
@@ -70,10 +80,9 @@ async def create_location(
 ):
     await _require_project(project_id, user_id, db)
     repo = LocationRepository(db)
-    if await repo.get_by_code(body.loc_code):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"loc_code '{body.loc_code}' 已存在")
 
     data = body.model_dump()
+    data["loc_code"] = await _generate_location_code(repo, project_id)
     # 处理 nested dict
     if data.get("default_atmosphere") and hasattr(data["default_atmosphere"], "model_dump"):
         data["default_atmosphere"] = data["default_atmosphere"].model_dump()
@@ -187,7 +196,10 @@ async def create_version(
     if data.get("atmosphere_override") and hasattr(data["atmosphere_override"], "model_dump"):
         data["atmosphere_override"] = data["atmosphere_override"].model_dump()
 
-    version = await LocationVersionRepository(db).create(location_id=location_id, **data)
+    repo = LocationVersionRepository(db)
+    version = await repo.create(location_id=location_id, **data)
+    if version.is_default:
+        await repo.clear_default_for_location(location_id, exclude_id=version.id)
     await db.commit()
     return version
 
@@ -212,6 +224,8 @@ async def update_version(
         data["atmosphere_override"] = data["atmosphere_override"].model_dump()
 
     version = await repo.update(version, data)
+    if version.is_default:
+        await repo.clear_default_for_location(location_id, exclude_id=version.id)
     await db.commit()
     return version
 

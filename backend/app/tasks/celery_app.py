@@ -31,6 +31,7 @@ celery_app.conf.update(
     task_routes={
         "app.tasks.video.*": {"queue": "video"},
         "app.tasks.image.*": {"queue": "image"},
+        "app.tasks.character.*": {"queue": "image"},
         "app.tasks.storyboard.*": {"queue": "default"},
     },
     # 任务结果保留 24 小时
@@ -45,4 +46,9 @@ celery_app.conf.update(
 )
 
 # 自动发现任务模块
-celery_app.autodiscover_tasks(["app.tasks.video", "app.tasks.image", "app.tasks.storyboard"])
+celery_app.autodiscover_tasks([
+    "app.tasks.video",
+    "app.tasks.image",
+    "app.tasks.character",
+    "app.tasks.storyboard",
+])

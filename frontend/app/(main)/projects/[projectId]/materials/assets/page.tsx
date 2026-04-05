@@ -335,21 +335,21 @@ export default function AssetsPage({
             </CardContent>
           </Card>
         ) : viewMode === 'grid' ? (
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
             {filteredAssets.map((asset) => {
               const Icon = getAssetIcon(asset.asset_type);
               return (
                 <Card
                   key={asset.id}
-                  className="bg-card border-border overflow-hidden cursor-pointer hover:border-primary/50 transition-all group"
+                  className="bg-card border-border overflow-hidden cursor-pointer hover:border-primary/50 hover:shadow-md transition-all group"
                   onClick={() => setSelectedAsset(asset)}
                 >
-                  <div className="aspect-square relative bg-secondary/30">
+                  <div className="aspect-[4/3] relative bg-secondary/30 overflow-hidden">
                     {asset.asset_type === 'image' ? (
                       <img
                         src={asset.file_url}
                         alt={asset.asset_code}
-                        className="w-full h-full object-cover"
+                        className="w-full h-full object-cover transition-transform group-hover:scale-105"
                       />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center">
@@ -383,14 +383,19 @@ export default function AssetsPage({
                         )}
                       </Button>
                     </div>
+                    <div className="absolute top-2 left-2">
+                      <Badge variant={getSourceBadgeVariant(asset.source)} className="text-xs bg-black/60 border-0">
+                        {asset.source === 'generated' ? 'AI' : '上传'}
+                      </Badge>
+                    </div>
                   </div>
                   <CardContent className="p-3">
-                    <p className="text-sm font-medium text-foreground truncate">
+                    <p className="text-sm font-medium text-foreground truncate" title={asset.asset_code}>
                       {asset.asset_code}
                     </p>
                     <div className="flex items-center justify-between mt-1">
-                      <Badge variant={getSourceBadgeVariant(asset.source)} className="text-xs">
-                        {asset.source === 'generated' ? 'AI 生成' : '上传'}
+                      <Badge variant="outline" className="text-xs">
+                        {getAssetTypeLabel(asset.asset_type)}
                       </Badge>
                       <span className="text-xs text-muted-foreground">
                         {formatFileSize(asset.file_size_bytes)}

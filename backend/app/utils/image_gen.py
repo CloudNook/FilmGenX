@@ -140,8 +140,7 @@ class ImageGenClient:
                 )
 
             # 在线程池中运行同步调用
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(None, _sync_generate)
+            response = await asyncio.to_thread(_sync_generate)
 
             return self._extract_image_from_response(response)
 
@@ -227,8 +226,7 @@ class ImageGenClient:
                 )
 
             # 在线程池中运行同步调用
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(None, _sync_generate)
+            response = await asyncio.to_thread(_sync_generate)
 
             return self._extract_image_from_response(response)
 

@@ -522,10 +522,8 @@ export interface CharacterVersionResponse {
   key_features: string[];
   reference_image_urls: string[];
   base_image_prompt: string | null;
-  // 三视图
-  view_front_url: string | null;
-  view_side_url: string | null;
-  view_back_url: string | null;
+  // 三视图（单张图片）
+  three_view_url: string | null;
   // 状态图片
   state_images: Record<string, string> | null;
   created_at: string;
@@ -635,14 +633,14 @@ export const charactersApi = {
     });
   },
 
-  uploadViewImage(projectId: number, characterId: number, versionId: number, viewType: 'front' | 'side' | 'back', file: File): Promise<CharacterVersionResponse> {
+  uploadThreeViewImage(projectId: number, characterId: number, versionId: number, file: File): Promise<CharacterVersionResponse> {
     const formData = new FormData();
     formData.append('file', file);
     const token = getToken();
     const headers: Record<string, string> = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;
     return fetch(
-      `${BASE_URL}/projects/${projectId}/characters/${characterId}/versions/${versionId}/images/view/${viewType}`,
+      `${BASE_URL}/projects/${projectId}/characters/${characterId}/versions/${versionId}/images/three-view`,
       { method: 'POST', headers, body: formData },
     ).then(async (res) => {
       if (!res.ok) {
@@ -682,6 +680,13 @@ export const charactersApi = {
   deleteViewImage(projectId: number, characterId: number, versionId: number, viewType: 'front' | 'side' | 'back') {
     return request<CharacterVersionResponse>(
       `/projects/${projectId}/characters/${characterId}/versions/${versionId}/images/view/${viewType}`,
+      { method: 'DELETE' },
+    );
+  },
+
+  deleteThreeViewImage(projectId: number, characterId: number, versionId: number) {
+    return request<CharacterVersionResponse>(
+      `/projects/${projectId}/characters/${characterId}/versions/${versionId}/images/three-view`,
       { method: 'DELETE' },
     );
   },
@@ -892,6 +897,7 @@ export interface AssetResponse {
   project_id: number;
   shot_id: number | null;
   location_id: number | null;
+  location_version_id: number | null;
   asset_code: string;
   asset_type: string;
   file_url: string;
@@ -912,10 +918,24 @@ export interface AssetResponse {
 }
 
 export const assetsApi = {
-  list(projectId: number, page = 1, pageSize = 20, filters?: { assetType?: string; shotId?: number; source?: string; isCurrent?: boolean }) {
+  list(
+    projectId: number,
+    page = 1,
+    pageSize = 20,
+    filters?: {
+      assetType?: string;
+      shotId?: number;
+      locationId?: number;
+      locationVersionId?: number;
+      source?: string;
+      isCurrent?: boolean;
+    },
+  ) {
     const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
     if (filters?.assetType) params.set('asset_type', filters.assetType);
     if (filters?.shotId !== undefined) params.set('shot_id', String(filters.shotId));
+    if (filters?.locationId !== undefined) params.set('location_id', String(filters.locationId));
+    if (filters?.locationVersionId !== undefined) params.set('location_version_id', String(filters.locationVersionId));
     if (filters?.source) params.set('source', filters.source);
     if (filters?.isCurrent !== undefined) params.set('is_current', String(filters.isCurrent));
     return request<PageResponse<AssetResponse>>(
@@ -931,7 +951,7 @@ export const assetsApi = {
     );
   },
 
-  upload(projectId: number, file: File, shotId?: number, locationId?: number): Promise<AssetResponse> {
+  upload(projectId: number, file: File, shotId?: number, locationId?: number, locationVersionId?: number): Promise<AssetResponse> {
     const formData = new FormData();
     formData.append('file', file);
     if (shotId !== undefined) {
@@ -939,6 +959,9 @@ export const assetsApi = {
     }
     if (locationId !== undefined) {
       formData.append('location_id', String(locationId));
+    }
+    if (locationVersionId !== undefined) {
+      formData.append('location_version_id', String(locationVersionId));
     }
 
     const token = getToken();
@@ -1006,6 +1029,9 @@ export interface ImageGenerationRequest {
   project_id?: number;
   shot_id?: number;
   location_id?: number;
+  location_version_id?: number;
+  character_id?: number;
+  character_version_id?: number;
   prompt: string;
   negative_prompt?: string;
   aspect_ratio?: string;
