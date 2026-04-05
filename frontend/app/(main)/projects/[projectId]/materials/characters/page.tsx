@@ -1614,7 +1614,6 @@ export default function CharactersPage({ params }: { params: Promise<{ projectId
   const [searchQuery, setSearchQuery] = useState('');
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [newCharName, setNewCharName] = useState('');
-  const [newCharCode, setNewCharCode] = useState('');
   const [newCharDesc, setNewCharDesc] = useState('');
   const [creating, setCreating] = useState(false);
   const [isVersionDialogOpen, setIsVersionDialogOpen] = useState(false);
@@ -1727,21 +1726,21 @@ export default function CharactersPage({ params }: { params: Promise<{ projectId
   ]);
 
   const handleCreateCharacter = useCallback(async () => {
-    if (!newCharName.trim() || !newCharCode.trim()) return;
+    if (!newCharName.trim()) return;
     setCreating(true);
     try {
-      const char = await charactersApi.create(projectIdNum, { char_code: newCharCode.trim(), name: newCharName.trim(), role_description: newCharDesc.trim() || undefined });
+      const char = await charactersApi.create(projectIdNum, { name: newCharName.trim(), role_description: newCharDesc.trim() || undefined });
       setCharacters(prev => [char, ...prev]);
       setSelectedCharId(char.id);
       setIsCreateDialogOpen(false);
-      setNewCharName(''); setNewCharCode(''); setNewCharDesc('');
+      setNewCharName(''); setNewCharDesc('');
       toast.success('角色创建成功');
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '创建失败');
     } finally {
       setCreating(false);
     }
-  }, [projectIdNum, newCharName, newCharCode, newCharDesc]);
+  }, [projectIdNum, newCharName, newCharDesc]);
 
   const handleDeleteCharacter = useCallback(async (charId: number) => {
     if (!confirm('确定要删除这个角色吗？')) return;
@@ -1844,12 +1843,11 @@ export default function CharactersPage({ params }: { params: Promise<{ projectId
                 <DialogHeader><DialogTitle>创建新角色</DialogTitle></DialogHeader>
                 <div className="space-y-4 py-4">
                   <div className="space-y-2"><label className="text-sm font-medium">角色名称 *</label><Input placeholder="输入角色名称" value={newCharName} onChange={(e) => setNewCharName(e.target.value)} /></div>
-                  <div className="space-y-2"><label className="text-sm font-medium">角色编号 *</label><Input placeholder="如 CHAR_XIAO_YAN" value={newCharCode} onChange={(e) => setNewCharCode(e.target.value)} /></div>
                   <div className="space-y-2"><label className="text-sm font-medium">角色描述</label><Textarea placeholder="描述角色的背景..." rows={3} value={newCharDesc} onChange={(e) => setNewCharDesc(e.target.value)} /></div>
                 </div>
                 <DialogFooter>
                   <Button variant="outline" onClick={() => setIsCreateDialogOpen(false)}>取消</Button>
-                  <Button onClick={handleCreateCharacter} disabled={!newCharName.trim() || !newCharCode.trim() || creating}>{creating && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}创建</Button>
+                  <Button onClick={handleCreateCharacter} disabled={!newCharName.trim() || creating}>{creating && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}创建</Button>
                 </DialogFooter>
               </DialogContent>
             </Dialog>
