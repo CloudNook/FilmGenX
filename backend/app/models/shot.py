@@ -6,6 +6,7 @@ from app.db.base import Base
 
 if TYPE_CHECKING:
     from app.models.storyboard import Storyboard
+    from app.models.shot_group import ShotGroup
     from app.models.asset import Asset
     from app.models.task import GenerationTask
 
@@ -16,6 +17,13 @@ class Shot(Base):
     __tablename__ = "shots"
 
     storyboard_id: Mapped[int] = mapped_column(ForeignKey("storyboards.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    # 分镜组（可选，NULL 表示独立分镜）
+    shot_group_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("shot_groups.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+        comment="所属分镜组 ID，NULL 表示独立分镜"
+    )
 
     # 镜头标识
     shot_code: Mapped[str] = mapped_column(String(30), nullable=False, unique=True, comment="业务ID，如 DQCK_001_S003")
@@ -97,5 +105,6 @@ class Shot(Base):
 
     # Relations
     storyboard: Mapped["Storyboard"] = relationship("Storyboard", back_populates="shots")
+    shot_group: Mapped[Optional["ShotGroup"]] = relationship("ShotGroup", back_populates="shots")
     assets: Mapped[List["Asset"]] = relationship("Asset", back_populates="shot", cascade="all, delete-orphan")
     generation_tasks: Mapped[List["GenerationTask"]] = relationship("GenerationTask", back_populates="shot", cascade="all, delete-orphan")

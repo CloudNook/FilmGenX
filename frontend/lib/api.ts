@@ -822,6 +822,68 @@ export const shotsApi = {
 };
 
 // ---------------------------------------------------------------------------
+// Shot Groups API
+// ---------------------------------------------------------------------------
+
+export interface ShotGroupMember {
+  id: number;
+  shot_code: string;
+  sequence: number;
+  duration_sec: number;
+}
+
+export interface ShotGroupResponse {
+  id: number;
+  storyboard_id: number;
+  group_code: string;
+  name: string | null;
+  sequence: number;
+  total_duration_sec: number | null;
+  video_url: string | null;
+  status: string;
+  shots: ShotGroupMember[] | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export const shotGroupsApi = {
+  list(storyboardId: number) {
+    return request<ShotGroupResponse[]>(
+      `/storyboards/${storyboardId}/groups`,
+      { method: 'GET' },
+    );
+  },
+
+  create(storyboardId: number, data: { group_code: string; name?: string; shot_ids: number[] }) {
+    return request<ShotGroupResponse>(
+      `/storyboards/${storyboardId}/groups`,
+      { method: 'POST', body: data },
+    );
+  },
+
+  get(storyboardId: number, groupId: number) {
+    return request<ShotGroupResponse>(
+      `/storyboards/${storyboardId}/groups/${groupId}`,
+      { method: 'GET' },
+    );
+  },
+
+  update(storyboardId: number, groupId: number, data: { name?: string; shot_ids?: number[]; status?: string }) {
+    return request<ShotGroupResponse>(
+      `/storyboards/${storyboardId}/groups/${groupId}`,
+      { method: 'PATCH', body: data },
+    );
+  },
+
+  delete(storyboardId: number, groupId: number) {
+    return request<void>(
+      `/storyboards/${storyboardId}/groups/${groupId}`,
+      { method: 'DELETE' },
+    );
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Assets API
 // ---------------------------------------------------------------------------
 
@@ -960,6 +1022,13 @@ export const tasksApi = {
 
   triggerVideo(data: { shot_id: number; quality?: string; sound?: string; use_image_start?: boolean; callback_url?: string }) {
     return request<TaskResponse>('/tasks/video', {
+      method: 'POST',
+      body: data,
+    });
+  },
+
+  triggerMultiShotVideo(data: { shot_group_id: number; quality?: string; sound?: string; callback_url?: string }) {
+    return request<TaskResponse>('/tasks/video/multi-shot', {
       method: 'POST',
       body: data,
     });

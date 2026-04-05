@@ -37,6 +37,15 @@ class VideoGenerationRequest(BaseModel):
     callback_url: Optional[str] = Field(None, description="任务完成后的回调地址")
 
 
+class MultiShotVideoGenerationRequest(BaseModel):
+    """触发多镜头视频生成任务的请求体（使用 Kling multi_shot）。"""
+
+    shot_group_id: int = Field(..., description="分镜组 ID")
+    quality: str = Field("1080p", pattern="^(720p|1080p)$", description="分辨率")
+    sound: str = Field("on", pattern="^(on|off)$", description="是否生成音效")
+    callback_url: Optional[str] = Field(None, description="任务完成后的回调地址")
+
+
 class StoryboardGenerationRequest(BaseModel):
     """触发分镜脚本生成任务的请求体。"""
 

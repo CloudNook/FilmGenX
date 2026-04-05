@@ -7,6 +7,7 @@ from app.db.base import Base
 if TYPE_CHECKING:
     from app.models.scene import Scene
     from app.models.shot import Shot
+    from app.models.shot_group import ShotGroup
 
 
 class Storyboard(Base):
@@ -44,4 +45,8 @@ class Storyboard(Base):
     scene: Mapped["Scene"] = relationship("Scene", back_populates="storyboard")
     shots: Mapped[List["Shot"]] = relationship(
         "Shot", back_populates="storyboard", cascade="all, delete-orphan", order_by="Shot.sequence"
+    )
+    shot_groups: Mapped[List["ShotGroup"]] = relationship(
+        "ShotGroup", back_populates="storyboard",
+        cascade="all, delete-orphan", order_by="ShotGroup.sequence"
     )

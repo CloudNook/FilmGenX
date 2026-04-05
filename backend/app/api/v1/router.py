@@ -7,7 +7,7 @@ API v1 总路由。
 from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
-    auth, projects, scenes, storyboards, shots, characters, character_images,
+    auth, projects, scenes, storyboards, shots, shot_groups, characters, character_images,
     assets, tasks, conversations, locations
 )
 
@@ -19,6 +19,7 @@ api_router.include_router(conversations.router,  prefix="/projects/{project_id}/
 api_router.include_router(scenes.router,         prefix="/projects/{project_id}/scenes",                tags=["高光片段"])
 api_router.include_router(storyboards.router,    prefix="/scenes/{scene_id}/storyboard",                tags=["分镜脚本"])
 api_router.include_router(shots.router,          prefix="/storyboards/{storyboard_id}/shots",           tags=["镜头"])
+api_router.include_router(shot_groups.router,    prefix="/storyboards/{storyboard_id}/groups",          tags=["分镜组"])
 api_router.include_router(characters.router,     prefix="/projects/{project_id}/characters",            tags=["角色"])
 api_router.include_router(
     character_images.router,

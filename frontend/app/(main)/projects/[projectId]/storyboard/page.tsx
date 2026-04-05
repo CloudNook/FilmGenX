@@ -1,6 +1,6 @@
 'use client';
 
-import { use, useState, useEffect, useCallback } from 'react';
+import { use, useState, useEffect, useCallback, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { AppLayout } from '@/components/layout';
 import {
@@ -8,11 +8,13 @@ import {
   scenesApi,
   storyboardsApi,
   shotsApi,
+  shotGroupsApi,
   tasksApi,
   type ProjectResponse,
   type SceneResponse,
   type StoryboardResponse,
   type ShotResponse,
+  type ShotGroupResponse,
   type TaskResponse,
 } from '@/lib/api';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -65,6 +67,7 @@ import {
   GripVertical,
   Film,
   Loader2,
+  Group,
 } from 'lucide-react';
 
 const shotStatusColors: Record<string, string> = {
@@ -90,6 +93,10 @@ export default function StoryboardPage({
   const [scenes, setScenes] = useState<SceneResponse[]>([]);
   const [storyboard, setStoryboard] = useState<StoryboardResponse | null>(null);
   const [shots, setShots] = useState<ShotResponse[]>([]);
+  const [shotGroups, setShotGroups] = useState<ShotGroupResponse[]>([]);
+  const [selectedShotIds, setSelectedShotIds] = useState<Set<number>>(new Set());
+  const [selectedGroup, setSelectedGroup] = useState<ShotGroupResponse | null>(null);
+  const [generatingGroupVideo, setGeneratingGroupVideo] = useState(false);
 
   // Loading state
   const [loadingProject, setLoadingProject] = useState(true);
@@ -110,6 +117,8 @@ export default function StoryboardPage({
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [zoom, setZoom] = useState(100);
+  const resolvedUrlShotKeyRef = useRef<string | null>(null);
+  const selectedShotRequestIdRef = useRef(0);
 
   // ---- Data fetching ----
 
@@ -169,6 +178,8 @@ export default function StoryboardPage({
     if (!selectedScene) {
       setStoryboard(null);
       setShots([]);
+      setSelectedShot(null);
+      resolvedUrlShotKeyRef.current = null;
       return;
     }
 
@@ -197,6 +208,8 @@ export default function StoryboardPage({
   useEffect(() => {
     if (!storyboard) {
       setShots([]);
+      setSelectedShot(null);
+      resolvedUrlShotKeyRef.current = null;
       return;
     }
 
@@ -219,20 +232,81 @@ export default function StoryboardPage({
     };
   }, [storyboard]);
 
+  // Load shot groups when storyboard loads
+  useEffect(() => {
+    if (!storyboard) {
+      setShotGroups([]);
+      setSelectedGroup(null);
+      return;
+    }
+    let cancelled = false;
+    shotGroupsApi
+      .list(storyboard.id)
+      .then((groups) => {
+        if (!cancelled) setShotGroups(groups);
+      })
+      .catch(() => {
+        if (!cancelled) setShotGroups([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [storyboard]);
+
   // Auto-select and fetch shot detail from URL
   useEffect(() => {
     if (!urlShotId || !storyboard || shots.length === 0) return;
+    const resolveKey = `${storyboard.id}:${urlShotId}`;
+    if (resolvedUrlShotKeyRef.current === resolveKey) return;
     const shotIdNum = Number(urlShotId);
     const found = shots.find((s) => s.id === shotIdNum);
     if (found) {
+      const requestId = selectedShotRequestIdRef.current + 1;
+      selectedShotRequestIdRef.current = requestId;
       // Fetch full detail via API
-      shotsApi.get(storyboard.id, shotIdNum).then((detail) => {
-        setSelectedShot(detail);
-      }).catch(() => {
-        setSelectedShot(found);
-      });
+      shotsApi
+        .get(storyboard.id, shotIdNum)
+        .then((detail) => {
+          if (selectedShotRequestIdRef.current !== requestId) return;
+          setSelectedShot(detail);
+          setShots((prev) => prev.map((item) => (item.id === detail.id ? detail : item)));
+          resolvedUrlShotKeyRef.current = resolveKey;
+        })
+        .catch(() => {
+          if (selectedShotRequestIdRef.current !== requestId) return;
+          setSelectedShot(found);
+          resolvedUrlShotKeyRef.current = resolveKey;
+        });
     }
   }, [urlShotId, storyboard, shots]);
+
+  const selectShotWithDetail = useCallback(
+    (baseShot: ShotResponse, onResolved?: (detail: ShotResponse) => void, onFallback?: () => void) => {
+      setSelectedShot(baseShot);
+      if (!storyboard) {
+        onFallback?.();
+        return;
+      }
+
+      const requestId = selectedShotRequestIdRef.current + 1;
+      selectedShotRequestIdRef.current = requestId;
+
+      shotsApi
+        .get(storyboard.id, baseShot.id)
+        .then((detail) => {
+          if (selectedShotRequestIdRef.current !== requestId) return;
+          setSelectedShot(detail);
+          setShots((prev) => prev.map((item) => (item.id === detail.id ? detail : item)));
+          onResolved?.(detail);
+        })
+        .catch(() => {
+          if (selectedShotRequestIdRef.current !== requestId) return;
+          setSelectedShot(baseShot);
+          onFallback?.();
+        });
+    },
+    [storyboard],
+  );
 
   // ---- Handlers ----
 
@@ -261,6 +335,7 @@ export default function StoryboardPage({
             if (updated.result_asset_id) {
               const refreshedShot = await shotsApi.get(storyboard.id, selectedShot.id);
               setSelectedShot(refreshedShot);
+              setShots((prev) => prev.map((shot) => (shot.id === refreshedShot.id ? refreshedShot : shot)));
             }
           } else if (updated.status === 'failed') {
             clearInterval(pollInterval);
@@ -277,6 +352,106 @@ export default function StoryboardPage({
       setError(err instanceof Error ? err.message : '视频生成请求失败');
     }
   }, [selectedShot, storyboard]);
+
+  // Toggle shot selection for grouping
+  const toggleShotSelection = useCallback((shotId: number) => {
+    setSelectedShotIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(shotId)) {
+        next.delete(shotId);
+      } else {
+        next.add(shotId);
+      }
+      return next;
+    });
+  }, []);
+
+  // Create group from selected shots
+  const handleCreateGroup = useCallback(async () => {
+    if (!storyboard || selectedShotIds.size < 2) return;
+    const selectedShots = shots.filter((s) => selectedShotIds.has(s.id));
+    const totalDuration = selectedShots.reduce((sum, s) => sum + (s.duration_sec || 3), 0);
+
+    if (selectedShots.length > 6) {
+      setError('每组最多 6 个分镜');
+      return;
+    }
+    if (totalDuration > 15) {
+      setError(`总时长 ${totalDuration.toFixed(1)}s 超过 15 秒限制`);
+      return;
+    }
+
+    try {
+      const groupCode = `G${String(shotGroups.length + 1).padStart(3, '0')}`;
+      const group = await shotGroupsApi.create(storyboard.id, {
+        group_code: groupCode,
+        shot_ids: Array.from(selectedShotIds),
+      });
+      setShotGroups((prev) => [...prev, group]);
+      setSelectedShotIds(new Set());
+      // Refresh shots to get updated shot_group_id
+      const refreshed = await shotsApi.list(storyboard.id);
+      setShots(refreshed);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : '创建分镜组失败');
+    }
+  }, [storyboard, shots, selectedShotIds, shotGroups.length]);
+
+  // Generate video for a shot group
+  const handleGenerateGroupVideo = useCallback(async () => {
+    if (!selectedGroup || !storyboard) return;
+    setGeneratingGroupVideo(true);
+    setError(null);
+    try {
+      const task = await tasksApi.triggerMultiShotVideo({
+        shot_group_id: selectedGroup.id,
+        quality: '1080p',
+        sound: 'on',
+      });
+      // Poll for completion
+      const pollInterval = setInterval(async () => {
+        try {
+          const updated = await tasksApi.get(task.id);
+          if (updated.status === 'success') {
+            clearInterval(pollInterval);
+            setGeneratingGroupVideo(false);
+            // Refresh group and shots
+            const refreshedGroup = await shotGroupsApi.get(storyboard.id, selectedGroup.id);
+            setSelectedGroup(refreshedGroup);
+            const refreshedShots = await shotsApi.list(storyboard.id);
+            setShots(refreshedShots);
+          } else if (updated.status === 'failed') {
+            clearInterval(pollInterval);
+            setGeneratingGroupVideo(false);
+            setError(updated.error_message || '视频生成失败');
+          }
+        } catch {
+          clearInterval(pollInterval);
+          setGeneratingGroupVideo(false);
+        }
+      }, 5000);
+    } catch (err: unknown) {
+      setGeneratingGroupVideo(false);
+      setError(err instanceof Error ? err.message : '请求失败');
+    }
+  }, [selectedGroup, storyboard]);
+
+  // Delete a shot group
+  const handleDeleteGroup = useCallback(async (groupId: number) => {
+    if (!storyboard) return;
+    try {
+      await shotGroupsApi.delete(storyboard.id, groupId);
+      setShotGroups((prev) => prev.filter((g) => g.id !== groupId));
+      if (selectedGroup?.id === groupId) {
+        setSelectedGroup(null);
+      }
+      // Refresh shots
+      const refreshed = await shotsApi.list(storyboard.id);
+      setShots(refreshed);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : '删除分镜组失败');
+    }
+  }, [storyboard, selectedGroup]);
 
   const handleAddShot = useCallback(async () => {
     if (!storyboard) return;
@@ -462,60 +637,134 @@ export default function StoryboardPage({
                 </SelectContent>
               </Select>
 
-              <Button
-                className="w-full bg-primary text-primary-foreground hover:bg-primary/90"
-                onClick={handleAddShot}
-                disabled={!storyboard}
-              >
-                <Plus className="h-4 w-4 mr-2" />
-                添加镜头
-              </Button>
+              <div className="flex gap-2">
+                  <Button
+                    className="flex-1 bg-primary text-primary-foreground hover:bg-primary/90"
+                    onClick={handleAddShot}
+                    disabled={!storyboard}
+                  >
+                    <Plus className="h-4 w-4 mr-2" />
+                    添加镜头
+                  </Button>
+                  {selectedShotIds.size >= 2 && selectedShotIds.size <= 6 && (
+                    <Button
+                      variant="outline"
+                      className="shrink-0"
+                      onClick={handleCreateGroup}
+                    >
+                      <Group className="h-4 w-4 mr-1" />
+                      创建组
+                    </Button>
+                  )}
+                </div>
             </div>
 
             {/* Shot List */}
-            <ScrollArea className="flex-1 min-h-0">
+            <div className="flex-1 min-h-0 overflow-y-auto">
               {loadingShots ? (
                 <div className="flex items-center justify-center p-8">
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 </div>
               ) : (
                 <div className={`p-3 ${viewMode === 'grid' ? 'grid grid-cols-2 gap-2' : 'space-y-2'}`}>
-                  {shots.map((shot) => (
+                  {/* Group indicators */}
+                  {shotGroups.map((group) => (
+                    <div
+                      key={`group-${group.id}`}
+                      className={`col-span-2 flex items-center gap-2 px-2 py-1 rounded-md cursor-pointer transition-all ${
+                        selectedGroup?.id === group.id
+                          ? 'bg-primary/10 border border-primary/30'
+                          : 'bg-muted/50 border border-border hover:border-primary/20'
+                      }`}
+                      onClick={() => {
+                        setSelectedGroup(group);
+                        setSelectedShot(null);
+                      }}
+                    >
+                      <Group className="h-3.5 w-3.5 text-primary shrink-0" />
+                      <span className="text-xs font-medium text-foreground truncate">
+                        {group.name || group.group_code}
+                      </span>
+                      <span className="text-[10px] text-muted-foreground ml-auto shrink-0">
+                        {group.shots?.length || 0}镜头 · {(group.total_duration_sec || 0).toFixed(1)}s
+                      </span>
+                      <Badge className={`text-[9px] h-4 px-1 ${
+                        group.status === 'review' ? 'bg-success/20 text-success' :
+                        group.status === 'generating' ? 'bg-warning/20 text-warning' :
+                        'bg-muted text-muted-foreground'
+                      }`}>
+                        {group.status}
+                      </Badge>
+                    </div>
+                  ))}
+
+                  {shots.map((shot) => {
+                    // Find group this shot belongs to
+                    const shotGroup = shotGroups.find((g) =>
+                      g.shots?.some((s) => s.id === shot.id)
+                    );
+                    const groupColor = shotGroup
+                      ? ['bg-blue-500/10 border-blue-500/30', 'bg-emerald-500/10 border-emerald-500/30', 'bg-amber-500/10 border-amber-500/30', 'bg-purple-500/10 border-purple-500/30'][
+                          shotGroups.indexOf(shotGroup) % 4
+                        ]
+                      : '';
+
+                    return (
                     <div
                       key={shot.id}
-                      onClick={() => {
-                        setSelectedShot(shot);
-                        if (storyboard) {
-                          shotsApi.get(storyboard.id, shot.id).then(setSelectedShot).catch(() => {});
+                      onClick={(e) => {
+                        if (e.shiftKey) {
+                          toggleShotSelection(shot.id);
+                        } else {
+                          selectShotWithDetail(shot);
+                          setSelectedShotIds(new Set());
                         }
                       }}
                       className={`group cursor-pointer rounded-lg border transition-all ${
-                        selectedShot?.id === shot.id
+                        selectedShotIds.has(shot.id)
+                          ? 'border-primary bg-primary/10 ring-1 ring-primary/30'
+                          : selectedShot?.id === shot.id
                           ? 'border-primary bg-primary/5'
+                          : groupColor
+                          ? groupColor
                           : 'border-border hover:border-primary/50 bg-secondary/30'
                       }`}
                     >
                       {viewMode === 'grid' ? (
-                        <div className="p-2">
-                          <div className="relative aspect-video rounded bg-muted mb-2">
-                            <div className="absolute inset-0 flex items-center justify-center">
-                              <Camera className="h-6 w-6 text-muted-foreground" />
-                            </div>
-                            <Badge className="absolute top-1 left-1 text-[10px] h-5 bg-black/60 border-0">
+                        <div className="flex h-[172px] flex-col p-2">
+                          <div className="mb-2 flex items-center justify-between gap-2">
+                            <Badge variant="outline" className="text-[10px] h-5">
                               {shot.shot_code}
                             </Badge>
+                            <span className="text-[10px] text-muted-foreground">{shot.duration_sec}s</span>
                           </div>
-                          <p className="text-xs text-foreground truncate">{getShotDescription(shot)}</p>
-                          <p className="text-[10px] text-muted-foreground">{shot.duration_sec}s</p>
+                          <div className="relative mb-2 aspect-video overflow-hidden rounded bg-muted/60">
+                            {shot.video_url ? (
+                              <video
+                                src={shot.video_url}
+                                className="h-full w-full object-cover"
+                                muted
+                                playsInline
+                                preload="metadata"
+                              />
+                            ) : null}
+                          </div>
+                          <p className="line-clamp-2 text-xs text-foreground">{getShotDescription(shot)}</p>
                         </div>
                       ) : (
-                        <div className="flex items-center gap-3 p-2">
+                        <div className="flex h-[72px] items-center gap-3 p-2">
                           <div className="flex items-center gap-2 shrink-0">
                             <GripVertical className="h-4 w-4 text-muted-foreground opacity-0 group-hover:opacity-100" />
-                            <div className="h-12 w-20 rounded bg-muted relative">
-                              <div className="absolute inset-0 flex items-center justify-center">
-                                <Camera className="h-4 w-4 text-muted-foreground" />
-                              </div>
+                            <div className="h-12 w-20 overflow-hidden rounded bg-muted/60">
+                              {shot.video_url ? (
+                                <video
+                                  src={shot.video_url}
+                                  className="h-full w-full object-cover"
+                                  muted
+                                  playsInline
+                                  preload="metadata"
+                                />
+                              ) : null}
                             </div>
                           </div>
                           <div className="flex-1 min-w-0">
@@ -531,10 +780,11 @@ export default function StoryboardPage({
                         </div>
                       )}
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
-            </ScrollArea>
+            </div>
 
             {/* Stats */}
             <div className="p-3 border-t border-border bg-secondary/30">
@@ -557,6 +807,7 @@ export default function StoryboardPage({
                 <>
                   {selectedShot.video_url ? (
                     <video
+                      key={selectedShot.id}
                       src={selectedShot.video_url}
                       controls
                       className="max-w-full max-h-full object-contain"
@@ -648,6 +899,22 @@ export default function StoryboardPage({
                 </div>
 
                 <div className="flex items-center gap-2">
+                  {selectedGroup && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 border-primary/50 text-primary hover:bg-primary/10"
+                      onClick={handleGenerateGroupVideo}
+                      disabled={generatingGroupVideo}
+                    >
+                      {generatingGroupVideo ? (
+                        <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+                      ) : (
+                        <Group className="h-3.5 w-3.5 mr-1" />
+                      )}
+                      {generatingGroupVideo ? '生成中...' : `组生成 (${selectedGroup.shots?.length || 0}镜头)`}
+                    </Button>
+                  )}
                   <Button
                     variant="outline"
                     size="sm"
@@ -683,10 +950,7 @@ export default function StoryboardPage({
                       <div
                         key={shot.id}
                         onClick={() => {
-                          setSelectedShot(shot);
-                          if (storyboard) {
-                            shotsApi.get(storyboard.id, shot.id).then(setSelectedShot).catch(() => {});
-                          }
+                          selectShotWithDetail(shot);
                         }}
                         className={`h-16 rounded cursor-pointer transition-all relative group ${
                           selectedShot?.id === shot.id

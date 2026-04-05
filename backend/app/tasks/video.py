@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from celery import Task
 
 from app.tasks.celery_app import celery_app
-from app.prompts import build_video_prompt
+from app.prompts import build_video_prompt, build_compact_video_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +70,11 @@ def generate_video_task(self, task_db_id: int) -> dict:
     try:
         return loop.run_until_complete(_run_video_generation(self, task_db_id))
     finally:
+        try:
+            from app.utils.evolink import evolink_client
+            loop.run_until_complete(evolink_client.close())
+        except Exception as exc:
+            logger.warning("关闭 Evolink 客户端失败，将继续关闭事件循环: %s", exc)
         loop.close()
 
 
@@ -109,6 +114,8 @@ async def _run_video_generation(task: VideoGenerationTask, task_db_id: int) -> d
             quality = params.get("quality", "1080p")
             sound = params.get("sound", "on")
 
+            evolink_task_id = params.get("evolink_task_id")
+
             # 根据是否有首帧图决定调用文生视频还是图生视频
             if params.get("use_image_start") and shot.assets:
                 # 找到当前镜头的图片素材作为首帧
@@ -127,27 +134,34 @@ async def _run_video_generation(task: VideoGenerationTask, task_db_id: int) -> d
             logger.info("Kling 视频提示词:\n%s", prompt)
             logger.info("=" * 60)
 
-            if image_start:
-                video_task = await evolink_client.image_to_video(
-                    prompt=prompt,
-                    image_start=image_start,
-                    duration=max(3, min(15, int(shot.duration_sec))),
-                    quality=quality,
-                    sound=sound,
-                )
+            if evolink_task_id:
+                logger.info("检测到已提交的 Evolink 任务，继续轮询：%s", evolink_task_id)
             else:
-                video_task = await evolink_client.text_to_video(
-                    prompt=prompt,
-                    duration=max(3, min(15, int(shot.duration_sec))),
-                    quality=quality,
-                    sound=sound,
-                )
+                if image_start:
+                    video_task = await evolink_client.image_to_video(
+                        prompt=prompt,
+                        image_start=image_start,
+                        duration=max(3, min(15, int(shot.duration_sec))),
+                        quality=quality,
+                        sound=sound,
+                    )
+                else:
+                    video_task = await evolink_client.text_to_video(
+                        prompt=prompt,
+                        duration=max(3, min(15, int(shot.duration_sec))),
+                        quality=quality,
+                        sound=sound,
+                    )
 
-            logger.info("Evolink 任务已提交：%s，开始轮询…", video_task.id)
+                evolink_task_id = video_task.id
+                params = {**params, "evolink_task_id": evolink_task_id}
+                await task_repo.update(gen_task, {"input_params": params})
+                await session.commit()
+                logger.info("Evolink 任务已提交：%s，开始轮询…", evolink_task_id)
 
             # 轮询直到完成（最多 10 分钟），自动下载并上传到 OSS
             result = await evolink_client.wait_for_completion(
-                video_task.id,
+                evolink_task_id,
                 poll_interval=8.0,
                 timeout=600.0,
                 upload_to_oss=True,
@@ -191,6 +205,199 @@ async def _run_video_generation(task: VideoGenerationTask, task_db_id: int) -> d
             await session.commit()
 
             # 可重试的异常（网络问题、限流）自动重试
+            retryable = (RuntimeError, TimeoutError, ConnectionError)
+            if isinstance(exc, retryable) and task.request.retries < task.max_retries:
+                raise task.retry(exc=exc)
+
+            return {"status": "failed", "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# Multi-shot 视频生成任务（Kling multi_shot 模式）
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    bind=True,
+    base=VideoGenerationTask,
+    name="app.tasks.video.generate_multi_shot_video_task",
+    max_retries=3,
+    default_retry_delay=60,
+    queue="video",
+)
+def generate_multi_shot_video_task(self, task_db_id: int) -> dict:
+    """多镜头视频生成任务入口。
+
+    将一个分镜组的所有成员分镜合并为一次 Kling multi_shot API 调用。
+
+    Args:
+        task_db_id: GenerationTask 的数据库 ID。
+
+    Returns:
+        {"status": "success", "video_url": str}
+    """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(_run_multi_shot_video_generation(self, task_db_id))
+    finally:
+        try:
+            from app.utils.evolink import evolink_client
+            loop.run_until_complete(evolink_client.close())
+        except Exception as exc:
+            logger.warning("关闭 Evolink 客户端失败：%s", exc)
+        loop.close()
+
+
+async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id: int) -> dict:
+    """多镜头视频生成异步核心逻辑。"""
+    from app.models.task import GenerationTask
+    from app.repositories.shot import ShotRepository
+    from app.repositories.shot_group import ShotGroupRepository
+    from app.repositories.task import TaskRepository
+    from app.utils.evolink import evolink_client, MultiShotPrompt
+
+    async with task.get_session_factory()() as session:
+        task_repo = TaskRepository(session)
+        gen_task = await task_repo.get(task_db_id)
+        if not gen_task:
+            logger.error("GenerationTask %d 不存在", task_db_id)
+            return {"status": "failed", "error": "任务记录不存在"}
+
+        await task_repo.update(gen_task, {
+            "status": "running",
+            "started_at": datetime.now(timezone.utc),
+        })
+        await session.commit()
+
+        try:
+            params = gen_task.input_params or {}
+            shot_group_id = params.get("shot_group_id")
+            quality = params.get("quality", "1080p")
+            sound = params.get("sound", "on")
+
+            # 加载分镜组及成员
+            group_repo = ShotGroupRepository(session)
+            group = await group_repo.get(shot_group_id)
+            if not group:
+                raise ValueError(f"ShotGroup {shot_group_id} 不存在")
+
+            shot_repo = ShotRepository(session)
+            all_shots = await shot_repo.get_by_storyboard(group.storyboard_id)
+            member_shots = sorted(
+                [s for s in all_shots if s.shot_group_id == group.id],
+                key=lambda s: s.sequence,
+            )
+
+            if not member_shots:
+                raise ValueError(f"ShotGroup {shot_group_id} 没有成员分镜")
+
+            # 更新所有成员分镜状态
+            for shot in member_shots:
+                await shot_repo.update(shot, {"status": "generating"})
+            await group_repo.update(group, {"status": "generating"})
+            await session.commit()
+
+            # 构建多镜头提示词
+            multi_prompts = []
+            for i, shot in enumerate(member_shots):
+                prompt_text = build_compact_video_prompt(shot)
+                multi_prompts.append(MultiShotPrompt(
+                    index=i + 1,
+                    prompt=prompt_text,
+                    duration=str(max(1, int(shot.duration_sec or 3))),
+                ))
+
+            total_duration = sum(s.duration_sec or 3.0 for s in member_shots)
+            total_duration = max(3, min(15, int(total_duration)))
+
+            group_code = group.group_code
+
+            logger.info(
+                "开始多镜头视频生成：group=%s shots=%d total_duration=%ds",
+                group_code, len(member_shots), total_duration,
+            )
+            for mp in multi_prompts:
+                logger.info("  镜头 %d (%ss): %s", mp.index, mp.duration, mp.prompt[:100])
+
+            evolink_task_id = params.get("evolink_task_id")
+
+            if evolink_task_id:
+                logger.info("检测到已提交的 Evolink 任务，继续轮询：%s", evolink_task_id)
+            else:
+                video_task = await evolink_client.text_to_video(
+                    multi_shot_prompts=multi_prompts,
+                    duration=total_duration,
+                    quality=quality,
+                    sound=sound,
+                )
+                evolink_task_id = video_task.id
+                params = {**params, "evolink_task_id": evolink_task_id}
+                await task_repo.update(gen_task, {"input_params": params})
+                await session.commit()
+                logger.info("Evolink 多镜头任务已提交：%s", evolink_task_id)
+
+            # 轮询直到完成
+            result = await evolink_client.wait_for_completion(
+                evolink_task_id,
+                poll_interval=8.0,
+                timeout=600.0,
+                upload_to_oss=True,
+                oss_directory=f"videos/{group_code}",
+                oss_filename=f"{group_code}.mp4",
+            )
+
+            if not result.video_url:
+                raise RuntimeError("Evolink 返回结果中无视频URL")
+
+            logger.info("多镜头视频生成完成：%s url=%s", group_code, result.video_url)
+
+            # 更新分镜组的视频 URL
+            await group_repo.update(group, {
+                "status": "review",
+                "video_url": result.video_url,
+            })
+
+            # 同步更新所有成员分镜
+            for shot in member_shots:
+                await shot_repo.update(shot, {
+                    "status": "review",
+                    "video_url": result.video_url,
+                })
+
+            await task_repo.update(gen_task, {
+                "status": "success",
+                "progress": 100,
+                "completed_at": datetime.now(timezone.utc),
+            })
+            await session.commit()
+
+            return {"status": "success", "video_url": result.video_url}
+
+        except Exception as exc:
+            logger.exception("多镜头视频生成失败：task_id=%d error=%s", task_db_id, exc)
+            await task_repo.update(gen_task, {
+                "status": "failed",
+                "error_message": str(exc),
+                "completed_at": datetime.now(timezone.utc),
+            })
+
+            # 恢复成员分镜状态
+            try:
+                shot_group_id = (gen_task.input_params or {}).get("shot_group_id")
+                if shot_group_id:
+                    group_repo = ShotGroupRepository(session)
+                    group = await group_repo.get(shot_group_id)
+                    if group:
+                        await group_repo.update(group, {"status": "draft"})
+                        shot_repo = ShotRepository(session)
+                        all_shots = await shot_repo.get_by_storyboard(group.storyboard_id)
+                        for s in all_shots:
+                            if s.shot_group_id == group.id:
+                                await shot_repo.update(s, {"status": "draft"})
+            except Exception:
+                pass
+            await session.commit()
+
             retryable = (RuntimeError, TimeoutError, ConnectionError)
             if isinstance(exc, retryable) and task.request.retries < task.max_retries:
                 raise task.retry(exc=exc)

@@ -13,6 +13,7 @@ from app.repositories.project import ProjectRepository
 from app.repositories.task import TaskRepository
 from app.schemas.task import (
     ImageGenerationRequest,
+    MultiShotVideoGenerationRequest,
     StoryboardGenerationRequest,
     TaskResponse,
     VideoGenerationRequest,
@@ -57,7 +58,42 @@ async def trigger_video_generation(
     return task
 
 
-@router.post("/storyboard", response_model=TaskResponse, status_code=status.HTTP_202_ACCEPTED, summary="触发分镜脚本生成")
+@router.post("/video/multi-shot", response_model=TaskResponse, status_code=status.HTTP_202_ACCEPTED, summary="触发多镜头视频生成")
+async def trigger_multi_shot_video_generation(
+    body: MultiShotVideoGenerationRequest,
+    db: AsyncSession = Depends(get_db),
+    user_id: int = Depends(get_current_user_id),
+):
+    from app.tasks.video import generate_multi_shot_video_task
+    from app.repositories.shot_group import ShotGroupRepository
+
+    # 校验分镜组存在且满足约束
+    group_repo = ShotGroupRepository(db)
+    group = await group_repo.get(body.shot_group_id)
+    if not group:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="分镜组不存在")
+    if not group.shots or len(group.shots) < 2:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="分镜组至少需要 2 个分镜")
+    if len(group.shots) > 6:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="分镜组最多 6 个分镜")
+    total_duration = sum(s.duration_sec or 3.0 for s in group.shots)
+    if total_duration > 15.0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"分镜组总时长 {total_duration:.1f}s 超过 15 秒限制")
+
+    task_repo = TaskRepository(db)
+    task = await task_repo.create(
+        shot_id=None,
+        task_type="multi_shot_video_generation",
+        status="pending",
+        input_params=body.model_dump(),
+    )
+    await db.commit()
+    await db.refresh(task)
+
+    celery_result = generate_multi_shot_video_task.delay(task.id)
+    await task_repo.update(task, {"celery_task_id": celery_result.id})
+    await db.commit()
+    return task
 async def trigger_storyboard_generation(
     body: StoryboardGenerationRequest,
     db: AsyncSession = Depends(get_db),

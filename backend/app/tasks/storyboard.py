@@ -125,12 +125,29 @@ class ShotSchema(BaseModel):
     negative_prompt: Optional[str] = Field(None, description="英文负面提示词")
     style_preset: Optional[str] = Field(None, description="风格预设，如 cinematic/dramatic/ethereal/intense")
 
+    # 分镜组
+    group_code: Optional[str] = Field(
+        None, description="所属分镜组编号（如 G001），NULL 表示独立分镜"
+    )
+
+
+class ShotGroupSchema(BaseModel):
+    """分镜组定义。"""
+    group_code: str = Field(description="组编号，如 G001、G002")
+    name: Optional[str] = Field(None, description="组名称，如'快节奏战斗连段'")
+    shot_sequences: List[int] = Field(
+        description="组内分镜的 sequence 列表（按顺序）。最多 6 个，总时长 ≤ 15 秒"
+    )
+
 
 class StoryboardSchema(BaseModel):
     narrative_notes: str
     pacing_ratio: PacingRatio
     emotion_curve: List[EmotionPoint]
     shots: List[ShotSchema]
+    shot_groups: Optional[List[ShotGroupSchema]] = Field(
+        None, description="分镜组定义。每组 2-6 个镜头，总时长 ≤ 15 秒"
+    )
 
 
 from app.prompts import STORYBOARD_SYSTEM_PROMPT
@@ -217,6 +234,7 @@ async def _run_storyboard_generation(task_db_id: int) -> dict:
             _shot_columns = {c.key for c in ShotModel.__table__.columns}
 
             shot_repo = ShotRepository(session)
+            created_shots = {}  # sequence → shot
             for shot_data in data.get("shots", []):
                 safe = {
                     k: v for k, v in shot_data.items()
@@ -225,7 +243,35 @@ async def _run_storyboard_generation(task_db_id: int) -> dict:
                 # 确保 char_version_ids 有默认值
                 if "char_version_ids" not in safe:
                     safe["char_version_ids"] = []
-                await shot_repo.create(storyboard_id=storyboard.id, **safe)
+                shot = await shot_repo.create(storyboard_id=storyboard.id, **safe)
+                created_shots[shot_data["sequence"]] = shot
+
+            # 创建分镜组
+            groups_data = data.get("shot_groups") or []
+            if groups_data:
+                from app.repositories.shot_group import ShotGroupRepository
+                group_repo = ShotGroupRepository(session)
+                for idx, g_data in enumerate(groups_data):
+                    member_sequences = g_data.get("shot_sequences", [])
+                    member_shots = [created_shots[seq] for seq in member_sequences if seq in created_shots]
+
+                    if len(member_shots) < 2:
+                        logger.warning("跳过分镜组 %s：成员不足 2 个", g_data.get("group_code"))
+                        continue
+
+                    total_dur = sum(s.duration_sec or 3.0 for s in member_shots)
+                    group = await group_repo.create(
+                        storyboard_id=storyboard.id,
+                        group_code=g_data["group_code"],
+                        name=g_data.get("name"),
+                        sequence=idx + 1,
+                        total_duration_sec=total_dur,
+                    )
+                    # 绑定成员分镜
+                    for shot in member_shots:
+                        await shot_repo.update(shot, {"shot_group_id": group.id})
+
+                logger.info("创建了 %d 个分镜组", len(groups_data))
 
             # 更新总时长
             total_dur = sum(s.get("duration_sec", 3.0) for s in data.get("shots", []))
