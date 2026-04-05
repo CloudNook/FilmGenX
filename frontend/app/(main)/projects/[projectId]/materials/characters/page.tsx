@@ -979,7 +979,9 @@ function CharacterStudioWorkspace({
 }) {
   const version = charDetail.versions.find((item) => item.id === selectedVersionId);
   const versionImageItems = useMemo(() => {
-    if (!version) {
+    // 直接从 charDetail 中查找版本，确保依赖正确
+    const ver = charDetail.versions.find((item) => item.id === selectedVersionId);
+    if (!ver) {
       return [] as Array<{
         key: string;
         kind: 'three_view' | 'reference';
@@ -997,7 +999,7 @@ function CharacterStudioWorkspace({
       referenceIndex?: number;
     }> = [];
 
-    const threeViewUrl = normalizeImageUrl(version.three_view_url);
+    const threeViewUrl = normalizeImageUrl(ver.three_view_url);
     if (threeViewUrl) {
       items.push({
         key: `three-view-${threeViewUrl}`,
@@ -1007,7 +1009,7 @@ function CharacterStudioWorkspace({
       });
     }
 
-    (version.reference_image_urls || []).forEach((rawUrl, index) => {
+    (ver.reference_image_urls || []).forEach((rawUrl, index) => {
       const normalizedUrl = normalizeImageUrl(rawUrl);
       if (!normalizedUrl) return;
       items.push({
@@ -1020,7 +1022,7 @@ function CharacterStudioWorkspace({
     });
 
     return items;
-  }, [version]);
+  }, [charDetail, selectedVersionId]);
 
   const [prompt, setPrompt] = useState('');
   const [negativePrompt, setNegativePrompt] = useState('');
