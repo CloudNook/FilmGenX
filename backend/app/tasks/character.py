@@ -69,6 +69,7 @@ def generate_character_state_task(self, task_db_id: int) -> dict:
 
 async def _run_view_generation(task: CharacterImageTask, task_db_id: int) -> dict:
     """三视图生成核心逻辑。"""
+    from app.core.config import settings
     from app.repositories.character import CharacterVersionRepository
     from app.repositories.task import TaskRepository
     from app.utils.image_gen import image_gen_client
@@ -123,7 +124,7 @@ async def _run_view_generation(task: CharacterImageTask, task_db_id: int) -> dic
                 # 下载参考图
                 import httpx
                 ref_image_data = []
-                async with httpx.AsyncClient(timeout=30) as http_client:
+                async with httpx.AsyncClient(timeout=30, trust_env=settings.HTTP_TRUST_ENV) as http_client:
                     for url in reference_images[:3]:
                         try:
                             resp = await http_client.get(url)
@@ -201,6 +202,7 @@ async def _run_view_generation(task: CharacterImageTask, task_db_id: int) -> dic
 
 async def _run_state_generation(task: CharacterImageTask, task_db_id: int) -> dict:
     """状态图生成核心逻辑。"""
+    from app.core.config import settings
     from app.repositories.character import CharacterVersionRepository
     from app.repositories.task import TaskRepository
     from app.utils.image_gen import image_gen_client
@@ -267,7 +269,7 @@ async def _run_state_generation(task: CharacterImageTask, task_db_id: int) -> di
             ref_image_data = []
             if view_front_url:
                 import httpx
-                async with httpx.AsyncClient(timeout=30) as http_client:
+                async with httpx.AsyncClient(timeout=30, trust_env=settings.HTTP_TRUST_ENV) as http_client:
                     try:
                         resp = await http_client.get(view_front_url)
                         if resp.status_code == 200:
@@ -278,7 +280,7 @@ async def _run_state_generation(task: CharacterImageTask, task_db_id: int) -> di
             for url in reference_images[:2]:
                 if url and url != view_front_url:
                     import httpx
-                    async with httpx.AsyncClient(timeout=30) as http_client:
+                    async with httpx.AsyncClient(timeout=30, trust_env=settings.HTTP_TRUST_ENV) as http_client:
                         try:
                             resp = await http_client.get(url)
                             if resp.status_code == 200:

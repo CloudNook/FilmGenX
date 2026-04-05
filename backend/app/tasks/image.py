@@ -49,6 +49,7 @@ def generate_image_task(self, task_db_id: int) -> dict:
 async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> dict:
     import httpx
 
+    from app.core.config import settings
     from app.repositories.asset import AssetRepository
     from app.repositories.location import LocationRepository
     from app.repositories.shot import ShotRepository
@@ -117,7 +118,7 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
 
             if reference_image_urls:
                 reference_images: list[bytes] = []
-                async with httpx.AsyncClient(timeout=30) as http_client:
+                async with httpx.AsyncClient(timeout=30, trust_env=settings.HTTP_TRUST_ENV) as http_client:
                     for url in reference_image_urls[:5]:
                         try:
                             response = await http_client.get(url)

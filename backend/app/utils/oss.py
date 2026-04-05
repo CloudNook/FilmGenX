@@ -19,6 +19,7 @@
 
 import mimetypes
 import os
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -54,7 +55,14 @@ class OSSClient:
                     "OSS_ACCESS_KEY_SECRET / OSS_BUCKET_NAME / OSS_ENDPOINT"
                 )
             auth = oss2.Auth(settings.OSS_ACCESS_KEY_ID, settings.OSS_ACCESS_KEY_SECRET)
-            self._bucket = oss2.Bucket(auth, settings.OSS_ENDPOINT, settings.OSS_BUCKET_NAME)
+            session = oss2.Session()
+            session.session.trust_env = settings.HTTP_TRUST_ENV
+            self._bucket = oss2.Bucket(
+                auth,
+                settings.OSS_ENDPOINT,
+                settings.OSS_BUCKET_NAME,
+                session=session,
+            )
         return self._bucket
 
     def _build_object_key(self, filename: str, directory: Optional[str] = None) -> str:
@@ -237,11 +245,28 @@ class OSSClient:
             path = parsed.path.rstrip("/")
             filename = path.split("/")[-1] if "/" in path else "downloaded_file"
 
-        # 下载文件
-        with httpx.Client(timeout=timeout) as client:
-            response = client.get(url)
-            response.raise_for_status()
-            data = response.content
+        # 下载文件（带重试机制）
+        max_retries = 3
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                with httpx.Client(
+                    timeout=timeout,
+                    verify=True,
+                    trust_env=settings.HTTP_TRUST_ENV,
+                ) as client:
+                    response = client.get(url)
+                    response.raise_for_status()
+                    data = response.content
+                    break
+            except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)  # 指数退避
+                    continue
+                raise
+        else:
+            raise last_error
 
         # 上传到 OSS
         return self.upload_bytes(

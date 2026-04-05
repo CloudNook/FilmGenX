@@ -109,10 +109,26 @@ class EvolinkClient:
 
     def __init__(self) -> None:
         self._client: Optional[httpx.AsyncClient] = None
+        self._client_loop: Optional[asyncio.AbstractEventLoop] = None
 
     def _get_client(self) -> httpx.AsyncClient:
         """懒加载 httpx 客户端。"""
-        if self._client is None or self._client.is_closed:
+        current_loop = asyncio.get_running_loop()
+
+        if self._client is not None:
+            loop_changed = self._client_loop is not current_loop
+            loop_closed = bool(self._client_loop and self._client_loop.is_closed())
+            if self._client.is_closed or loop_changed or loop_closed:
+                logger.debug(
+                    "重建 Evolink HTTP 客户端：client_closed=%s loop_changed=%s loop_closed=%s",
+                    self._client.is_closed,
+                    loop_changed,
+                    loop_closed,
+                )
+                self._client = None
+                self._client_loop = None
+
+        if self._client is None:
             if not settings.EVOLINK_API_KEY:
                 raise RuntimeError(
                     "EVOLINK_API_KEY 未配置，请在 .env 中填写"
@@ -124,13 +140,23 @@ class EvolinkClient:
                     "Content-Type": "application/json",
                 },
                 timeout=60.0,
+                trust_env=settings.HTTP_TRUST_ENV,
             )
+            self._client_loop = current_loop
         return self._client
 
     async def close(self) -> None:
         """关闭 HTTP 连接（应用关闭时调用）。"""
-        if self._client and not self._client.is_closed:
-            await self._client.aclose()
+        try:
+            if self._client and not self._client.is_closed:
+                await self._client.aclose()
+        except RuntimeError as exc:
+            if "Event loop is closed" not in str(exc):
+                raise
+            logger.warning("关闭 Evolink HTTP 客户端时跳过已关闭事件循环: %s", exc)
+        finally:
+            self._client = None
+            self._client_loop = None
 
     # -----------------------------------------------------------------------
     # 内部辅助
@@ -152,6 +178,37 @@ class EvolinkClient:
             params["watermark_info"] = {"enabled": True}
         return params
 
+    async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """带有限重试的 HTTP 请求。
+
+        Evolink 轮询场景会持续数分钟，期间偶发的代理/TLS/连接抖动不应直接导致整个
+        视频任务失败，因此这里对 transport 层错误做短重试，并在重试前重建连接池。
+        """
+        max_attempts = max(1, settings.EVOLINK_REQUEST_RETRIES)
+        last_error: Optional[httpx.RequestError] = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return await self._get_client().request(method, url, **kwargs)
+            except httpx.RequestError as exc:
+                last_error = exc
+                if attempt >= max_attempts:
+                    break
+
+                logger.warning(
+                    "Evolink 请求异常，准备重试：method=%s url=%s attempt=%d/%d error=%s",
+                    method,
+                    url,
+                    attempt,
+                    max_attempts,
+                    exc,
+                )
+                await self.close()
+                await asyncio.sleep(min(4.0, float(attempt)))
+
+        assert last_error is not None
+        raise ConnectionError(f"Evolink 请求失败：{method} {url} ({last_error})") from last_error
+
     async def _post_generation(self, payload: dict) -> VideoTask:
         """发送创建视频任务请求并返回 VideoTask。"""
         # 移除 None 值，保持请求体简洁
@@ -160,8 +217,7 @@ class EvolinkClient:
             del payload["model_params"]
 
         logger.debug("Evolink 请求 payload: %s", payload)
-        resp = self._get_client()
-        response = await resp.post("/v1/videos/generations", json=payload)
+        response = await self._request("POST", "/v1/videos/generations", json=payload)
         self._raise_for_status(response)
         return self._parse_task(response.json())
 
@@ -333,7 +389,7 @@ class EvolinkClient:
         Note:
             Evolink 统一任务查询端点: GET /v1/tasks/{task_id}
         """
-        response = await self._get_client().get(f"/v1/tasks/{task_id}")
+        response = await self._request("GET", f"/v1/tasks/{task_id}")
         self._raise_for_status(response)
         return self._parse_task(response.json())
 
@@ -364,9 +420,25 @@ class EvolinkClient:
             TimeoutError: 超过 timeout 仍未完成。
             RuntimeError: 任务以 failed 状态结束。
         """
-        elapsed = 0.0
-        while elapsed < timeout:
-            task = await self.get_task(task_id)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+
+        while loop.time() < deadline:
+            try:
+                task = await self.get_task(task_id)
+            except ConnectionError as exc:
+                remaining = max(0.0, deadline - loop.time())
+                logger.warning(
+                    "Evolink 任务轮询异常，将继续重试：task_id=%s remaining=%.1fs error=%s",
+                    task_id,
+                    remaining,
+                    exc,
+                )
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(poll_interval, remaining))
+                continue
+
             logger.debug(
                 "Evolink 任务 %s 状态: %s  进度: %s%%",
                 task_id, task.status, task.progress,
@@ -396,8 +468,10 @@ class EvolinkClient:
                 return task
             if task.status == "failed":
                 raise RuntimeError(f"Evolink 任务 {task_id} 失败")
-            await asyncio.sleep(poll_interval)
-            elapsed += poll_interval
+            remaining = max(0.0, deadline - loop.time())
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(poll_interval, remaining))
 
         raise TimeoutError(f"Evolink 任务 {task_id} 超时（{timeout}s）")
 
