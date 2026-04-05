@@ -57,6 +57,8 @@ def _build_group_response(group, member_shots=None):
         "video_url": group.video_url,
         "status": group.status,
         "plan_intent": getattr(group, 'plan_intent', None),
+        "image_references": getattr(group, 'image_references', []) or [],
+        "image_start_url": getattr(group, 'image_start_url', None),
         "created_at": group.created_at,
         "updated_at": group.updated_at,
         "shots": [

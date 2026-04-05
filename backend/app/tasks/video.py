@@ -354,12 +354,46 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
             if evolink_task_id:
                 logger.info("检测到已提交的 Evolink 任务，继续轮询：%s", evolink_task_id)
             else:
-                video_task = await evolink_client.text_to_video(
-                    multi_shot_prompts=multi_prompts,
-                    duration=total_duration,
-                    quality=quality,
-                    sound=sound,
-                )
+                # Check if the group has associated reference images for image-to-video
+                image_refs = getattr(group, 'image_references', None) or []
+                has_images = len(image_refs) > 0
+
+                if has_images:
+                    # Use image-to-video mode
+                    image_start = getattr(group, 'image_start_url', None) or None
+                    reference_urls = [ref['url'] for ref in image_refs if ref.get('url')]
+
+                    # If no explicit image_start, use the first reference image
+                    if not image_start and reference_urls:
+                        image_start = reference_urls[0]
+
+                    # Inject <<<image_N>>> references into prompts
+                    from app.prompts import inject_image_refs_into_prompts
+                    multi_prompts = inject_image_refs_into_prompts(multi_prompts, image_refs)
+
+
+                    logger.info(
+                        "使用 image-to-video 模式：image_start=%s, reference_urls=%d张, 提示词:\n%s",
+                        image_start,
+                        len(reference_urls),
+                        "\n".join([f"  镜头 {mp.index} 提示词:\n{mp.prompt}" for mp in multi_prompts])
+                    )
+                    video_task = await evolink_client.image_to_video(
+                        multi_shot_prompts=multi_prompts,
+                        image_start=None,
+                        image_urls=reference_urls if reference_urls else None,
+                        duration=total_duration,
+                        quality=quality,
+                        sound=sound,
+                    )
+                else:
+                    # Existing text-to-video path
+                    video_task = await evolink_client.text_to_video(
+                        multi_shot_prompts=multi_prompts,
+                        duration=total_duration,
+                        quality=quality,
+                        sound=sound,
+                    )
                 evolink_task_id = video_task.id
                 params = {**params, "evolink_task_id": evolink_task_id}
                 await task_repo.update(gen_task, {"input_params": params})

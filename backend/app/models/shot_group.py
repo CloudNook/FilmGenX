@@ -1,5 +1,5 @@
 from typing import TYPE_CHECKING, List, Optional
-from sqlalchemy import ForeignKey, Integer, String, Text, Float
+from sqlalchemy import ForeignKey, Integer, String, Text, Float, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -53,6 +53,16 @@ class ShotGroup(Base):
     phase2_task_id: Mapped[Optional[str]] = mapped_column(
         String(100), nullable=True,
         comment="Phase 2 Creator AI 对应的 Celery 任务ID（预留）"
+    )
+
+    # 关联的参考图片（用于 image-to-video 生成）
+    image_references: Mapped[list] = mapped_column(
+        JSON, nullable=False, default=list,
+        comment="参考图列表：[{char_version_id, url, label}]"
+    )
+    image_start_url: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True,
+        comment="视频首帧图片URL"
     )
 
     # Relations

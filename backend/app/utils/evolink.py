@@ -171,6 +171,8 @@ class EvolinkClient:
             return None
         params: dict = {}
         if multi_shot_prompts:
+            import json
+            logger.info("multi_shot_prompts: %s", json.dumps([p.model_dump() for p in multi_shot_prompts], ensure_ascii=False, indent=2))
             params["multi_shot"] = True
             params["shot_type"] = "customize"
             params["multi_prompt"] = [p.model_dump() for p in multi_shot_prompts]
@@ -216,7 +218,8 @@ class EvolinkClient:
         if "model_params" in payload and payload["model_params"] is None:
             del payload["model_params"]
 
-        logger.debug("Evolink 请求 payload: %s", payload)
+        import json as _json
+        logger.info("Evolink 请求 payload: %s", _json.dumps(payload, ensure_ascii=False, indent=2))
         response = await self._request("POST", "/v1/videos/generations", json=payload)
         self._raise_for_status(response)
         return self._parse_task(response.json())
@@ -365,14 +368,14 @@ class EvolinkClient:
         payload: dict = {
             "model": IMAGE_TO_VIDEO_MODEL,
             "prompt": prompt if not multi_shot_prompts else None,
-            "image_start": image_start,
-            "image_end": image_end,
+            # "image_start": image_start,
+            # "image_end": image_end,
             "image_urls": image_urls,
             "duration": duration,
             "aspect_ratio": aspect_ratio,
             "quality": quality,
             "sound": sound,
-            "callback_url": callback_url,
+            # "callback_url": callback_url,
             "model_params": model_params,
         }
         return await self._post_generation(payload)

@@ -847,6 +847,12 @@ export interface ShotGroupMember {
   duration_sec: number;
 }
 
+export interface ImageRef {
+  char_version_id?: number | null;
+  url: string;
+  label: string;
+}
+
 export interface ShotGroupResponse {
   id: number;
   storyboard_id: number;
@@ -858,6 +864,8 @@ export interface ShotGroupResponse {
   status: string;
   plan_intent: string | null;
   shots: ShotGroupMember[] | null;
+  image_references: ImageRef[];
+  image_start_url: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -884,7 +892,7 @@ export const shotGroupsApi = {
     );
   },
 
-  update(storyboardId: number, groupId: number, data: { name?: string; shot_ids?: number[]; status?: string }) {
+  update(storyboardId: number, groupId: number, data: { name?: string; shot_ids?: number[]; status?: string; image_references?: ImageRef[]; image_start_url?: string | null }) {
     return request<ShotGroupResponse>(
       `/storyboards/${storyboardId}/groups/${groupId}`,
       { method: 'PATCH', body: data },

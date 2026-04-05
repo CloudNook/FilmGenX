@@ -15,6 +15,7 @@ import {
   type StoryboardResponse,
   type ShotResponse,
   type ShotGroupResponse,
+  type ImageRef,
 } from '@/lib/api';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -68,6 +69,7 @@ import {
   Loader2,
   Group,
 } from 'lucide-react';
+import { ImagePickerDialog } from '@/components/shots/ImagePickerDialog';
 
 const shotStatusColors: Record<string, string> = {
   draft: 'bg-muted text-muted-foreground',
@@ -96,6 +98,7 @@ export default function StoryboardPage({
   const [selectedShotIds, setSelectedShotIds] = useState<Set<number>>(new Set());
   const [selectedGroup, setSelectedGroup] = useState<ShotGroupResponse | null>(null);
   const [generatingGroupVideo, setGeneratingGroupVideo] = useState(false);
+  const [imagePickerOpen, setImagePickerOpen] = useState(false);
 
   // Loading state
   const [loadingProject, setLoadingProject] = useState(true);
@@ -537,6 +540,47 @@ export default function StoryboardPage({
   const selectedShotGroup = selectedShot ? getGroupForShot(selectedShot) : null;
   const activeGroup = selectedGroup || selectedShotGroup;
 
+  // Save image picker selections to shot group
+  const handleImagePickerConfirm = useCallback(
+    async (refs: ImageRef[], imgStartUrl: string | null) => {
+      if (!storyboard || !selectedShot) return;
+      try {
+        let group = activeGroup;
+
+        // If no group exists, auto-create a single-shot group
+        if (!group) {
+          const groupCode = `G${String(shotGroups.length + 1).padStart(3, '0')}`;
+          group = await shotGroupsApi.create(storyboard.id, {
+            group_code: groupCode,
+            shot_ids: [selectedShot.id],
+          });
+          setShotGroups((prev) => [...prev, group!]);
+          setSelectedGroup(group);
+          const refreshed = await shotsApi.list(storyboard.id);
+          setShots(refreshed);
+        }
+
+        const updatedGroup = await shotGroupsApi.update(
+          storyboard.id,
+          group.id,
+          {
+            image_references: refs,
+            image_start_url: imgStartUrl,
+          },
+        );
+        setShotGroups((prev) =>
+          prev.map((g) => (g.id === updatedGroup.id ? updatedGroup : g)),
+        );
+        setSelectedGroup(updatedGroup);
+        setImagePickerOpen(false);
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : '保存图片关联失败');
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [storyboard, selectedShot?.id, activeGroup, shotGroups.length],
+  );
+
   // Derive generating state from API status (not simulated)
   const isShotGenerating = selectedShot?.status === 'generating';
   const isGroupGenerating = activeGroup?.status === 'generating';
@@ -753,6 +797,12 @@ export default function StoryboardPage({
                       <span className="text-xs font-medium text-foreground truncate">
                         {group.name || group.group_code}
                       </span>
+                      {(group.image_references?.length || 0) > 0 && (
+                        <Badge variant="outline" className="text-[9px] h-4 px-1 shrink-0">
+                          <Camera className="h-2.5 w-2.5 mr-0.5" />
+                          {group.image_references.length}
+                        </Badge>
+                      )}
                       <span className="text-[10px] text-muted-foreground ml-auto shrink-0">
                         {group.shots?.length || 0}镜头 · {(group.total_duration_sec || 0).toFixed(1)}s
                       </span>
@@ -968,24 +1018,38 @@ export default function StoryboardPage({
 
                 <div className="flex items-center gap-2">
                   {activeGroup && (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-7 border-primary/50 text-primary hover:bg-primary/10"
-                      onClick={handleGenerateGroupVideo}
-                      disabled={isAnyGenerating}
-                    >
-                      {isGroupGenerating ? (
-                        <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
-                      ) : (
-                        <Group className="h-3.5 w-3.5 mr-1" />
-                      )}
-                      {isGroupGenerating
-                        ? '生成中...'
-                        : activeGroup.status === 'review'
-                          ? `重新生成 (${activeGroup.shots?.length || 0}镜头)`
-                          : `Kling Multi-Shot (${activeGroup.shots?.length || 0}镜头)`}
-                    </Button>
+                    <>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 border-border"
+                        onClick={() => setImagePickerOpen(true)}
+                      >
+                        <Camera className="h-3.5 w-3.5 mr-1" />
+                        参考图
+                        {(activeGroup.image_references?.length || 0) > 0
+                          ? ` (${activeGroup.image_references.length})`
+                          : ''}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 border-primary/50 text-primary hover:bg-primary/10"
+                        onClick={handleGenerateGroupVideo}
+                        disabled={isAnyGenerating}
+                      >
+                        {isGroupGenerating ? (
+                          <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+                        ) : (
+                          <Group className="h-3.5 w-3.5 mr-1" />
+                        )}
+                        {isGroupGenerating
+                          ? '生成中...'
+                          : activeGroup.status === 'review'
+                            ? `重新生成 (${activeGroup.shots?.length || 0}镜头)`
+                            : `Kling Multi-Shot (${activeGroup.shots?.length || 0}镜头)`}
+                      </Button>
+                    </>
                   )}
                   <Button
                     variant="outline"
@@ -1092,6 +1156,8 @@ export default function StoryboardPage({
                 key={selectedShot.id}
                 shot={selectedShot}
                 storyboardId={storyboard?.id}
+                activeGroup={activeGroup}
+                onOpenImagePicker={() => setImagePickerOpen(true)}
                 onSave={handleUpdateShot}
                 onDelete={handleDeleteShot}
               />
@@ -1106,6 +1172,16 @@ export default function StoryboardPage({
           </div>
         </ResizablePanel>
       </ResizablePanelGroup>
+
+      {/* Image Picker Dialog for ShotGroup */}
+      <ImagePickerDialog
+        open={imagePickerOpen}
+        onOpenChange={setImagePickerOpen}
+        projectId={projectIdNum}
+        existingRefs={activeGroup?.image_references || []}
+        existingImageStartUrl={activeGroup?.image_start_url || null}
+        onConfirm={handleImagePickerConfirm}
+      />
     </AppLayout>
   );
 }
@@ -1117,11 +1193,15 @@ export default function StoryboardPage({
 function ShotDetailPanel({
   shot,
   storyboardId,
+  activeGroup,
+  onOpenImagePicker,
   onSave,
   onDelete,
 }: {
   shot: ShotResponse;
   storyboardId?: number;
+  activeGroup?: ShotGroupResponse | null;
+  onOpenImagePicker?: () => void;
   onSave: (shotId: number, data: Record<string, unknown>) => Promise<void>;
   onDelete: (shotId: number) => Promise<void>;
 }) {
@@ -1380,6 +1460,72 @@ function ShotDetailPanel({
             )}
           </div>
         </div>
+
+        <Separator />
+
+        {/* Reference Images (for image-to-video) */}
+        {onOpenImagePicker && (
+          <div className="space-y-3">
+            <h3 className="text-sm font-medium text-foreground">参考图</h3>
+            <div className="space-y-2">
+              {activeGroup ? (
+                <>
+                  <p className="text-xs text-muted-foreground">
+                    为所属分镜组「{activeGroup.name || activeGroup.group_code}」选择角色图和场景图，用于 image-to-video 生成。
+                  </p>
+                  {(activeGroup.image_references?.length || 0) > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {activeGroup.image_references.map((ref, i) => (
+                        <div key={`ref-${i}`} className="relative w-10 h-10 rounded overflow-hidden border border-border">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={ref.url} alt={ref.label} className="w-full h-full object-cover" />
+                          <div className={`absolute bottom-0 left-0 right-0 text-[8px] text-center ${
+                            ref.char_version_id ? 'bg-primary/80 text-primary-foreground' : 'bg-emerald-500/80 text-white'
+                          }`}>
+                            {ref.char_version_id ? '角色' : '场景'}
+                          </div>
+                        </div>
+                      ))}
+                      {activeGroup.image_start_url && (
+                        <div className="relative w-10 h-10 rounded overflow-hidden border border-amber-500/50">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={activeGroup.image_start_url} alt="首帧" className="w-full h-full object-cover" />
+                          <div className="absolute bottom-0 left-0 right-0 bg-amber-500/80 text-[8px] text-white text-center">首帧</div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full h-7 border-border"
+                    onClick={onOpenImagePicker}
+                  >
+                    <Camera className="h-3.5 w-3.5 mr-1" />
+                    {activeGroup.image_references?.length
+                      ? '修改参考图'
+                      : '选择参考图'}
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <p className="text-xs text-muted-foreground">
+                    选择角色图和场景图作为参考，用于 image-to-video 生成。
+                  </p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full h-7 border-border"
+                    onClick={onOpenImagePicker}
+                  >
+                    <Camera className="h-3.5 w-3.5 mr-1" />
+                    选择参考图
+                  </Button>
+                </>
+              )}
+            </div>
+          </div>
+        )}
 
         <Separator />
 

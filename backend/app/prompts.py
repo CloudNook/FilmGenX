@@ -762,6 +762,54 @@ def build_negative_prompt(shot: "Shot") -> str:
     return base_negative
 
 
+def inject_image_refs_into_prompts(
+    multi_prompts: list,
+    image_refs: list[dict],
+) -> list:
+    """将 image_references 注入到多镜头提示词中。
+
+    对每个提示词的 prompt 文本，在「人物」行中追加 <<<image_N>>> 引用标记，
+    使 Kling API 知道哪些参考图对应哪些角色。
+
+    image_refs 格式：[{char_version_id, url, label}, ...]
+    多个带有 char_version_id 的引用会依次编号为 image_1, image_2, ...
+
+    示例输出片段：
+        人物1:萧炎(<<<image_1>>>), action description
+        人物2:纳兰嫣然(<<<image_2>>>), action description
+    """
+    if not image_refs:
+        return multi_prompts
+
+    # 构建 char_version_id → image_N 映射
+    char_refs = [ref for ref in image_refs if ref.get("char_version_id")]
+    char_ref_index = {ref["char_version_id"]: i + 1 for i, ref in enumerate(char_refs)}
+
+    # 如果没有角色引用，直接返回原始提示词（场景图不需要注入到 prompt）
+    # if not char_refs:
+    #     return multi_prompts
+
+    for mp in multi_prompts:
+        # 在提示词开头追加参考图声明
+        # ref_parts = []
+        # for ref in char_refs:
+        #     idx = char_ref_index[ref["char_version_id"]]
+        #     label = ref.get("label", f"角色萧炎: ")
+        #     # 提取角色名（label 格式通常是 "角色 - 参考图 1" 或 "角色 - 三视图"）
+        #     ref_parts.append(f"<<<image_{idx}>>>")
+
+        # if ref_parts:
+        image_header = "角色纳兰嫣然参考图: <<<image_1>>>\n 角色萧炎参考图: <<<image_2>>>\n"
+        # 在 prompt 最前面插入参考图标记，并确保总长度不超过 512 字符
+        new_prompt = f"{image_header}{mp.prompt}"
+        max_len = 512
+        if len(new_prompt) > max_len:
+            new_prompt = new_prompt[:max_len]
+        mp.prompt = new_prompt
+
+    return multi_prompts
+
+
 def build_compact_video_prompt(shot: "Shot") -> str:
     """
     从 Shot 对象构建紧凑的结构化视频提示词，用于 Kling multi_shot 模式。

@@ -1,6 +1,6 @@
 """分镜组（ShotGroup）的请求/响应 Schema。"""
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -21,6 +21,11 @@ class ShotGroupUpdate(BaseModel):
     status: Optional[str] = Field(
         None, pattern="^(draft|generating|review|approved|rejected)$"
     )
+    image_references: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description="参考图列表：[{char_version_id, url, label}]",
+    )
+    image_start_url: Optional[str] = Field(None, description="视频首帧图片URL")
 
 
 class ShotGroupResponse(BaseResponse):
@@ -34,3 +39,7 @@ class ShotGroupResponse(BaseResponse):
     status: str
     plan_intent: Optional[str] = None
     shots: Optional[List[dict]] = Field(None, description="成员分镜摘要列表")
+    image_references: List[Dict[str, Any]] = Field(
+        default_factory=list, description="参考图列表：[{char_version_id, url, label}]"
+    )
+    image_start_url: Optional[str] = Field(None, description="视频首帧图片URL")
