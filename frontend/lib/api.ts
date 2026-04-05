@@ -633,6 +633,13 @@ export const charactersApi = {
     });
   },
 
+  addReferenceImageFromUrl(projectId: number, characterId: number, versionId: number, imageUrl: string): Promise<CharacterVersionResponse> {
+    return request<CharacterVersionResponse>(
+      `/projects/${projectId}/characters/${characterId}/versions/${versionId}/images/reference/from-url?image_url=${encodeURIComponent(imageUrl)}`,
+      { method: 'POST' },
+    );
+  },
+
   uploadThreeViewImage(projectId: number, characterId: number, versionId: number, file: File): Promise<CharacterVersionResponse> {
     const formData = new FormData();
     formData.append('file', file);
@@ -935,7 +942,8 @@ export const assetsApi = {
       isCurrent?: boolean;
     },
   ) {
-    const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    const safePageSize = Math.min(Math.max(pageSize, 1), 100);
+    const params = new URLSearchParams({ page: String(page), page_size: String(safePageSize) });
     if (filters?.assetType) params.set('asset_type', filters.assetType);
     if (filters?.shotId !== undefined) params.set('shot_id', String(filters.shotId));
     if (filters?.locationId !== undefined) params.set('location_id', String(filters.locationId));
@@ -1041,6 +1049,7 @@ export interface ImageGenerationRequest {
   aspect_ratio?: string;
   resolution?: string;
   style_preset?: string;
+  character_image_kind?: string;
   reference_image_urls?: string[];
   save_to_shot?: boolean;
 }

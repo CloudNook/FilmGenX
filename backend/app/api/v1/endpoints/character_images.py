@@ -11,7 +11,7 @@
 from datetime import datetime, timezone
 from typing import List
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user_id, get_db
@@ -82,6 +82,29 @@ async def upload_reference_image(
     version_repo = CharacterVersionRepository(db)
     await version_repo.update(version, {"reference_image_urls": urls})
     await db.commit()
+
+    return version
+
+
+@router.post("/reference/from-url", response_model=CharacterVersionResponse, summary="从URL添加参考图")
+async def add_reference_image_from_url(
+    project_id: int,
+    character_id: int,
+    version_id: int,
+    image_url: str = Query(..., description="图片URL"),
+    db: AsyncSession = Depends(get_db),
+    user_id: int = Depends(get_current_user_id),
+):
+    """从URL添加角色参考图（直接添加URL到 reference_image_urls 列表）。"""
+    version = await _require_version(project_id, character_id, version_id, user_id, db)
+
+    # 直接将URL添加到参考图列表
+    urls = list(version.reference_image_urls or [])
+    if image_url not in urls:
+        urls.append(image_url)
+        version_repo = CharacterVersionRepository(db)
+        await version_repo.update(version, {"reference_image_urls": urls})
+        await db.commit()
 
     return version
 

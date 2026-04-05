@@ -1,6 +1,7 @@
 'use client';
 
 import { use, useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
   charactersApi,
   projectsApi,
@@ -48,8 +49,67 @@ import {
   Eye,
   ImagePlus,
   X,
+  Layers,
+  FileImage,
+  ArrowRight,
 } from 'lucide-react';
+import { assetsApi, type AssetResponse } from '@/lib/api';
 import { toast } from 'sonner';
+
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
+const BACKEND_ORIGIN = (() => {
+  try {
+    return new URL(API_BASE_URL).origin;
+  } catch {
+    return 'http://localhost:8000';
+  }
+})();
+
+function normalizeImageUrl(rawUrl: string | null | undefined): string | null {
+  if (typeof rawUrl !== 'string') return null;
+
+  let value = rawUrl.trim();
+  if (!value || value === 'null' || value === 'undefined') return null;
+
+  if (
+    (value.startsWith('[') && value.endsWith(']'))
+    || (value.startsWith('"') && value.endsWith('"'))
+    || (value.startsWith("'") && value.endsWith("'"))
+  ) {
+    try {
+      const parsed = JSON.parse(value.replace(/^'|'$/g, '"'));
+      if (typeof parsed === 'string') {
+        value = parsed.trim();
+      } else if (Array.isArray(parsed) && typeof parsed[0] === 'string') {
+        value = parsed[0].trim();
+      }
+    } catch {
+      value = value.replace(/^['"]|['"]$/g, '').trim();
+    }
+  }
+
+  if (!value) return null;
+
+  value = value.replace(/\\/g, '/');
+
+  if (/^(blob:|data:|https?:\/\/)/i.test(value)) return value;
+  if (value.startsWith('//')) return `https:${value}`;
+  if (value.startsWith('/')) return `${BACKEND_ORIGIN}${value}`;
+
+  return `${BACKEND_ORIGIN}/${value.replace(/^\.?\//, '')}`;
+}
+
+function normalizeImageUrls(urls: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>();
+
+  return urls
+    .map((url) => normalizeImageUrl(url))
+    .filter((url): url is string => {
+      if (!url || seen.has(url)) return false;
+      seen.add(url);
+      return true;
+    });
+}
 
 // 图像比例选项
 const ASPECT_RATIOS = [
@@ -327,6 +387,40 @@ function FullscreenPreview({ url, open, onOpenChange }: { url: string | null; op
 }
 
 // 文件拖放区域
+function SafeImage({
+  src,
+  alt,
+  className,
+  fallbackLabel = '图片不可用',
+}: {
+  src: string | null;
+  alt: string;
+  className: string;
+  fallbackLabel?: string;
+}) {
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [src]);
+
+  if (!src || failed) {
+    return (
+      <div
+        className={`${className} flex items-center justify-center bg-secondary/30 p-4 text-center text-xs text-muted-foreground`}
+        title={src || fallbackLabel}
+      >
+        <div className="flex flex-col items-center gap-2">
+          <ImageIcon className="h-5 w-5 opacity-60" />
+          <span>{fallbackLabel}</span>
+        </div>
+      </div>
+    );
+  }
+
+  return <img src={src} alt={alt} className={className} onError={() => setFailed(true)} />;
+}
+
 function FileDropZone({
   onSelect,
   disabled,
@@ -364,1105 +458,6 @@ function FileDropZone({
   );
 }
 
-// 角色出图工作区标签页
-function StudioTabs({
-  projectId,
-  characterId,
-  characterName,
-  referenceVersionId,
-  referenceImages,
-  onRefresh,
-}: {
-  projectId: number;
-  characterId: number;
-  characterName: string;
-  referenceVersionId: number | null;
-  referenceImages: string[];
-  onRefresh: () => void;
-}) {
-  // 文生图状态
-  const [textPrompt, setTextPrompt] = useState('');
-  const [textNegativePrompt, setTextNegativePrompt] = useState('');
-  const [textAspectRatio, setTextAspectRatio] = useState('2:3');
-  const [textResolution, setTextResolution] = useState('1K');
-  const [textGenerating, setTextGenerating] = useState(false);
-
-  // 图生图状态
-  const [imgPrompt, setImgPrompt] = useState('');
-  const [imgNegativePrompt, setImgNegativePrompt] = useState('');
-  const [imgAspectRatio, setImgAspectRatio] = useState('2:3');
-  const [imgResolution, setImgResolution] = useState('1K');
-  const [selectedRefImages, setSelectedRefImages] = useState<string[]>([]);
-  const [imgGenerating, setImgGenerating] = useState(false);
-
-  // 上传状态
-  const [uploadFiles, setUploadFiles] = useState<PendingImageFile[]>([]);
-  const [uploading, setUploading] = useState(false);
-
-  // 生成唯一ID
-  const generateId = () => Math.random().toString(36).substring(2, 9);
-
-  // 添加待上传文件
-  const addPendingFiles = (files: FileList | null, type: 'upload') => {
-    if (!files) return;
-    const newFiles: PendingImageFile[] = Array.from(files).map((file) => ({
-      id: generateId(),
-      file,
-      preview: URL.createObjectURL(file),
-    }));
-    setUploadFiles((prev) => [...prev, ...newFiles]);
-  };
-
-  // 移除待上传文件
-  const removePendingFile = (id: string, type: 'upload') => {
-    setUploadFiles((prev) => {
-      const item = prev.find((f) => f.id === id);
-      if (item) URL.revokeObjectURL(item.preview);
-      return prev.filter((f) => f.id !== id);
-    });
-  };
-
-  // 文生图
-  const handleGenerateFromPrompt = async () => {
-    if (!textPrompt.trim()) return;
-    setTextGenerating(true);
-    try {
-      const result = await tasksApi.triggerImage({
-        project_id: projectId,
-        character_id: characterId,
-        character_version_id: referenceVersionId || undefined,
-        prompt: textPrompt,
-        negative_prompt: textNegativePrompt || undefined,
-        aspect_ratio: textAspectRatio,
-        resolution: textResolution,
-        save_to_shot: true,
-      });
-      toast.success('生成任务已提交');
-      pollTask(result.id, () => {
-        setTextGenerating(false);
-        onRefresh();
-      });
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '生成失败');
-      setTextGenerating(false);
-    }
-  };
-
-  // 图生图
-  const handleGenerateFromImage = async () => {
-    if (!imgPrompt.trim() || selectedRefImages.length === 0) return;
-    setImgGenerating(true);
-    try {
-      const result = await tasksApi.triggerImage({
-        project_id: projectId,
-        character_id: characterId,
-        character_version_id: referenceVersionId || undefined,
-        prompt: imgPrompt,
-        negative_prompt: imgNegativePrompt || undefined,
-        aspect_ratio: imgAspectRatio,
-        resolution: imgResolution,
-        reference_image_urls: selectedRefImages,
-        save_to_shot: true,
-      });
-      toast.success('生成任务已提交');
-      pollTask(result.id, () => {
-        setImgGenerating(false);
-        onRefresh();
-      });
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '生成失败');
-      setImgGenerating(false);
-    }
-  };
-
-  // 上传图片
-  const handleUploadImages = async () => {
-    if (uploadFiles.length === 0) return;
-    if (!referenceVersionId) {
-      toast.error('请先创建角色版本，再上传参考图');
-      return;
-    }
-    setUploading(true);
-    try {
-      // 这里调用上传API
-      for (const item of uploadFiles) {
-        await charactersApi.uploadReferenceImage(projectId, characterId, referenceVersionId, item.file);
-      }
-      toast.success('上传成功');
-      setUploadFiles([]);
-      await Promise.resolve(onRefresh());
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '上传失败');
-    } finally {
-      setUploading(false);
-    }
-  };
-
-  // 轮询任务状态
-  const pollTask = (taskId: number, onComplete: () => void) => {
-    let attempts = 0;
-    const poll = async () => {
-      try {
-        const task = await tasksApi.get(taskId);
-        if (task.status === 'success') {
-          toast.success('生成完成');
-          onComplete();
-          return;
-        }
-        if (task.status === 'failed') {
-          toast.error(task.error_message || '生成失败');
-          onComplete();
-          return;
-        }
-        if (++attempts < 60) {
-          setTimeout(poll, 5000);
-        } else {
-          toast.warning('生成时间较长，请稍后刷新查看');
-          onComplete();
-        }
-      } catch {
-        if (++attempts < 60) {
-          setTimeout(poll, 5000);
-        } else {
-          onComplete();
-        }
-      }
-    };
-    poll();
-  };
-
-  // 切换参考图选择
-  const toggleRefImage = (url: string) => {
-    setSelectedRefImages((prev) =>
-      prev.includes(url) ? prev.filter((u) => u !== url) : [...prev, url]
-    );
-  };
-
-  return (
-    <Tabs defaultValue="prompt" className="space-y-4">
-      <TabsList className="grid w-full grid-cols-3">
-        <TabsTrigger value="prompt">提示词生图</TabsTrigger>
-        <TabsTrigger value="upload">本地上传</TabsTrigger>
-        <TabsTrigger value="img2img">图生图</TabsTrigger>
-      </TabsList>
-
-      {/* 提示词生图 */}
-      <TabsContent value="prompt" className="space-y-4">
-        <div className="space-y-2">
-          <label className="text-sm font-medium">正向提示词</label>
-          <Textarea
-            value={textPrompt}
-            onChange={(e) => setTextPrompt(e.target.value)}
-            rows={5}
-            placeholder={`描述你想要的角色形象，例如：${characterName}，古风少年，黑发飘逸，眼神坚毅，身着白色长袍...`}
-          />
-        </div>
-        <div className="space-y-2">
-          <label className="text-sm font-medium">负面提示词</label>
-          <Input
-            value={textNegativePrompt}
-            onChange={(e) => setTextNegativePrompt(e.target.value)}
-            placeholder="例如：blurry, low quality, watermark, bad anatomy"
-          />
-        </div>
-        <div className="grid gap-4 md:grid-cols-3">
-          <div className="space-y-2">
-            <label className="text-sm font-medium">画幅比例</label>
-            <Select value={textAspectRatio} onValueChange={setTextAspectRatio}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {ASPECT_RATIOS.map((item) => (
-                  <SelectItem key={item.value} value={item.value}>
-                    {item.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-2">
-            <label className="text-sm font-medium">分辨率</label>
-            <Select value={textResolution} onValueChange={setTextResolution}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {RESOLUTIONS.map((item) => (
-                  <SelectItem key={item.value} value={item.value}>
-                    {item.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-        <div className="flex justify-end">
-          <Button onClick={handleGenerateFromPrompt} disabled={textGenerating || !textPrompt.trim()}>
-            {textGenerating ? (
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            ) : (
-              <Wand2 className="mr-2 h-4 w-4" />
-            )}
-            生成角色图
-          </Button>
-        </div>
-      </TabsContent>
-
-      {/* 本地上传 */}
-      <TabsContent value="upload" className="space-y-4">
-        <FileDropZone
-          onSelect={(files) => addPendingFiles(files, 'upload')}
-          disabled={uploading}
-          title="上传角色参考图"
-          description="支持 JPG、PNG、WebP，单张不超过 10MB"
-        />
-
-        {uploadFiles.length > 0 && (
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {uploadFiles.map((item) => (
-              <div key={item.id} className="rounded-xl border bg-secondary/20 p-2">
-                <div className="relative overflow-hidden rounded-lg">
-                  <img src={item.preview} alt={item.file.name} className="aspect-[2/3] w-full object-cover" />
-                  <Button
-                    variant="secondary"
-                    size="icon"
-                    className="absolute right-2 top-2 h-7 w-7"
-                    onClick={() => removePendingFile(item.id, 'upload')}
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
-                </div>
-                <div className="mt-2 truncate text-xs text-muted-foreground">
-                  {item.file.name}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-
-        <div className="flex justify-end">
-          <Button onClick={handleUploadImages} disabled={uploading || uploadFiles.length === 0}>
-            {uploading ? (
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            ) : (
-              <ImagePlus className="mr-2 h-4 w-4" />
-            )}
-            保存参考图
-          </Button>
-        </div>
-      </TabsContent>
-
-      {/* 图生图 */}
-      <TabsContent value="img2img" className="space-y-4">
-        {referenceImages.length > 0 && (
-          <div className="space-y-2">
-            <label className="text-sm font-medium">选择参考图</label>
-            <div className="grid grid-cols-4 gap-2">
-              {referenceImages.map((url, idx) => (
-                <div
-                  key={idx}
-                  className={`relative aspect-[2/3] rounded-lg overflow-hidden border-2 cursor-pointer transition-all ${
-                    selectedRefImages.includes(url) ? 'border-primary' : 'border-transparent'
-                  }`}
-                  onClick={() => toggleRefImage(url)}
-                >
-                  <img src={url} alt={`ref-${idx}`} className="w-full h-full object-cover" />
-                  {selectedRefImages.includes(url) && (
-                    <div className="absolute inset-0 bg-primary/30 flex items-center justify-center">
-                      <div className="w-5 h-5 rounded-full bg-primary text-white text-xs flex items-center justify-center">
-                        {selectedRefImages.indexOf(url) + 1}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-            <p className="text-xs text-muted-foreground">选择参考图将启用图生图模式</p>
-          </div>
-        )}
-
-        <div className="space-y-2">
-          <label className="text-sm font-medium">图生图提示词</label>
-          <Textarea
-            value={imgPrompt}
-            onChange={(e) => setImgPrompt(e.target.value)}
-            rows={4}
-            placeholder="在已有角色基础上继续细化，例如：保留面部特征和服装风格，调整为夜间场景，加入月光效果..."
-          />
-        </div>
-        <div className="space-y-2">
-          <label className="text-sm font-medium">负面提示词</label>
-          <Input
-            value={imgNegativePrompt}
-            onChange={(e) => setImgNegativePrompt(e.target.value)}
-            placeholder="例如：deformed, extra limbs, watermark"
-          />
-        </div>
-        <div className="grid gap-4 md:grid-cols-2">
-          <div className="space-y-2">
-            <label className="text-sm font-medium">画幅比例</label>
-            <Select value={imgAspectRatio} onValueChange={setImgAspectRatio}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {ASPECT_RATIOS.map((item) => (
-                  <SelectItem key={item.value} value={item.value}>
-                    {item.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-2">
-            <label className="text-sm font-medium">分辨率</label>
-            <Select value={imgResolution} onValueChange={setImgResolution}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {RESOLUTIONS.map((item) => (
-                  <SelectItem key={item.value} value={item.value}>
-                    {item.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-        <div className="flex justify-end">
-          <Button
-            onClick={handleGenerateFromImage}
-            disabled={imgGenerating || !imgPrompt.trim() || selectedRefImages.length === 0}
-          >
-            {imgGenerating ? (
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            ) : (
-              <Wand2 className="mr-2 h-4 w-4" />
-            )}
-            图生图
-          </Button>
-        </div>
-      </TabsContent>
-    </Tabs>
-  );
-}
-
-function CharacterStudioWorkspace({
-  projectId,
-  characterId,
-  characterName,
-  versions,
-  selectedVersionId,
-  onSelectVersionId,
-  onRefresh,
-}: {
-  projectId: number;
-  characterId: number;
-  characterName: string;
-  versions: CharacterVersionResponse[];
-  selectedVersionId: number | null;
-  onSelectVersionId: (versionId: number) => void;
-  onRefresh: () => void;
-}) {
-  const activeVersion = useMemo(
-    () => versions.find((version) => version.id === selectedVersionId) ?? null,
-    [selectedVersionId, versions],
-  );
-
-  const availableReferenceUrls = useMemo(
-    () => activeVersion ? [activeVersion.three_view_url, ...(activeVersion.reference_image_urls || [])].filter(Boolean) as string[] : [],
-    [activeVersion],
-  );
-
-  const reusableVersionImages = useMemo(() => {
-    if (!activeVersion) return [];
-
-    return versions
-      .filter((version) => version.id !== activeVersion.id)
-      .flatMap((version) => {
-        const urls = [version.three_view_url, ...(version.reference_image_urls || [])].filter(Boolean) as string[];
-        return urls.map((url, index) => ({
-          key: `${version.id}-${url}-${index}`,
-          url,
-          versionLabel: version.label,
-          imageLabel: version.three_view_url === url ? '三视图' : `参考图 #${index + (version.three_view_url ? 0 : 1)}`,
-        }));
-      })
-      .filter((item, index, arr) => arr.findIndex((candidate) => candidate.url === item.url) === index)
-      .filter((item) => !availableReferenceUrls.includes(item.url));
-  }, [activeVersion, availableReferenceUrls, versions]);
-
-  const [textPrompt, setTextPrompt] = useState('');
-  const [textNegativePrompt, setTextNegativePrompt] = useState('');
-  const [textAspectRatio, setTextAspectRatio] = useState('2:3');
-  const [textResolution, setTextResolution] = useState('1K');
-  const [textGenerating, setTextGenerating] = useState(false);
-
-  const [imgPrompt, setImgPrompt] = useState('');
-  const [imgNegativePrompt, setImgNegativePrompt] = useState('');
-  const [imgAspectRatio, setImgAspectRatio] = useState('2:3');
-  const [imgResolution, setImgResolution] = useState('1K');
-  const [selectedReferenceUrls, setSelectedReferenceUrls] = useState<string[]>([]);
-  const [imgGenerating, setImgGenerating] = useState(false);
-
-  const [uploadFiles, setUploadFiles] = useState<PendingImageFile[]>([]);
-  const [img2imgFiles, setImg2imgFiles] = useState<PendingImageFile[]>([]);
-  const [uploadingReferenceImages, setUploadingReferenceImages] = useState(false);
-  const [uploadingThreeView, setUploadingThreeView] = useState(false);
-  const [deletingThreeView, setDeletingThreeView] = useState(false);
-  const [deletingReferenceIndex, setDeletingReferenceIndex] = useState<number | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const uploadFilesRef = useRef<PendingImageFile[]>([]);
-  const img2imgFilesRef = useRef<PendingImageFile[]>([]);
-
-  const resetPreviewFiles = useCallback((files: PendingImageFile[]) => {
-    files.forEach((item) => URL.revokeObjectURL(item.preview));
-  }, []);
-
-  useEffect(() => {
-    uploadFilesRef.current = uploadFiles;
-  }, [uploadFiles]);
-
-  useEffect(() => {
-    img2imgFilesRef.current = img2imgFiles;
-  }, [img2imgFiles]);
-
-  useEffect(() => {
-    return () => {
-      resetPreviewFiles(uploadFilesRef.current);
-      resetPreviewFiles(img2imgFilesRef.current);
-    };
-  }, [resetPreviewFiles]);
-
-  useEffect(() => {
-    setSelectedReferenceUrls((prev) => {
-      if (prev.length === 0) {
-        return availableReferenceUrls.slice(0, 5);
-      }
-      return prev.filter((url) => availableReferenceUrls.includes(url));
-    });
-  }, [availableReferenceUrls]);
-
-  const waitForTask = useCallback(async (taskId: number) => {
-    let attempts = 0;
-    while (attempts < 60) {
-      const task = await tasksApi.get(taskId);
-      if (task.status === 'success') return;
-      if (task.status === 'failed') throw new Error(task.error_message || '生成失败');
-      attempts += 1;
-      await new Promise((resolve) => setTimeout(resolve, 5000));
-    }
-    throw new Error('生成时间较长，请稍后刷新查看');
-  }, []);
-
-  const addPendingFiles = useCallback((files: FileList | null, target: 'upload' | 'img2img') => {
-    if (!files || files.length === 0) return;
-
-    const validTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-    const nextFiles: PendingImageFile[] = [];
-
-    Array.from(files).forEach((file) => {
-      if (!validTypes.includes(file.type)) {
-        toast.error(`${file.name} 不是支持的图片格式`);
-        return;
-      }
-      if (file.size > 10 * 1024 * 1024) {
-        toast.error(`${file.name} 超过 10MB 限制`);
-        return;
-      }
-      nextFiles.push({
-        id: `${Date.now()}-${Math.random()}`,
-        file,
-        preview: URL.createObjectURL(file),
-      });
-    });
-
-    if (nextFiles.length === 0) return;
-
-    if (target === 'upload') {
-      setUploadFiles((prev) => [...prev, ...nextFiles].slice(0, 10));
-    } else {
-      setImg2imgFiles((prev) => [...prev, ...nextFiles].slice(0, 5));
-    }
-  }, []);
-
-  const removePendingFile = useCallback((id: string, target: 'upload' | 'img2img') => {
-    const setter = target === 'upload' ? setUploadFiles : setImg2imgFiles;
-    setter((prev) => {
-      const removed = prev.find((item) => item.id === id);
-      if (removed) URL.revokeObjectURL(removed.preview);
-      return prev.filter((item) => item.id !== id);
-    });
-  }, []);
-
-  const uploadReferenceFiles = useCallback(async (files: PendingImageFile[]) => {
-    if (!activeVersion) throw new Error('请先选择角色版本');
-
-    let latestVersion = activeVersion;
-    for (const item of files) {
-      latestVersion = await charactersApi.uploadReferenceImage(projectId, characterId, activeVersion.id, item.file);
-    }
-
-    return (latestVersion.reference_image_urls || []).filter((url) => !(activeVersion.reference_image_urls || []).includes(url));
-  }, [activeVersion, characterId, projectId]);
-
-  const handleUploadReferenceImages = useCallback(async () => {
-    if (!activeVersion || uploadFiles.length === 0) return;
-
-    setUploadingReferenceImages(true);
-    try {
-      await uploadReferenceFiles(uploadFiles);
-      toast.success('角色参考图上传成功');
-      resetPreviewFiles(uploadFiles);
-      setUploadFiles([]);
-      await Promise.resolve(onRefresh());
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '上传失败');
-    } finally {
-      setUploadingReferenceImages(false);
-    }
-  }, [activeVersion, onRefresh, resetPreviewFiles, uploadFiles, uploadReferenceFiles]);
-
-  const handleUploadThreeView = useCallback(async (files: FileList | null) => {
-    if (!activeVersion) {
-      toast.error('请先选择角色版本');
-      return;
-    }
-    const file = files?.[0];
-    if (!file) return;
-
-    setUploadingThreeView(true);
-    try {
-      await charactersApi.uploadThreeViewImage(projectId, characterId, activeVersion.id, file);
-      toast.success('三视图上传成功');
-      await Promise.resolve(onRefresh());
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '上传失败');
-    } finally {
-      setUploadingThreeView(false);
-    }
-  }, [activeVersion, characterId, onRefresh, projectId]);
-
-  const handleDeleteThreeView = useCallback(async () => {
-    if (!activeVersion?.three_view_url) return;
-
-    setDeletingThreeView(true);
-    try {
-      await charactersApi.deleteThreeViewImage(projectId, characterId, activeVersion.id);
-      setSelectedReferenceUrls((prev) => prev.filter((url) => url !== activeVersion.three_view_url));
-      toast.success('三视图已删除');
-      await Promise.resolve(onRefresh());
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '删除失败');
-    } finally {
-      setDeletingThreeView(false);
-    }
-  }, [activeVersion, characterId, onRefresh, projectId]);
-
-  const handleDeleteReferenceImage = useCallback(async (index: number) => {
-    if (!activeVersion) return;
-
-    setDeletingReferenceIndex(index);
-    try {
-      const targetUrl = activeVersion.reference_image_urls?.[index];
-      await charactersApi.deleteReferenceImage(projectId, characterId, activeVersion.id, index);
-      if (targetUrl) {
-        setSelectedReferenceUrls((prev) => prev.filter((url) => url !== targetUrl));
-      }
-      toast.success('角色参考图已删除');
-      await Promise.resolve(onRefresh());
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '删除失败');
-    } finally {
-      setDeletingReferenceIndex(null);
-    }
-  }, [activeVersion, characterId, onRefresh, projectId]);
-
-  const handleAddReusableImage = useCallback(async (url: string) => {
-    if (!activeVersion) return;
-
-    try {
-      await charactersApi.updateVersion(projectId, characterId, activeVersion.id, {
-        reference_image_urls: Array.from(new Set([...(activeVersion.reference_image_urls || []), url])),
-      });
-      toast.success('已加入当前版本图库');
-      await Promise.resolve(onRefresh());
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '加入图库失败');
-    }
-  }, [activeVersion, characterId, onRefresh, projectId]);
-
-  const toggleReferenceSelection = useCallback((url: string) => {
-    setSelectedReferenceUrls((prev) => {
-      if (prev.includes(url)) {
-        return prev.filter((item) => item !== url);
-      }
-      if (prev.length >= 5) {
-        toast.error('图生图最多使用 5 张参考图');
-        return prev;
-      }
-      return [...prev, url];
-    });
-  }, []);
-
-  const handleGenerateFromPrompt = useCallback(async () => {
-    if (!activeVersion || !textPrompt.trim()) {
-      toast.error('请先输入提示词');
-      return;
-    }
-
-    setTextGenerating(true);
-    try {
-      const task = await tasksApi.triggerImage({
-        project_id: projectId,
-        character_id: characterId,
-        character_version_id: activeVersion.id,
-        prompt: textPrompt.trim(),
-        negative_prompt: textNegativePrompt.trim() || undefined,
-        aspect_ratio: textAspectRatio,
-        resolution: textResolution,
-        save_to_shot: true,
-      });
-      toast.success('角色图生成任务已提交');
-      await waitForTask(task.id);
-      await Promise.resolve(onRefresh());
-      toast.success('角色图生成完成');
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '生成失败');
-    } finally {
-      setTextGenerating(false);
-    }
-  }, [activeVersion, characterId, onRefresh, projectId, textAspectRatio, textNegativePrompt, textPrompt, textResolution, waitForTask]);
-
-  const handleGenerateFromImage = useCallback(async () => {
-    if (!activeVersion || !imgPrompt.trim()) {
-      toast.error('请先输入图生图提示词');
-      return;
-    }
-    if (selectedReferenceUrls.length === 0 && img2imgFiles.length === 0) {
-      toast.error('请至少选择或上传一张参考图');
-      return;
-    }
-
-    setImgGenerating(true);
-    try {
-      const uploadedUrls = img2imgFiles.length > 0 ? await uploadReferenceFiles(img2imgFiles) : [];
-      const referenceUrls = Array.from(new Set([...selectedReferenceUrls, ...uploadedUrls])).slice(0, 5);
-      const task = await tasksApi.triggerImage({
-        project_id: projectId,
-        character_id: characterId,
-        character_version_id: activeVersion.id,
-        prompt: imgPrompt.trim(),
-        negative_prompt: imgNegativePrompt.trim() || undefined,
-        aspect_ratio: imgAspectRatio,
-        resolution: imgResolution,
-        reference_image_urls: referenceUrls,
-        save_to_shot: true,
-      });
-      toast.success('图生图任务已提交');
-      await waitForTask(task.id);
-      resetPreviewFiles(img2imgFiles);
-      setImg2imgFiles([]);
-      await Promise.resolve(onRefresh());
-      toast.success('图生图生成完成');
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '图生图失败');
-    } finally {
-      setImgGenerating(false);
-    }
-  }, [activeVersion, characterId, img2imgFiles, imgAspectRatio, imgNegativePrompt, imgPrompt, imgResolution, onRefresh, projectId, resetPreviewFiles, selectedReferenceUrls, uploadReferenceFiles, waitForTask]);
-
-  if (!activeVersion) {
-    return (
-      <div className="rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">
-        请先创建并选择一个角色版本。
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-6">
-      <Card>
-        <CardContent className="flex flex-col gap-3 p-4 md:flex-row md:items-center md:justify-between">
-          <div>
-            <div className="font-medium text-foreground">当前出图目标</div>
-            <div className="text-sm text-muted-foreground">
-              选择角色版本后，上传、生成、图库展示和落库都会自动切换到对应目标。
-            </div>
-          </div>
-          <div className="w-full md:w-72">
-            <Select value={String(activeVersion.id)} onValueChange={(value) => onSelectVersionId(Number(value))}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {versions.map((version) => (
-                  <SelectItem key={version.id} value={String(version.id)}>
-                    {version.label} ({version.version_code})
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </CardContent>
-      </Card>
-
-      <div className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
-        <Card>
-          <CardHeader>
-            <CardTitle>{activeVersion.label} 生成与上传</CardTitle>
-            <CardDescription>
-              当前上传、文生图和图生图结果会同步保存到该版本。
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <Tabs defaultValue="prompt" className="space-y-4">
-              <TabsList className="grid w-full grid-cols-2">
-                <TabsTrigger value="prompt">提示词生图</TabsTrigger>
-                <TabsTrigger value="img2img">图生图</TabsTrigger>
-              </TabsList>
-
-              <TabsContent value="prompt" className="space-y-4">
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">正向提示词</label>
-                  <Textarea
-                    value={textPrompt}
-                    onChange={(event) => setTextPrompt(event.target.value)}
-                    rows={5}
-                    placeholder={`描述你想要的角色形象，例如：${characterName}，古风少年，黑发飘逸，眼神坚毅，身着白色长袍...`}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">负面提示词</label>
-                  <Input
-                    value={textNegativePrompt}
-                    onChange={(event) => setTextNegativePrompt(event.target.value)}
-                    placeholder="例如：blurry, low quality, watermark, bad anatomy"
-                  />
-                </div>
-                <div className="grid gap-4 md:grid-cols-2">
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">画幅比例</label>
-                    <Select value={textAspectRatio} onValueChange={setTextAspectRatio}>
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {ASPECT_RATIOS.map((item) => (
-                          <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">分辨率</label>
-                    <Select value={textResolution} onValueChange={setTextResolution}>
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {RESOLUTIONS.map((item) => (
-                          <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </div>
-                <div className="flex justify-end">
-                  <Button onClick={handleGenerateFromPrompt} disabled={textGenerating || !textPrompt.trim()}>
-                    {textGenerating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wand2 className="mr-2 h-4 w-4" />}
-                    生成角色图
-                  </Button>
-                </div>
-              </TabsContent>
-
-              <TabsContent value="img2img" className="space-y-4">
-                {selectedReferenceUrls.length > 0 ? (
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <div className="text-sm font-medium">选择已有参考图</div>
-                        <div className="text-xs text-muted-foreground">可多选，最多 5 张</div>
-                      </div>
-                      <Badge variant="secondary">{selectedReferenceUrls.length}/5</Badge>
-                    </div>
-                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                      {selectedReferenceUrls.map((url) => (
-                        <button
-                          key={url}
-                          type="button"
-                          onClick={() => toggleReferenceSelection(url)}
-                          className="overflow-hidden rounded-xl border border-primary ring-2 ring-primary/20 text-left transition"
-                        >
-                          <img src={url} alt="" className="aspect-[2/3] w-full object-cover" />
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">图生图提示词</label>
-                  <Textarea
-                    value={imgPrompt}
-                    onChange={(event) => setImgPrompt(event.target.value)}
-                    rows={4}
-                    placeholder="在已有角色基础上继续细化，例如：保留面部特征和服装风格，调整为夜间场景，加入月光效果..."
-                  />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">负面提示词</label>
-                  <Input
-                    value={imgNegativePrompt}
-                    onChange={(event) => setImgNegativePrompt(event.target.value)}
-                    placeholder="例如：deformed, extra limbs, watermark"
-                  />
-                </div>
-                <div className="grid gap-4 md:grid-cols-2">
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">画幅比例</label>
-                    <Select value={imgAspectRatio} onValueChange={setImgAspectRatio}>
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {ASPECT_RATIOS.map((item) => (
-                          <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">分辨率</label>
-                    <Select value={imgResolution} onValueChange={setImgResolution}>
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {RESOLUTIONS.map((item) => (
-                          <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </div>
-
-                <Separator />
-
-                <div className="space-y-3">
-                  <div>
-                    <div className="text-sm font-medium">补充新的图生图参考图</div>
-                    <div className="text-xs text-muted-foreground">上传后会自动保存到当前角色版本图库。</div>
-                  </div>
-                  <FileDropZone
-                    onSelect={(files) => addPendingFiles(files, 'img2img')}
-                    disabled={imgGenerating}
-                    title="添加参考图"
-                    description="可补充新的底图或动作角度参考"
-                  />
-                  {img2imgFiles.length > 0 ? (
-                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                      {img2imgFiles.map((item) => (
-                        <div key={item.id} className="rounded-xl border bg-secondary/20 p-2">
-                          <div className="relative overflow-hidden rounded-lg">
-                            <img src={item.preview} alt={item.file.name} className="aspect-[2/3] w-full object-cover" />
-                            <Button
-                              variant="secondary"
-                              size="icon"
-                              className="absolute right-2 top-2 h-7 w-7"
-                              onClick={() => removePendingFile(item.id, 'img2img')}
-                            >
-                              <X className="h-4 w-4" />
-                            </Button>
-                          </div>
-                          <div className="mt-2 truncate text-xs text-muted-foreground">{item.file.name}</div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-                <div className="flex justify-end">
-                  <Button onClick={handleGenerateFromImage} disabled={imgGenerating || !imgPrompt.trim()}>
-                    {imgGenerating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}
-                    根据参考图生成
-                  </Button>
-                </div>
-              </TabsContent>
-            </Tabs>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>{activeVersion.label} 版本图库</CardTitle>
-            <CardDescription>
-              右侧展示当前版本的三视图与角色素材图，也可以复用其他版本的图片加入当前版本图库。
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-sm font-medium">当前版本三视图</div>
-                  <div className="text-xs text-muted-foreground">三视图会作为角色形象锚点，也可直接参与图生图参考。</div>
-                </div>
-                {activeVersion.three_view_url ? (
-                  <Button variant="ghost" size="sm" onClick={handleDeleteThreeView} disabled={deletingThreeView}>
-                    {deletingThreeView ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Trash2 className="mr-2 h-4 w-4" />}
-                    删除三视图
-                  </Button>
-                ) : null}
-              </div>
-
-              {activeVersion.three_view_url ? (
-                <div className="overflow-hidden rounded-xl border bg-card">
-                  <img src={activeVersion.three_view_url} alt="三视图" className="aspect-[2/3] w-full object-cover" />
-                  <div className="flex items-center justify-between gap-2 p-3">
-                    <div className="text-xs text-muted-foreground">三视图</div>
-                    <div className="flex items-center gap-2">
-                      <Button
-                        variant={selectedReferenceUrls.includes(activeVersion.three_view_url) ? 'default' : 'outline'}
-                        size="sm"
-                        onClick={() => toggleReferenceSelection(activeVersion.three_view_url!)}
-                      >
-                        {selectedReferenceUrls.includes(activeVersion.three_view_url) ? '已选中' : '设为参考图'}
-                      </Button>
-                      <Button variant="outline" size="sm" onClick={() => setPreviewUrl(activeVersion.three_view_url)}>
-                        <Eye className="mr-1 h-3 w-3" />
-                        预览
-                      </Button>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <FileDropZone
-                  onSelect={handleUploadThreeView}
-                  disabled={uploadingThreeView}
-                  title="上传三视图"
-                  description="支持点击选择和拖拽上传，用于固定当前版本角色形象"
-                />
-              )}
-            </div>
-
-            <div className="space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-sm font-medium">上传到当前版本图库</div>
-                  <div className="text-xs text-muted-foreground">点击或拖拽上传角色参考图，保存后会归档到当前版本。</div>
-                </div>
-                {uploadFiles.length > 0 ? (
-                  <Button onClick={handleUploadReferenceImages} disabled={uploadingReferenceImages}>
-                    {uploadingReferenceImages ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ImagePlus className="mr-2 h-4 w-4" />}
-                    保存到当前版本
-                  </Button>
-                ) : null}
-              </div>
-
-              <FileDropZone
-                onSelect={(files) => addPendingFiles(files, 'upload')}
-                disabled={uploadingReferenceImages}
-                title="上传角色参考图"
-                description="支持点击选择和拖拽上传，JPG / PNG / WebP / GIF，单张不超过 10MB"
-              />
-
-              {uploadFiles.length > 0 ? (
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {uploadFiles.map((item) => (
-                    <div key={item.id} className="rounded-xl border bg-secondary/20 p-2">
-                      <div className="relative overflow-hidden rounded-lg">
-                        <img src={item.preview} alt={item.file.name} className="aspect-[2/3] w-full object-cover" />
-                        <Button
-                          variant="secondary"
-                          size="icon"
-                          className="absolute right-2 top-2 h-7 w-7"
-                          onClick={() => removePendingFile(item.id, 'upload')}
-                        >
-                          <X className="h-4 w-4" />
-                        </Button>
-                      </div>
-                      <div className="mt-2 truncate text-xs text-muted-foreground">{item.file.name}</div>
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-
-            {activeVersion.reference_image_urls?.length === 0 ? (
-              <div className="rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">
-                还没有角色参考图。你可以先输入提示词生成一张，或者上传本地图片。
-              </div>
-            ) : (
-              <div className="grid gap-4 sm:grid-cols-2">
-                {activeVersion.reference_image_urls?.map((url, index) => (
-                  <div key={`${url}-${index}`} className="overflow-hidden rounded-xl border bg-card">
-                    <img src={url} alt={`角色参考图 ${index + 1}`} className="aspect-[2/3] w-full object-cover" />
-                    <div className="flex items-center justify-between gap-2 p-3">
-                      <div className="text-xs text-muted-foreground">参考图 #{index + 1}</div>
-                      <div className="flex items-center gap-2">
-                        <Button
-                          variant={selectedReferenceUrls.includes(url) ? 'default' : 'outline'}
-                          size="sm"
-                          onClick={() => toggleReferenceSelection(url)}
-                        >
-                          {selectedReferenceUrls.includes(url) ? '已选中' : '设为参考图'}
-                        </Button>
-                        <Button variant="outline" size="sm" onClick={() => setPreviewUrl(url)}>
-                          <Eye className="mr-1 h-3 w-3" />
-                          预览
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => handleDeleteReferenceImage(index)}
-                          disabled={deletingReferenceIndex === index}
-                        >
-                          {deletingReferenceIndex === index ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                          ) : (
-                            <Trash2 className="h-4 w-4 text-muted-foreground hover:text-destructive" />
-                          )}
-                        </Button>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {reusableVersionImages.length > 0 ? (
-              <div className="space-y-3">
-                <div>
-                  <div className="text-sm font-medium">其他版本可复用角色图</div>
-                  <div className="text-xs text-muted-foreground">可直接加入当前版本图库，复用同一角色的其他版本素材。</div>
-                </div>
-                <div className="grid gap-4 sm:grid-cols-2">
-                  {reusableVersionImages.map((item) => (
-                    <div key={item.key} className="overflow-hidden rounded-xl border bg-card">
-                      <img src={item.url} alt={item.versionLabel} className="aspect-[2/3] w-full object-cover" />
-                      <div className="flex items-center justify-between gap-2 p-3">
-                        <div>
-                          <div className="text-xs text-muted-foreground">{item.versionLabel}</div>
-                          <div className="text-xs text-muted-foreground">{item.imageLabel}</div>
-                        </div>
-                        <Button size="sm" variant="outline" onClick={() => handleAddReusableImage(item.url)}>
-                          加入当前图库
-                        </Button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-          </CardContent>
-        </Card>
-      </div>
-
-      <FullscreenPreview url={previewUrl} open={!!previewUrl} onOpenChange={() => setPreviewUrl(null)} />
-    </div>
-  );
-}
 
 // 参考图网格（支持删除）
 function ReferenceImageGrid({
@@ -1786,12 +781,16 @@ function VersionCard({
   version,
   onDelete,
   onOpenStudio,
+  onOpenDetail,
+  onEdit,
 }: {
   version: CharacterVersionResponse;
   onDelete: () => void;
   onOpenStudio: (versionId: number) => void;
+  onOpenDetail: (versionId: number) => void;
+  onEdit: () => void;
 }) {
-  const previewImages = [version.three_view_url, ...(version.reference_image_urls || [])].filter(Boolean) as string[];
+  const previewImages = normalizeImageUrls([version.three_view_url, ...(version.reference_image_urls || [])]);
   const previewCount = previewImages.length;
 
   return (
@@ -1831,7 +830,7 @@ function VersionCard({
           <div className="grid gap-3 sm:grid-cols-2">
             {previewImages.slice(0, 4).map((url, index) => (
               <div key={`${url}-${index}`} className="overflow-hidden rounded-xl border bg-card">
-                <img src={url} alt="" className="aspect-[2/3] w-full object-cover" />
+                <SafeImage src={url} alt="" className="aspect-[2/3] w-full object-cover" />
               </div>
             ))}
           </div>
@@ -1855,6 +854,27 @@ function VersionCard({
           </Button>
           <Button
             size="sm"
+            variant="outline"
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpenDetail(version.id);
+            }}
+          >
+            <ArrowRight className="h-4 w-4 mr-1" />
+            详情
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={(event) => {
+              event.stopPropagation();
+              onEdit();
+            }}
+          >
+            编辑版本
+          </Button>
+          <Button
+            size="sm"
             variant="ghost"
             onClick={(event) => {
               event.stopPropagation();
@@ -1870,26 +890,46 @@ function VersionCard({
   );
 }
 
-// 创建版本对话框
-function CreateVersionDialog({ open, onOpenChange, onCreate, creating }: { open: boolean; onOpenChange: (open: boolean) => void; onCreate: (data: { version_code: string; label: string }) => void; creating: boolean }) {
+// 版本对话框
+function VersionDialog({
+  open,
+  onOpenChange,
+  onSubmit,
+  submitting,
+  initialVersion,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSubmit: (data: { version_code: string; label: string }) => void;
+  submitting: boolean;
+  initialVersion?: CharacterVersionResponse | null;
+}) {
   const [versionCode, setVersionCode] = useState('');
   const [label, setLabel] = useState('');
 
   useEffect(() => {
-    if (!open) { setVersionCode(''); setLabel(''); }
-  }, [open]);
+    if (!open) {
+      setVersionCode('');
+      setLabel('');
+      return;
+    }
+    setVersionCode(initialVersion?.version_code || '');
+    setLabel(initialVersion?.label || '');
+  }, [initialVersion?.label, initialVersion?.version_code, open]);
 
-  const handleCreate = () => {
+  const handleSubmit = () => {
     if (!versionCode.trim() || !label.trim()) return;
-    onCreate({ version_code: versionCode.trim(), label: label.trim() });
+    onSubmit({ version_code: versionCode.trim(), label: label.trim() });
   };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>创建角色版本</DialogTitle>
-          <DialogDescription>为角色创建一个新的版本，用于管理不同阶段的形象</DialogDescription>
+          <DialogTitle>{initialVersion ? '编辑角色版本' : '创建角色版本'}</DialogTitle>
+          <DialogDescription>
+            {initialVersion ? '更新当前角色版本的基础信息。' : '为角色创建一个新的版本，用于管理不同阶段的形象。'}
+          </DialogDescription>
         </DialogHeader>
         <div className="space-y-4 py-4">
           <div className="space-y-2">
@@ -1903,8 +943,9 @@ function CreateVersionDialog({ open, onOpenChange, onCreate, creating }: { open:
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={handleCreate} disabled={!versionCode.trim() || !label.trim() || creating}>
-            {creating && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}创建
+          <Button onClick={handleSubmit} disabled={!versionCode.trim() || !label.trim() || submitting}>
+            {submitting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+            {initialVersion ? '保存版本' : '创建'}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1912,9 +953,657 @@ function CreateVersionDialog({ open, onOpenChange, onCreate, creating }: { open:
   );
 }
 
+// 三视图系统提示词
+const THREE_VIEW_SYSTEM_PROMPT = `Character reference sheet, three-view turnaround design.
+Front view, side view, and back view of the same character on a single image.
+Clean white background, professional character design sheet.
+Consistent character design across all three views.
+Same outfit, same facial features, same proportions.
+Standard turnaround pose: facing front, facing right, facing back.
+High quality, detailed character design, anime/manga style.
+Clean lines, clear silhouette, character reference for animation.`;
+
+// 角色出图工作区 - 参照场景页面的布局
+function CharacterStudioWorkspace({
+  projectId,
+  charDetail,
+  selectedVersionId,
+  onRefresh,
+  onVersionChange,
+}: {
+  projectId: number;
+  charDetail: CharacterDetailResponse;
+  selectedVersionId: number;
+  onRefresh: () => void;
+  onVersionChange: (versionId: number) => void;
+}) {
+  const version = charDetail.versions.find((item) => item.id === selectedVersionId);
+  const versionImageItems = useMemo(() => {
+    if (!version) {
+      return [] as Array<{
+        key: string;
+        kind: 'three_view' | 'reference';
+        url: string;
+        label: string;
+        referenceIndex?: number;
+      }>;
+    }
+
+    const items: Array<{
+      key: string;
+      kind: 'three_view' | 'reference';
+      url: string;
+      label: string;
+      referenceIndex?: number;
+    }> = [];
+
+    const threeViewUrl = normalizeImageUrl(version.three_view_url);
+    if (threeViewUrl) {
+      items.push({
+        key: `three-view-${threeViewUrl}`,
+        kind: 'three_view',
+        url: threeViewUrl,
+        label: '三视图',
+      });
+    }
+
+    (version.reference_image_urls || []).forEach((rawUrl, index) => {
+      const normalizedUrl = normalizeImageUrl(rawUrl);
+      if (!normalizedUrl) return;
+      items.push({
+        key: `reference-${index}-${normalizedUrl}`,
+        kind: 'reference',
+        url: normalizedUrl,
+        label: `版本素材 #${index + 1}`,
+        referenceIndex: index,
+      });
+    });
+
+    return items;
+  }, [version]);
+
+  const [prompt, setPrompt] = useState('');
+  const [negativePrompt, setNegativePrompt] = useState('');
+  const [aspectRatio, setAspectRatio] = useState('2:3');
+  const [resolution, setResolution] = useState('1K');
+  const [threeViewGenerating, setThreeViewGenerating] = useState(false);
+  const [charImageGenerating, setCharImageGenerating] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [deletingImageKey, setDeletingImageKey] = useState<string | null>(null);
+  const [showAssetPicker, setShowAssetPicker] = useState(false);
+  const [assetList, setAssetList] = useState<AssetResponse[]>([]);
+  const [loadingAssets, setLoadingAssets] = useState(false);
+  const [assetPage, setAssetPage] = useState(1);
+  const [assetTotal, setAssetTotal] = useState(0);
+  const [referencingAssetId, setReferencingAssetId] = useState<number | null>(null);
+  const [selectedRefUrls, setSelectedRefUrls] = useState<string[]>([]);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const assetPageSize = 12;
+  const totalPages = Math.max(1, Math.ceil(assetTotal / assetPageSize));
+  const galleryUrlSet = useMemo(() => new Set(versionImageItems.map((item) => item.url)), [versionImageItems]);
+
+  useEffect(() => {
+    setSelectedRefUrls((prev) => prev.filter((url) => galleryUrlSet.has(url)));
+  }, [galleryUrlSet]);
+
+  const toggleRefImage = useCallback((url: string) => {
+    setSelectedRefUrls((prev) => {
+      if (prev.includes(url)) {
+        return prev.filter((item) => item !== url);
+      }
+      if (prev.length >= 5) {
+        toast.error('最多选择 5 张参考图');
+        return prev;
+      }
+      return [...prev, url];
+    });
+  }, []);
+
+  const pollTask = useCallback((taskId: number, onComplete: () => void) => {
+    let attempts = 0;
+    const poll = async () => {
+      try {
+        const task = await tasksApi.get(taskId);
+        if (task.status === 'success') {
+          toast.success('生成完成');
+          onComplete();
+          return;
+        }
+        if (task.status === 'failed') {
+          toast.error(task.error_message || '生成失败');
+          onComplete();
+          return;
+        }
+        if (++attempts < 60) {
+          setTimeout(poll, 5000);
+        } else {
+          toast.warning('生成时间较长，请稍后刷新查看');
+          onComplete();
+        }
+      } catch {
+        if (++attempts < 60) {
+          setTimeout(poll, 5000);
+        } else {
+          onComplete();
+        }
+      }
+    };
+    poll();
+  }, []);
+
+  const handleGenerateThreeView = useCallback(async () => {
+    if (!version || !prompt.trim()) {
+      toast.error('请输入角色外观描述');
+      return;
+    }
+    setThreeViewGenerating(true);
+    try {
+      const fullPrompt = `${THREE_VIEW_SYSTEM_PROMPT}\n\nCharacter description: ${prompt.trim()}`;
+      const result = await tasksApi.triggerImage({
+        project_id: projectId,
+        character_id: charDetail.id,
+        character_version_id: version.id,
+        prompt: fullPrompt,
+        aspect_ratio: '2:3',
+        resolution: '1K',
+        character_image_kind: 'three_view',
+        reference_image_urls: selectedRefUrls.length > 0 ? selectedRefUrls : undefined,
+        save_to_shot: true,
+      });
+      toast.success('三视图生成任务已提交');
+      pollTask(result.id, () => {
+        setThreeViewGenerating(false);
+        onRefresh();
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '生成失败');
+      setThreeViewGenerating(false);
+    }
+  }, [charDetail.id, onRefresh, pollTask, projectId, prompt, selectedRefUrls, version]);
+
+  const handleGenerateCharacterImage = useCallback(async () => {
+    if (!version || !prompt.trim()) {
+      toast.error('请输入角色状态描述');
+      return;
+    }
+    setCharImageGenerating(true);
+    try {
+      const result = await tasksApi.triggerImage({
+        project_id: projectId,
+        character_id: charDetail.id,
+        character_version_id: version.id,
+        prompt: prompt.trim(),
+        negative_prompt: negativePrompt.trim() || undefined,
+        aspect_ratio: aspectRatio,
+        resolution,
+        reference_image_urls: selectedRefUrls.length > 0 ? selectedRefUrls : undefined,
+        save_to_shot: true,
+      });
+      toast.success('角色图生成任务已提交');
+      pollTask(result.id, () => {
+        setCharImageGenerating(false);
+        onRefresh();
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '生成失败');
+      setCharImageGenerating(false);
+    }
+  }, [aspectRatio, charDetail.id, negativePrompt, onRefresh, pollTask, projectId, prompt, resolution, selectedRefUrls, version]);
+
+  const handleUploadSelection = useCallback(async (files: FileList | null) => {
+    if (!version || !files || files.length === 0) return;
+    setUploading(true);
+    try {
+      for (const file of Array.from(files)) {
+        await charactersApi.uploadReferenceImage(projectId, charDetail.id, version.id, file);
+      }
+      toast.success('图片已加入当前版本图库');
+      await onRefresh();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '上传失败');
+    } finally {
+      setUploading(false);
+    }
+  }, [charDetail.id, onRefresh, projectId, version]);
+
+  const loadAssets = useCallback(async (page: number) => {
+    setLoadingAssets(true);
+    try {
+      const result = await assetsApi.list(projectId, page, assetPageSize, {
+        assetType: 'image',
+        isCurrent: true,
+      });
+      setAssetList(result.items.filter((asset) => Boolean(asset.file_url)));
+      setAssetTotal(result.total);
+    } catch {
+      setAssetList([]);
+      setAssetTotal(0);
+      toast.error('加载素材库失败');
+    } finally {
+      setLoadingAssets(false);
+    }
+  }, [projectId]);
+
+  const handleReferenceAsset = useCallback(async (asset: AssetResponse) => {
+    if (!version) return;
+    if (galleryUrlSet.has(asset.file_url)) {
+      toast.info('该图片已经在当前版本图库中');
+      return;
+    }
+    setReferencingAssetId(asset.id);
+    try {
+      await charactersApi.addReferenceImageFromUrl(projectId, charDetail.id, version.id, asset.file_url);
+      toast.success('已加入当前版本图库');
+      await onRefresh();
+      setShowAssetPicker(false);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '加入失败');
+    } finally {
+      setReferencingAssetId(null);
+    }
+  }, [charDetail.id, galleryUrlSet, onRefresh, projectId, version]);
+
+  const handleDeleteImage = useCallback(async (item: { key: string; kind: 'three_view' | 'reference'; url: string; referenceIndex?: number }) => {
+    if (!version) return;
+    setDeletingImageKey(item.key);
+    try {
+      if (item.kind === 'three_view') {
+        await charactersApi.deleteThreeViewImage(projectId, charDetail.id, version.id);
+      } else if (item.referenceIndex !== undefined) {
+        await charactersApi.deleteReferenceImage(projectId, charDetail.id, version.id, item.referenceIndex);
+      }
+      setSelectedRefUrls((prev) => prev.filter((url) => url !== item.url));
+      toast.success('已从当前版本图库移除');
+      await onRefresh();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '删除失败');
+    } finally {
+      setDeletingImageKey(null);
+    }
+  }, [charDetail.id, onRefresh, projectId, version]);
+
+  useEffect(() => {
+    if (!showAssetPicker) {
+      setAssetList([]);
+      setAssetPage(1);
+      setAssetTotal(0);
+      setReferencingAssetId(null);
+      return;
+    }
+    loadAssets(assetPage).catch(() => undefined);
+  }, [assetPage, loadAssets, showAssetPicker]);
+
+  if (!version) return null;
+
+  return (
+    <div className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Wand2 className="h-5 w-5" />
+            角色图生成
+          </CardTitle>
+          <CardDescription>
+            当前版本：{version.label || version.version_code}。支持直接文生图，也支持先在右侧选中参考图后切换为图生图。
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <label className="text-sm font-medium">角色描述</label>
+            <Textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              rows={5}
+              placeholder={`描述角色外观或状态，例如：\n${charDetail.name}，古风少年，黑发飘逸，眼神坚毅，身着白色长袍。\n\n也可以描述动态状态：\n${charDetail.name}释放技能，周身环绕雷电，双手结印。`}
+            />
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-sm font-medium">负面提示词</label>
+            <Input
+              value={negativePrompt}
+              onChange={(e) => setNegativePrompt(e.target.value)}
+              placeholder="例如：blurry, low quality, watermark, bad anatomy"
+            />
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">画幅比例</label>
+              <Select value={aspectRatio} onValueChange={setAspectRatio}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {ASPECT_RATIOS.map((item) => (
+                    <SelectItem key={item.value} value={item.value}>
+                      {item.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">分辨率</label>
+              <Select value={resolution} onValueChange={setResolution}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {RESOLUTIONS.map((item) => (
+                    <SelectItem key={item.value} value={item.value}>
+                      {item.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          {selectedRefUrls.length > 0 ? (
+            <div className="space-y-3 rounded-xl border border-primary/20 bg-primary/5 p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-sm font-medium">已选中参考图</div>
+                  <div className="text-xs text-muted-foreground">当前会按图生图模式生成，可在下方取消选择。</div>
+                </div>
+                <Badge variant="secondary">{selectedRefUrls.length}/5</Badge>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {selectedRefUrls.map((url) => (
+                  <div key={url} className="overflow-hidden rounded-xl border border-primary ring-2 ring-primary/20">
+                    <button
+                      type="button"
+                      onClick={() => setPreviewUrl(url)}
+                      className="group relative block w-full overflow-hidden"
+                    >
+                      <SafeImage src={url} alt="参考图预览" className="aspect-[2/3] w-full object-cover transition group-hover:scale-[1.01]" />
+                      <div className="absolute inset-x-0 bottom-0 flex items-center justify-end bg-gradient-to-t from-black/55 to-transparent p-3 opacity-0 transition group-hover:opacity-100">
+                        <span className="inline-flex items-center gap-1 rounded-full bg-white/90 px-2 py-1 text-xs font-medium text-foreground">
+                          <Eye className="h-3 w-3" />
+                          预览
+                        </span>
+                      </div>
+                    </button>
+                    <div className="flex justify-end p-2">
+                      <Button variant="ghost" size="sm" onClick={() => toggleRefImage(url)}>
+                        取消选择
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
+              当前未选中参考图。你可以直接文生图，或者在右侧图库中点击“设为参考图”切换为图生图。
+            </div>
+          )}
+
+          <div className="flex gap-3 pt-2">
+            <Button
+              className="flex-1"
+              variant="outline"
+              onClick={handleGenerateThreeView}
+              disabled={threeViewGenerating || charImageGenerating || !prompt.trim()}
+            >
+              {threeViewGenerating ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Layers className="mr-2 h-4 w-4" />
+              )}
+              生成三视图
+            </Button>
+            <Button
+              className="flex-1"
+              onClick={handleGenerateCharacterImage}
+              disabled={threeViewGenerating || charImageGenerating || !prompt.trim()}
+            >
+              {charImageGenerating ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Sparkles className="mr-2 h-4 w-4" />
+              )}
+              生成角色图
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <CardTitle className="flex items-center gap-2 text-lg">
+                <FileImage className="h-5 w-5" />
+                版本图库
+              </CardTitle>
+              <CardDescription className="mt-1">
+                上传本地图片或从项目素材库选择图片，都会直接进入当前角色版本图库。
+              </CardDescription>
+            </div>
+            <div className="w-full md:w-[180px]">
+              <Select value={String(selectedVersionId)} onValueChange={(value) => onVersionChange(Number(value))}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {charDetail.versions.map((v) => (
+                    <SelectItem key={v.id} value={String(v.id)}>
+                      {v.label || v.version_code}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-medium">上传到当前版本图库</div>
+                <div className="text-xs text-muted-foreground">点击或拖拽图片到这里，上传后会立即加入右侧图库。</div>
+              </div>
+              {uploading ? (
+                <div className="inline-flex items-center gap-2 rounded-full bg-primary/10 px-3 py-1 text-xs font-medium text-primary">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  正在上传
+                </div>
+              ) : null}
+            </div>
+
+            <FileDropZone
+              onSelect={handleUploadSelection}
+              disabled={uploading}
+              title="上传角色图片"
+              description="支持 JPG、PNG、WebP、GIF，上传后立即加入当前版本"
+            />
+          </div>
+
+          <div className="rounded-xl border bg-secondary/10 p-4">
+            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <div className="space-y-1">
+                <div className="text-sm font-medium">引用素材库图片</div>
+                <div className="text-xs text-muted-foreground">在弹窗中分页浏览项目素材库图片，选择后直接加入当前版本图库。</div>
+              </div>
+              <Button variant="outline" onClick={() => setShowAssetPicker(true)}>
+                <ImagePlus className="mr-2 h-4 w-4" />
+                从素材库选择图片
+              </Button>
+            </div>
+          </div>
+
+          {versionImageItems.length === 0 ? (
+            <div className="rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">
+              当前版本还没有图片。你可以先生成三视图、上传本地图片，或者从素材库引用已有图片。
+            </div>
+          ) : (
+            <div className="grid gap-4 sm:grid-cols-2">
+              {versionImageItems.map((item, index) => {
+                const isSelected = selectedRefUrls.includes(item.url);
+                const isDeleting = deletingImageKey === item.key;
+
+                return (
+                  <div key={item.key} className="overflow-hidden rounded-xl border bg-card">
+                    <button
+                      type="button"
+                      onClick={() => setPreviewUrl(item.url)}
+                      className="group relative block w-full overflow-hidden"
+                    >
+                      <SafeImage src={item.url} alt={item.label} className="aspect-[2/3] w-full object-cover transition group-hover:scale-[1.01]" />
+                      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-24 bg-gradient-to-t from-black/55 via-black/15 to-transparent" />
+                      <div className="absolute left-3 top-3">
+                        <Badge variant="outline" className="border-white/40 bg-black/35 text-white backdrop-blur">
+                          {item.kind === 'three_view' ? '三视图' : `版本素材 #${index + 1}`}
+                        </Badge>
+                      </div>
+                      <div className="absolute inset-x-0 bottom-0 flex items-center justify-end p-3 opacity-0 transition group-hover:opacity-100">
+                        <span className="inline-flex items-center gap-1 rounded-full bg-white/90 px-2 py-1 text-xs font-medium text-foreground">
+                          <Eye className="h-3 w-3" />
+                          预览
+                        </span>
+                      </div>
+                    </button>
+
+                    <div className="flex items-center justify-between gap-2 p-3">
+                      <div className="text-xs text-muted-foreground">{item.label}</div>
+                      <div className="flex items-center gap-2">
+                        <Button variant={isSelected ? 'default' : 'outline'} size="sm" onClick={() => toggleRefImage(item.url)}>
+                          {isSelected ? '已选中' : '设为参考图'}
+                        </Button>
+                        <Button variant="ghost" size="icon" disabled={isDeleting} onClick={() => handleDeleteImage(item)}>
+                          {isDeleting ? (
+                            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                          ) : (
+                            <Trash2 className="h-4 w-4 text-muted-foreground hover:text-destructive" />
+                          )}
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Dialog open={showAssetPicker} onOpenChange={setShowAssetPicker}>
+        <DialogContent className="max-w-6xl gap-0 overflow-hidden p-0">
+          <DialogHeader className="border-b bg-gradient-to-r from-secondary/70 via-background to-background px-6 py-5 text-left">
+            <DialogTitle className="text-xl">选择素材库图片加入当前版本</DialogTitle>
+            <DialogDescription className="max-w-3xl text-sm leading-6">
+              弹窗中按页浏览项目素材库图片，选择后会直接加入当前角色版本图库。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-5 px-6 py-5">
+            <div className="flex flex-col gap-3 rounded-2xl border bg-muted/30 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="secondary" className="rounded-full px-3 py-1 text-xs font-medium">
+                  {assetTotal > 0 ? `第 ${(assetPage - 1) * assetPageSize + 1}-${Math.min(assetPage * assetPageSize, assetTotal)} 张` : '当前无可选图片'}
+                </Badge>
+                <Badge variant="outline" className="rounded-full px-3 py-1 text-xs font-medium">
+                  共 {assetTotal} 张
+                </Badge>
+              </div>
+              <div className="text-xs font-medium tracking-wide text-muted-foreground">每页 {assetPageSize} 张</div>
+            </div>
+
+            <ScrollArea className="max-h-[62vh] pr-2">
+              {loadingAssets ? (
+                <div className="flex min-h-[360px] items-center justify-center rounded-2xl border border-dashed bg-muted/20">
+                  <Loader2 className="h-8 w-8 animate-spin text-primary" />
+                </div>
+              ) : assetList.length === 0 ? (
+                <div className="rounded-2xl border border-dashed bg-muted/20 py-20 text-center text-sm text-muted-foreground">
+                  当前素材库中还没有图片
+                </div>
+              ) : (
+                <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-4">
+                  {assetList.map((asset) => {
+                    const isIncluded = galleryUrlSet.has(asset.file_url);
+                    const isSubmitting = referencingAssetId === asset.id;
+                    const assetLabel = asset.asset_code || `素材图 #${asset.id}`;
+
+                    return (
+                      <div
+                        key={asset.id}
+                        className={`group overflow-hidden rounded-2xl border bg-card shadow-sm transition-all duration-200 ${
+                          isIncluded ? 'border-border/70 bg-muted/20' : 'border-border/60 hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-lg'
+                        }`}
+                      >
+                        <div className="relative overflow-hidden bg-muted">
+                          <img src={asset.file_url} alt={assetLabel} className="aspect-[2/3] w-full object-cover transition duration-300 group-hover:scale-[1.02]" />
+                          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-black/45 via-black/10 to-transparent" />
+                          <div className="absolute left-3 top-3">
+                            <Badge
+                              variant={isIncluded ? 'secondary' : 'outline'}
+                              className={isIncluded ? 'rounded-full px-2.5 py-1 text-[11px] font-medium' : 'rounded-full border border-white/40 bg-black/35 px-2.5 py-1 text-[11px] font-medium text-white backdrop-blur'}
+                            >
+                              {isIncluded ? '已在当前图库' : '素材库图片'}
+                            </Badge>
+                          </div>
+                        </div>
+
+                        <div className="space-y-3 p-4">
+                          <div className="space-y-1">
+                            <div className="line-clamp-1 text-sm font-semibold text-foreground" title={assetLabel}>
+                              {assetLabel}
+                            </div>
+                            <div className="text-xs text-muted-foreground">素材 #{asset.id}</div>
+                          </div>
+                          <Button
+                            className="w-full"
+                            size="sm"
+                            variant={isIncluded ? 'secondary' : 'outline'}
+                            disabled={isIncluded || Boolean(referencingAssetId)}
+                            onClick={() => handleReferenceAsset(asset)}
+                          >
+                            {isSubmitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                            {isIncluded ? '已加入当前版本' : '加入当前版本'}
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </ScrollArea>
+
+            {totalPages > 1 ? (
+              <div className="border-t pt-4">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm text-muted-foreground">第 {assetPage} / {totalPages} 页</div>
+                  <div className="flex gap-2">
+                    <Button variant="outline" size="sm" disabled={assetPage <= 1 || loadingAssets} onClick={() => setAssetPage((current) => current - 1)}>
+                      上一页
+                    </Button>
+                    <Button variant="outline" size="sm" disabled={assetPage >= totalPages || loadingAssets} onClick={() => setAssetPage((current) => current + 1)}>
+                      下一页
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <FullscreenPreview
+        url={previewUrl}
+        open={!!previewUrl}
+        onOpenChange={() => setPreviewUrl(null)}
+      />
+    </div>
+  );
+}
+
 // 主页面
 export default function CharactersPage({ params }: { params: Promise<{ projectId: string }> }) {
   const { projectId } = use(params);
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const projectIdNum = Number(projectId);
 
   const [project, setProject] = useState<ProjectResponse | null>(null);
@@ -1928,10 +1617,16 @@ export default function CharactersPage({ params }: { params: Promise<{ projectId
   const [newCharCode, setNewCharCode] = useState('');
   const [newCharDesc, setNewCharDesc] = useState('');
   const [creating, setCreating] = useState(false);
-  const [isCreateVersionOpen, setIsCreateVersionOpen] = useState(false);
-  const [creatingVersion, setCreatingVersion] = useState(false);
+  const [isVersionDialogOpen, setIsVersionDialogOpen] = useState(false);
+  const [editingVersion, setEditingVersion] = useState<CharacterVersionResponse | null>(null);
+  const [savingVersion, setSavingVersion] = useState(false);
   const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<'studio' | 'versions' | 'details'>('studio');
   const [selectedVersionId, setSelectedVersionId] = useState<number | null>(null);
+  const lastAppliedRouteSelectionRef = useRef<string | null>(null);
+  const routeTargetCharId = Number(searchParams.get('charId') || '');
+  const routeTargetVersionId = Number(searchParams.get('versionId') || '');
+  const routeTargetTab = searchParams.get('tab');
+  const routeSelectionKey = `${searchParams.get('charId') || ''}|${searchParams.get('versionId') || ''}|${routeTargetTab || ''}`;
 
   // 当角色详情变化时，默认选中一个有效版本
   useEffect(() => {
@@ -1987,6 +1682,50 @@ export default function CharactersPage({ params }: { params: Promise<{ projectId
     loadCharDetail();
   }, [loadCharDetail]);
 
+  useEffect(() => {
+    if ((!searchParams.get('charId') && !searchParams.get('versionId') && !routeTargetTab) || routeSelectionKey === lastAppliedRouteSelectionRef.current) {
+      return;
+    }
+
+    if (routeTargetTab === 'studio' || routeTargetTab === 'versions' || routeTargetTab === 'details') {
+      setActiveWorkspaceTab(routeTargetTab);
+    }
+
+    if (!Number.isNaN(routeTargetCharId) && characters.some((char) => char.id === routeTargetCharId)) {
+      if (selectedCharId !== routeTargetCharId) {
+        setSelectedCharId(routeTargetCharId);
+      }
+    }
+
+    const canApplyVersion = !Number.isNaN(routeTargetVersionId)
+      && charDetail
+      && (!Number.isNaN(routeTargetCharId) ? charDetail.id === routeTargetCharId : true)
+      && charDetail.versions.some((version) => version.id === routeTargetVersionId);
+
+    if (canApplyVersion) {
+      setSelectedVersionId(routeTargetVersionId);
+      lastAppliedRouteSelectionRef.current = routeSelectionKey;
+      return;
+    }
+
+    if (searchParams.get('versionId') && !charDetail) {
+      return;
+    }
+
+    if (!searchParams.get('versionId')) {
+      lastAppliedRouteSelectionRef.current = routeSelectionKey;
+    }
+  }, [
+    charDetail,
+    characters,
+    routeSelectionKey,
+    routeTargetCharId,
+    routeTargetTab,
+    routeTargetVersionId,
+    searchParams,
+    selectedCharId,
+  ]);
+
   const handleCreateCharacter = useCallback(async () => {
     if (!newCharName.trim() || !newCharCode.trim()) return;
     setCreating(true);
@@ -2016,20 +1755,25 @@ export default function CharactersPage({ params }: { params: Promise<{ projectId
     }
   }, [projectIdNum, selectedCharId]);
 
-  const handleCreateVersion = useCallback(async (data: { version_code: string; label: string }) => {
+  const handleSaveVersion = useCallback(async (data: { version_code: string; label: string }) => {
     if (!selectedCharId) return;
-    setCreatingVersion(true);
+    setSavingVersion(true);
     try {
-      await charactersApi.createVersion(projectIdNum, selectedCharId, data);
+      if (editingVersion) {
+        await charactersApi.updateVersion(projectIdNum, selectedCharId, editingVersion.id, data);
+      } else {
+        await charactersApi.createVersion(projectIdNum, selectedCharId, data);
+      }
       toast.success('版本创建成功');
-      setIsCreateVersionOpen(false);
+      setIsVersionDialogOpen(false);
+      setEditingVersion(null);
       loadCharDetail();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '创建失败');
     } finally {
-      setCreatingVersion(false);
+      setSavingVersion(false);
     }
-  }, [projectIdNum, selectedCharId, loadCharDetail]);
+  }, [editingVersion, projectIdNum, selectedCharId, loadCharDetail]);
 
   const handleDeleteVersion = useCallback(async (versionId: number) => {
     if (!confirm('确定要删除这个版本吗？')) return;
@@ -2041,6 +1785,21 @@ export default function CharactersPage({ params }: { params: Promise<{ projectId
       toast.error(err instanceof Error ? err.message : '删除失败');
     }
   }, [projectIdNum, selectedCharId, loadCharDetail]);
+
+  const openCreateVersionDialog = useCallback(() => {
+    setEditingVersion(null);
+    setIsVersionDialogOpen(true);
+  }, []);
+
+  const openEditVersionDialog = useCallback((version: CharacterVersionResponse) => {
+    setEditingVersion(version);
+    setIsVersionDialogOpen(true);
+  }, []);
+
+  const openVersionDetailPage = useCallback((versionId: number) => {
+    if (!charDetail) return;
+    router.push(`/projects/${projectId}/materials/characters?charId=${charDetail.id}&versionId=${versionId}&tab=studio`);
+  }, [charDetail, projectId, router]);
 
   const filteredCharacters = characters.filter(char =>
     char.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -2149,17 +1908,20 @@ export default function CharactersPage({ params }: { params: Promise<{ projectId
                     <div className="text-center py-8 text-muted-foreground">
                       <ImageIcon className="h-12 w-12 mx-auto mb-3 opacity-50" />
                       <p>请先创建角色版本</p>
-                      <p className="text-sm">在“角色版本”标签页创建版本后再生成图片</p>
+                      <p className="text-sm">在"角色版本"标签页创建版本后再生成图片</p>
+                    </div>
+                  ) : !selectedVersionId ? (
+                    <div className="text-center py-8 text-muted-foreground">
+                      <ImageIcon className="h-12 w-12 mx-auto mb-3 opacity-50" />
+                      <p>请选择一个版本</p>
                     </div>
                   ) : (
                     <CharacterStudioWorkspace
                       projectId={projectIdNum}
-                      characterId={charDetail.id}
-                      characterName={charDetail.name}
-                      versions={charDetail.versions}
+                      charDetail={charDetail}
                       selectedVersionId={selectedVersionId}
-                      onSelectVersionId={setSelectedVersionId}
                       onRefresh={loadCharDetail}
+                      onVersionChange={setSelectedVersionId}
                     />
                   )}
                 </TabsContent>
@@ -2174,7 +1936,7 @@ export default function CharactersPage({ params }: { params: Promise<{ projectId
                           为同一个角色维护不同阶段、形象或状态版本，并分别管理每个版本的角色图片。
                         </div>
                       </div>
-                      <Button size="sm" onClick={() => setIsCreateVersionOpen(true)}>
+                      <Button size="sm" onClick={openCreateVersionDialog}>
                         <Plus className="h-4 w-4 mr-1" />创建版本
                       </Button>
                     </CardContent>
@@ -2196,6 +1958,8 @@ export default function CharactersPage({ params }: { params: Promise<{ projectId
                             setSelectedVersionId(versionId);
                             setActiveWorkspaceTab('studio');
                           }}
+                          onOpenDetail={openVersionDetailPage}
+                          onEdit={() => openEditVersionDialog(version)}
                         />
                       ))}
                     </div>
@@ -2240,7 +2004,13 @@ export default function CharactersPage({ params }: { params: Promise<{ projectId
           )}
         </div>
       </div>
-      <CreateVersionDialog open={isCreateVersionOpen} onOpenChange={setIsCreateVersionOpen} onCreate={handleCreateVersion} creating={creatingVersion} />
+      <VersionDialog
+        open={isVersionDialogOpen}
+        onOpenChange={setIsVersionDialogOpen}
+        onSubmit={handleSaveVersion}
+        submitting={savingVersion}
+        initialVersion={editingVersion}
+      />
     </AppLayout>
   );
 }

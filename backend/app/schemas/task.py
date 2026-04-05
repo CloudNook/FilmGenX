@@ -76,6 +76,7 @@ class ImageGenerationRequest(BaseModel):
         description="分辨率：512 / 1K / 2K / 4K",
     )
     style_preset: Optional[str] = Field(None, max_length=100, description="风格预设")
+    character_image_kind: Optional[str] = Field(None, max_length=30, description="角色图片类型")
     reference_image_urls: Optional[List[str]] = Field(
         None,
         max_length=5,

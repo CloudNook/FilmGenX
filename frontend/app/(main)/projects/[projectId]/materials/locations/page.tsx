@@ -1,6 +1,7 @@
 'use client';
 
 import { use, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { AppLayout } from '@/components/layout';
 import {
   assetsApi,
@@ -28,6 +29,13 @@ import {
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import {
+  Pagination,
+  PaginationContent,
+  PaginationItem,
+  PaginationNext,
+  PaginationPrevious,
+} from '@/components/ui/pagination';
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -38,10 +46,13 @@ import { Separator } from '@/components/ui/separator';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { toast } from 'sonner';
+import { cn } from '@/lib/utils';
 import {
   Building,
   Cloud,
   CloudRain,
+  ArrowRight,
+  Eye,
   ImagePlus,
   Layers,
   Loader2,
@@ -116,6 +127,31 @@ interface SceneImageItem {
   source: 'uploaded' | 'generated' | 'reference';
   createdAt?: string;
   isReferenced: boolean;
+}
+
+function createPendingImageFiles(files: FileList | null, limit: number): PendingImageFile[] {
+  if (!files || files.length === 0) return [];
+
+  const validTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+  const nextFiles: PendingImageFile[] = [];
+
+  Array.from(files).slice(0, limit).forEach((file) => {
+    if (!validTypes.includes(file.type)) {
+      toast.error(`${file.name} 不是支持的图片格式`);
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      toast.error(`${file.name} 超过 10MB 限制`);
+      return;
+    }
+    nextFiles.push({
+      id: `${Date.now()}-${Math.random()}`,
+      file,
+      preview: URL.createObjectURL(file),
+    });
+  });
+
+  return nextFiles;
 }
 
 function splitMultilineValue(value: string): string[] {
@@ -216,12 +252,245 @@ function FileDropZone({
   );
 }
 
+function FullscreenPreview({
+  url,
+  open,
+  onOpenChange,
+}: {
+  url: string | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  if (!url) return null;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-5xl overflow-hidden p-0">
+        <img src={url} alt="Preview" className="max-h-[85vh] w-full object-contain bg-black/95" />
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function AssetLibraryPickerDialog({
+  open,
+  onOpenChange,
+  projectId,
+  excludedUrls,
+  onSelect,
+  title,
+  description,
+  selectLabel,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  projectId: number;
+  excludedUrls: string[];
+  onSelect: (url: string) => Promise<void>;
+  title: string;
+  description: string;
+  selectLabel: string;
+}) {
+  const pageSize = 12;
+  const [assets, setAssets] = useState<AssetResponse[]>([]);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [submittingUrl, setSubmittingUrl] = useState<string | null>(null);
+
+  const excludedUrlSet = useMemo(() => new Set(excludedUrls), [excludedUrls]);
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+  const loadAssets = useCallback(async (nextPage: number) => {
+    setLoading(true);
+    try {
+      const response = await assetsApi.list(projectId, nextPage, pageSize, {
+        assetType: 'image',
+        isCurrent: true,
+      });
+      setAssets(response.items.filter((asset) => Boolean(asset.file_url)));
+      setTotal(response.total);
+    } catch {
+      setAssets([]);
+      setTotal(0);
+      toast.error('加载素材库图片失败');
+    } finally {
+      setLoading(false);
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    if (!open) {
+      setAssets([]);
+      setPage(1);
+      setTotal(0);
+      setSubmittingUrl(null);
+      return;
+    }
+    loadAssets(page).catch(() => undefined);
+  }, [loadAssets, open, page]);
+
+  const handleSelect = useCallback(async (url: string) => {
+    setSubmittingUrl(url);
+    try {
+      await onSelect(url);
+      onOpenChange(false);
+    } finally {
+      setSubmittingUrl(null);
+    }
+  }, [onOpenChange, onSelect]);
+
+  const startIndex = total === 0 ? 0 : (page - 1) * pageSize + 1;
+  const endIndex = total === 0 ? 0 : Math.min(page * pageSize, total);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-6xl gap-0 overflow-hidden p-0">
+        <DialogHeader className="border-b bg-gradient-to-r from-secondary/70 via-background to-background px-6 py-5 text-left">
+          <DialogTitle className="text-xl">{title}</DialogTitle>
+          <DialogDescription className="max-w-3xl text-sm leading-6">
+            {description}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-5 px-6 py-5">
+          <div className="flex flex-col gap-3 rounded-2xl border bg-muted/30 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="secondary" className="rounded-full px-3 py-1 text-xs font-medium">
+                {total > 0 ? `第 ${startIndex}-${endIndex} 张` : '当前无可选图片'}
+              </Badge>
+              <Badge variant="outline" className="rounded-full px-3 py-1 text-xs font-medium">
+                {`共 ${total} 张`}
+              </Badge>
+            </div>
+            <div className="text-xs font-medium tracking-wide text-muted-foreground">
+              {`每页 ${pageSize} 张`}
+            </div>
+          </div>
+
+          <ScrollArea className="max-h-[62vh] pr-2">
+            {loading ? (
+              <div className="flex min-h-[360px] items-center justify-center rounded-2xl border border-dashed bg-muted/20">
+                <Loader2 className="h-8 w-8 animate-spin text-primary" />
+              </div>
+            ) : assets.length === 0 ? (
+              <div className="rounded-2xl border border-dashed bg-muted/20 py-20 text-center text-sm text-muted-foreground">
+                当前素材库中还没有图片
+              </div>
+            ) : (
+              <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-4">
+                {assets.map((asset) => {
+                  const isIncluded = excludedUrlSet.has(asset.file_url);
+                  const isSubmitting = submittingUrl === asset.file_url;
+                  const assetLabel = asset.asset_code || `素材图 #${asset.id}`;
+
+                  return (
+                    <div
+                      key={asset.id}
+                      className={cn(
+                        'group overflow-hidden rounded-2xl border bg-card shadow-sm transition-all duration-200',
+                        isIncluded
+                          ? 'border-border/70 bg-muted/20'
+                          : 'border-border/60 hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-lg',
+                      )}
+                    >
+                      <div className="relative overflow-hidden bg-muted">
+                        <img
+                          src={asset.file_url}
+                          alt={assetLabel}
+                          className="aspect-[4/3] w-full object-cover transition duration-300 group-hover:scale-[1.02]"
+                        />
+                        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-black/45 via-black/10 to-transparent" />
+                        <div className="absolute left-3 top-3">
+                          <Badge
+                            variant={isIncluded ? 'secondary' : 'outline'}
+                            className={cn(
+                              'rounded-full border px-2.5 py-1 text-[11px] font-medium backdrop-blur',
+                              isIncluded
+                                ? 'bg-background/90 text-foreground'
+                                : 'border-white/40 bg-black/35 text-white',
+                            )}
+                          >
+                            {isIncluded ? '已在当前图库' : '素材库图片'}
+                          </Badge>
+                        </div>
+                      </div>
+
+                      <div className="space-y-3 p-4">
+                        <div className="space-y-1">
+                          <div className="line-clamp-1 text-sm font-semibold text-foreground" title={assetLabel}>
+                            {assetLabel}
+                          </div>
+                          <div className="text-xs text-muted-foreground">
+                            {`素材 #${asset.id}`}
+                          </div>
+                        </div>
+
+                        <Button
+                          className="w-full"
+                          size="sm"
+                          variant={isIncluded ? 'secondary' : 'outline'}
+                          disabled={isIncluded || Boolean(submittingUrl)}
+                          onClick={() => handleSelect(asset.file_url)}
+                        >
+                          {isSubmitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                          {isIncluded ? '已加入当前图库' : selectLabel}
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </ScrollArea>
+
+          {totalPages > 1 ? (
+            <div className="border-t pt-4">
+              <Pagination>
+                <PaginationContent>
+                  <PaginationItem>
+                    <PaginationPrevious
+                      href="#"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        if (page > 1 && !loading) setPage((current) => current - 1);
+                      }}
+                      className={page <= 1 || loading ? 'pointer-events-none opacity-50' : ''}
+                    />
+                  </PaginationItem>
+                  <PaginationItem>
+                    <span className="px-3 text-sm font-medium text-muted-foreground">
+                      {`第 ${page} / ${totalPages} 页`}
+                    </span>
+                  </PaginationItem>
+                  <PaginationItem>
+                    <PaginationNext
+                      href="#"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        if (page < totalPages && !loading) setPage((current) => current + 1);
+                      }}
+                      className={page >= totalPages || loading ? 'pointer-events-none opacity-50' : ''}
+                    />
+                  </PaginationItem>
+                </PaginationContent>
+              </Pagination>
+            </div>
+          ) : null}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export default function LocationsPage({
   params,
 }: {
   params: Promise<{ projectId: string }>;
 }) {
   const { projectId } = use(params);
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const projectIdNum = Number(projectId);
 
   const [project, setProject] = useState<ProjectResponse | null>(null);
@@ -268,6 +537,9 @@ export default function LocationsPage({
   const [img2imgFiles, setImg2imgFiles] = useState<PendingImageFile[]>([]);
   const [selectedReferenceUrls, setSelectedReferenceUrls] = useState<string[]>([]);
   const [imgGenerating, setImgGenerating] = useState(false);
+  const [isStudioAssetPickerOpen, setIsStudioAssetPickerOpen] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const lastAppliedRouteSelectionRef = useRef<string | null>(null);
   const uploadFilesRef = useRef<PendingImageFile[]>([]);
   const img2imgFilesRef = useRef<PendingImageFile[]>([]);
 
@@ -313,6 +585,11 @@ export default function LocationsPage({
     () => locDetail?.versions.find((version) => version.id === selectedStudioVersionId) ?? null,
     [locDetail?.versions, selectedStudioVersionId],
   );
+
+  const routeTargetLocationId = Number(searchParams.get('locationId') || '');
+  const routeTargetVersionId = Number(searchParams.get('versionId') || '');
+  const routeTargetTab = searchParams.get('tab');
+  const routeSelectionKey = `${searchParams.get('locationId') || ''}|${searchParams.get('versionId') || ''}|${routeTargetTab || ''}`;
 
   const studioReferenceUrls = activeStudioVersion?.reference_image_urls || locDetail?.reference_image_urls || [];
 
@@ -384,9 +661,6 @@ export default function LocationsPage({
 
     const nextReferenceUrls = activeStudioVersion?.reference_image_urls || locDetail.reference_image_urls || [];
     setSelectedReferenceUrls((prev) => {
-      if (prev.length === 0) {
-        return nextReferenceUrls.slice(0, 5);
-      }
       return prev.filter((url) => nextReferenceUrls.includes(url));
     });
 
@@ -396,6 +670,50 @@ export default function LocationsPage({
       setStudioVersionAssets([]);
     }
   }, [activeStudioVersion, loadStudioVersionAssets, locDetail]);
+
+  useEffect(() => {
+    if ((!searchParams.get('locationId') && !searchParams.get('versionId') && !routeTargetTab) || routeSelectionKey === lastAppliedRouteSelectionRef.current) {
+      return;
+    }
+
+    if (routeTargetTab === 'studio' || routeTargetTab === 'versions' || routeTargetTab === 'details') {
+      setActiveWorkspaceTab(routeTargetTab);
+    }
+
+    if (!Number.isNaN(routeTargetLocationId) && locations.some((location) => location.id === routeTargetLocationId)) {
+      if (selectedLocId !== routeTargetLocationId) {
+        setSelectedLocId(routeTargetLocationId);
+      }
+    }
+
+    const canApplyVersion = !Number.isNaN(routeTargetVersionId)
+      && locDetail
+      && (!Number.isNaN(routeTargetLocationId) ? locDetail.id === routeTargetLocationId : true)
+      && locDetail.versions.some((version) => version.id === routeTargetVersionId);
+
+    if (canApplyVersion) {
+      setSelectedStudioVersionId(routeTargetVersionId);
+      lastAppliedRouteSelectionRef.current = routeSelectionKey;
+      return;
+    }
+
+    if (searchParams.get('versionId') && !locDetail) {
+      return;
+    }
+
+    if (!searchParams.get('versionId')) {
+      lastAppliedRouteSelectionRef.current = routeSelectionKey;
+    }
+  }, [
+    locDetail,
+    locations,
+    routeSelectionKey,
+    routeTargetLocationId,
+    routeTargetTab,
+    routeTargetVersionId,
+    searchParams,
+    selectedLocId,
+  ]);
 
   useEffect(() => {
     if (!selectedSourceLocationId || Number.isNaN(projectIdNum)) {
@@ -514,6 +832,8 @@ export default function LocationsPage({
       .filter((item, index, arr) => arr.findIndex((candidate) => candidate.url === item.url) === index)
       .filter((item) => !studioReferenceUrls.includes(item.url));
   }, [activeStudioVersion?.id, locDetail, studioReferenceUrls]);
+
+  const projectLibraryImageItems = useMemo(() => [] as Array<{ url: string; assetId: number }>, []);
 
   const selectedSourceVersion = useMemo(
     () => sourceLocationDetail?.versions.find((version) => version.id === selectedSourceVersionId) ?? null,
@@ -676,6 +996,13 @@ export default function LocationsPage({
     setVersionDialogOpen(true);
   }, []);
 
+  const openVersionDetailPage = useCallback((version: LocationVersionResponse) => {
+    if (!locDetail) return;
+    router.push(
+      `/projects/${projectId}/materials/locations?locationId=${locDetail.id}&versionId=${version.id}&tab=studio`,
+    );
+  }, [locDetail, projectId, router]);
+
   const handleDeleteVersion = useCallback(async (versionId: number) => {
     if (!locDetail || !window.confirm('确定删除这个场景版本吗？')) return;
     try {
@@ -701,24 +1028,27 @@ export default function LocationsPage({
     }
   }, [loadLocationDetail, locDetail, projectIdNum]);
 
-  const handleUploadSceneImages = useCallback(async () => {
-    if (!locDetail || uploadFiles.length === 0) return;
+  const handleUploadSceneImages = useCallback(async (files: FileList | null) => {
+    if (!locDetail || uploadingSceneImage) return;
+    const nextFiles = createPendingImageFiles(files, 10);
+    if (nextFiles.length === 0) return;
+    setUploadFiles(nextFiles);
     setUploadingSceneImage(true);
     try {
-      const urls = await uploadFilesToStudio(uploadFiles);
+      const urls = await uploadFilesToStudio(nextFiles);
       await updateStudioReferenceUrls([...(studioReferenceUrls || []), ...urls]);
       if (activeStudioVersion) {
         await loadStudioVersionAssets(locDetail.id, activeStudioVersion.id);
       }
       toast.success('场景图上传成功');
-      resetPreviewFiles(uploadFiles);
-      setUploadFiles([]);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '上传失败');
     } finally {
+      resetPreviewFiles(nextFiles);
+      setUploadFiles([]);
       setUploadingSceneImage(false);
     }
-  }, [activeStudioVersion, loadStudioVersionAssets, locDetail, resetPreviewFiles, studioReferenceUrls, updateStudioReferenceUrls, uploadFiles, uploadFilesToStudio]);
+  }, [activeStudioVersion, loadStudioVersionAssets, locDetail, resetPreviewFiles, studioReferenceUrls, updateStudioReferenceUrls, uploadFilesToStudio, uploadingSceneImage]);
 
   const handleGenerateFromPrompt = useCallback(async () => {
     if (!locDetail || !textPrompt.trim()) {
@@ -737,15 +1067,16 @@ export default function LocationsPage({
         aspect_ratio: textAspectRatio,
         resolution: textResolution,
         style_preset: textStylePreset.trim() || undefined,
+        reference_image_urls: selectedReferenceUrls.length > 0 ? selectedReferenceUrls : undefined,
         save_to_shot: true,
       });
-      toast.success('场景图生成任务已提交');
+      toast.success(selectedReferenceUrls.length > 0 ? '场景图生图任务已提交' : '场景图生成任务已提交');
       await waitForTask(task.id);
       await loadLocationDetail(locDetail.id);
       if (activeStudioVersion) {
         await loadStudioVersionAssets(locDetail.id, activeStudioVersion.id);
       }
-      toast.success('场景图生成完成');
+      toast.success(selectedReferenceUrls.length > 0 ? '场景图生图完成' : '场景图生成完成');
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '生成失败');
     } finally {
@@ -762,6 +1093,7 @@ export default function LocationsPage({
     textPrompt,
     textResolution,
     textStylePreset,
+    selectedReferenceUrls,
     waitForTask,
   ]);
 
@@ -1121,204 +1453,113 @@ export default function LocationsPage({
                         </CardDescription>
                       </CardHeader>
                       <CardContent className="space-y-4">
-                        <Tabs defaultValue="prompt" className="space-y-4">
-                          <TabsList className="grid w-full grid-cols-2">
-                            <TabsTrigger value="prompt">提示词生图</TabsTrigger>
-                            <TabsTrigger value="img2img">图生图</TabsTrigger>
-                          </TabsList>
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium">正向提示词</label>
+                          <Textarea
+                            value={textPrompt}
+                            onChange={(event) => setTextPrompt(event.target.value)}
+                            rows={5}
+                            placeholder="描述你想要的场景；如果右侧已选择参考图，会在这些参考图基础上继续生成。"
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium">负面提示词</label>
+                          <Input
+                            value={textNegativePrompt}
+                            onChange={(event) => setTextNegativePrompt(event.target.value)}
+                            placeholder="例如：blurry, low quality, watermark"
+                          />
+                        </div>
+                        <div className="grid gap-4 md:grid-cols-3">
+                          <div className="space-y-2">
+                            <label className="text-sm font-medium">画幅比例</label>
+                            <Select value={textAspectRatio} onValueChange={setTextAspectRatio}>
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {aspectRatios.map((item) => (
+                                  <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="space-y-2">
+                            <label className="text-sm font-medium">分辨率</label>
+                            <Select value={textResolution} onValueChange={setTextResolution}>
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {resolutions.map((item) => (
+                                  <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="space-y-2">
+                            <label className="text-sm font-medium">风格预设</label>
+                            <Input value={textStylePreset} onChange={(event) => setTextStylePreset(event.target.value)} placeholder="例如：anime cinematic" />
+                          </div>
+                        </div>
 
-                          <TabsContent value="prompt" className="space-y-4">
-                            <div className="space-y-2">
-                              <label className="text-sm font-medium">正向提示词</label>
-                              <Textarea
-                                value={textPrompt}
-                                onChange={(event) => setTextPrompt(event.target.value)}
-                                rows={5}
-                                placeholder="描述你想要的场景，例如：古风宗门广场，石阶层叠，晨雾缭绕，远处山门高耸，动漫电影感..."
-                              />
-                            </div>
-                            <div className="space-y-2">
-                              <label className="text-sm font-medium">负面提示词</label>
-                              <Input
-                                value={textNegativePrompt}
-                                onChange={(event) => setTextNegativePrompt(event.target.value)}
-                                placeholder="例如：blurry, low quality, watermark"
-                              />
-                            </div>
-                            <div className="grid gap-4 md:grid-cols-3">
-                              <div className="space-y-2">
-                                <label className="text-sm font-medium">画幅比例</label>
-                                <Select value={textAspectRatio} onValueChange={setTextAspectRatio}>
-                                  <SelectTrigger>
-                                    <SelectValue />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    {aspectRatios.map((item) => (
-                                      <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
-                                    ))}
-                                  </SelectContent>
-                                </Select>
-                              </div>
-                              <div className="space-y-2">
-                                <label className="text-sm font-medium">分辨率</label>
-                                <Select value={textResolution} onValueChange={setTextResolution}>
-                                  <SelectTrigger>
-                                    <SelectValue />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    {resolutions.map((item) => (
-                                      <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
-                                    ))}
-                                  </SelectContent>
-                                </Select>
-                              </div>
-                              <div className="space-y-2">
-                                <label className="text-sm font-medium">风格预设</label>
-                                <Input value={textStylePreset} onChange={(event) => setTextStylePreset(event.target.value)} placeholder="例如：anime cinematic" />
-                              </div>
-                            </div>
-                            <div className="flex justify-end">
-                              <Button onClick={handleGenerateFromPrompt} disabled={textGenerating || !textPrompt.trim()}>
-                                {textGenerating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wand2 className="mr-2 h-4 w-4" />}
-                                生成场景图
-                              </Button>
-                            </div>
-                          </TabsContent>
-
-                          <TabsContent value="img2img" className="space-y-4">
-                            <div className="space-y-2">
-                              <label className="text-sm font-medium">图生图提示词</label>
-                              <Textarea
-                                value={imgPrompt}
-                                onChange={(event) => setImgPrompt(event.target.value)}
-                                rows={4}
-                                placeholder="在已有场景基础上继续细化，例如：保留建筑结构和空间布局，加入夜色、灯火和薄雾..."
-                              />
-                            </div>
-                            <div className="space-y-2">
-                              <label className="text-sm font-medium">负面提示词</label>
-                              <Input
-                                value={imgNegativePrompt}
-                                onChange={(event) => setImgNegativePrompt(event.target.value)}
-                                placeholder="例如：deformed, extra objects, watermark"
-                              />
-                            </div>
-                            <div className="grid gap-4 md:grid-cols-3">
-                              <div className="space-y-2">
-                                <label className="text-sm font-medium">画幅比例</label>
-                                <Select value={imgAspectRatio} onValueChange={setImgAspectRatio}>
-                                  <SelectTrigger>
-                                    <SelectValue />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    {aspectRatios.map((item) => (
-                                      <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
-                                    ))}
-                                  </SelectContent>
-                                </Select>
-                              </div>
-                              <div className="space-y-2">
-                                <label className="text-sm font-medium">分辨率</label>
-                                <Select value={imgResolution} onValueChange={setImgResolution}>
-                                  <SelectTrigger>
-                                    <SelectValue />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    {resolutions.map((item) => (
-                                      <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
-                                    ))}
-                                  </SelectContent>
-                                </Select>
-                              </div>
-                              <div className="space-y-2">
-                                <label className="text-sm font-medium">风格预设</label>
-                                <Input value={imgStylePreset} onChange={(event) => setImgStylePreset(event.target.value)} placeholder="例如：anime matte painting" />
-                              </div>
-                            </div>
-
-                            <Separator />
-
-                            {selectedReferenceUrls.length > 0 ? (
-                              <div className="space-y-3">
-                                <div className="flex items-center justify-between">
-                                  <div>
-                                    <div className="text-sm font-medium">选择已有参考图</div>
-                                    <div className="text-xs text-muted-foreground">可多选，最多 5 张</div>
-                                  </div>
-                                  <Badge variant="secondary">{selectedReferenceUrls.length}/5</Badge>
-                                </div>
-
-                                <div className="grid gap-3 sm:grid-cols-2">
-                                  {selectedReferenceUrls.map((url) => {
-                                    return (
-                                      <button
-                                        key={url}
-                                        type="button"
-                                        onClick={() => toggleReferenceSelection(url)}
-                                        className="overflow-hidden rounded-xl border border-primary ring-2 ring-primary/20 text-left transition"
-                                      >
-                                        <img src={url} alt="" className="aspect-video w-full object-cover" />
-                                      </button>
-                                    );
-                                  })}
-                                </div>
-                              </div>
-                            ) : null}
-
-                            <div className="space-y-3">
+                        {selectedReferenceUrls.length > 0 ? (
+                          <div className="space-y-3 rounded-xl border border-primary/20 bg-primary/5 p-4">
+                            <div className="flex items-center justify-between">
                               <div>
-                                <div className="text-sm font-medium">补充新的图生图参考图</div>
-                                <div className="text-xs text-muted-foreground">上传后会自动保存到当前场景参考图库。</div>
+                                <div className="text-sm font-medium">已选择参考图</div>
+                                <div className="text-xs text-muted-foreground">当前会按图生图模式生成，可在右侧点击取消选择。</div>
                               </div>
-
-                              <FileDropZone
-                                onSelect={(files) => addPendingFiles(files, 'img2img')}
-                                disabled={imgGenerating}
-                                title="添加参考图"
-                                description="可以补充新的底图或角度参考"
-                              />
-
-                              {img2imgFiles.length > 0 ? (
-                                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                                  {img2imgFiles.map((item) => (
-                                    <div key={item.id} className="rounded-xl border bg-secondary/20 p-2">
-                                      <div className="relative overflow-hidden rounded-lg">
-                                        <img src={item.preview} alt={item.file.name} className="aspect-video w-full object-cover" />
-                                        <Button
-                                          variant="secondary"
-                                          size="icon"
-                                          className="absolute right-2 top-2 h-7 w-7"
-                                          onClick={() => removePendingFile(item.id, 'img2img')}
-                                        >
-                                          <X className="h-4 w-4" />
-                                        </Button>
-                                      </div>
-                                      <div className="mt-2 truncate text-xs text-muted-foreground">{item.file.name}</div>
+                              <Badge variant="secondary">{selectedReferenceUrls.length}/5</Badge>
+                            </div>
+                            <div className="grid gap-3 sm:grid-cols-2">
+                              {selectedReferenceUrls.map((url) => (
+                                <div key={url} className="overflow-hidden rounded-xl border border-primary ring-2 ring-primary/20">
+                                  <button
+                                    type="button"
+                                    onClick={() => setPreviewUrl(url)}
+                                    className="group relative block w-full overflow-hidden"
+                                  >
+                                    <img src={url} alt="" className="aspect-video w-full object-cover transition group-hover:scale-[1.01]" />
+                                    <div className="absolute inset-x-0 bottom-0 flex items-center justify-end bg-gradient-to-t from-black/55 to-transparent p-3 opacity-0 transition group-hover:opacity-100">
+                                      <span className="inline-flex items-center gap-1 rounded-full bg-white/90 px-2 py-1 text-xs font-medium text-foreground">
+                                        <Eye className="h-3 w-3" />
+                                        预览
+                                      </span>
                                     </div>
-                                  ))}
+                                  </button>
+                                  <div className="flex justify-end p-2">
+                                    <Button variant="ghost" size="sm" onClick={() => toggleReferenceSelection(url)}>
+                                      取消选择
+                                    </Button>
+                                  </div>
                                 </div>
-                              ) : null}
+                              ))}
                             </div>
+                          </div>
+                        ) : (
+                          <div className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
+                            当前未选择参考图。你可以直接文生图，或者在右侧图库中点击“设为参考图”切换为图生图。
+                          </div>
+                        )}
 
-                            <div className="flex justify-end">
-                              <Button onClick={handleGenerateFromImage} disabled={imgGenerating || !imgPrompt.trim()}>
-                                {imgGenerating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}
-                                根据参考图生成
-                              </Button>
-                            </div>
-                          </TabsContent>
-                        </Tabs>
+                        <div className="flex justify-end">
+                          <Button onClick={handleGenerateFromPrompt} disabled={textGenerating || !textPrompt.trim()}>
+                            {textGenerating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : selectedReferenceUrls.length > 0 ? <Sparkles className="mr-2 h-4 w-4" /> : <Wand2 className="mr-2 h-4 w-4" />}
+                            {selectedReferenceUrls.length > 0 ? '根据参考图生成场景图' : '生成场景图'}
+                          </Button>
+                        </div>
                       </CardContent>
                     </Card>
 
                     <Card>
                       <CardHeader>
                         <CardTitle>{activeStudioVersion ? `${activeStudioVersion.label} 版本图库` : '主场景图库'}</CardTitle>
-                        <CardDescription>
-                          {activeStudioVersion
-                            ? '右侧只展示当前版本的场景素材图；也可以把其他版本的图片加入当前版本图库。'
-                            : '这里展示主场景图库，也可以复用其他版本的场景图加入当前主场景。'}
-                        </CardDescription>
+                          <CardDescription>
+                            {activeStudioVersion
+                            ? '右侧展示当前版本图库，同时支持直接从项目素材库引用图片加入当前版本。'
+                            : '这里展示主场景图库，同时支持直接从项目素材库引用图片加入当前主场景。'}
+                          </CardDescription>
                       </CardHeader>
                       <CardContent className="space-y-4">
                         <div className="space-y-3">
@@ -1331,8 +1572,14 @@ export default function LocationsPage({
                                 点击或拖拽图片到这里，上传后会保存到当前选中的出图目标。
                               </div>
                             </div>
-                            {uploadFiles.length > 0 ? (
-                              <Button onClick={handleUploadSceneImages} disabled={uploadingSceneImage}>
+                            {uploadingSceneImage ? (
+                              <div className="inline-flex items-center gap-2 rounded-full bg-primary/10 px-3 py-1 text-xs font-medium text-primary">
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                正在上传
+                              </div>
+                            ) : null}
+                            {false ? (
+                              <Button onClick={() => undefined} disabled={uploadingSceneImage}>
                                 {uploadingSceneImage ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ImagePlus className="mr-2 h-4 w-4" />}
                                 {activeStudioVersion ? '保存到当前版本' : '保存到主场景'}
                               </Button>
@@ -1340,7 +1587,7 @@ export default function LocationsPage({
                           </div>
 
                           <FileDropZone
-                            onSelect={(files) => addPendingFiles(files, 'upload')}
+                            onSelect={handleUploadSceneImages}
                             disabled={uploadingSceneImage}
                             title={activeStudioVersion ? '上传版本场景图' : '上传主场景图'}
                             description="支持点击选择和拖拽上传，JPG / PNG / WebP / GIF，单张不超过 10MB"
@@ -1355,7 +1602,7 @@ export default function LocationsPage({
                                     <Button
                                       variant="secondary"
                                       size="icon"
-                                      className="absolute right-2 top-2 h-7 w-7"
+                                      className="hidden"
                                       onClick={() => removePendingFile(item.id, 'upload')}
                                     >
                                       <X className="h-4 w-4" />
@@ -1368,86 +1615,36 @@ export default function LocationsPage({
                           ) : null}
                         </div>
 
-                        <div className="space-y-3 rounded-xl border bg-secondary/10 p-4">
-                            <div>
-                              <div className="text-sm font-medium">引用已有图片</div>
+                        <div className="rounded-xl border bg-secondary/10 p-4">
+                          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                            <div className="space-y-1">
+                              <div className="text-sm font-medium">引用素材库图片</div>
                               <div className="text-xs text-muted-foreground">
-                                可从当前场景的其他版本，或项目内其他场景/版本图库中选择图片，直接加入当前图库。
+                                点击按钮后在弹窗中分页浏览素材库图片，选择后再加入当前图库。
+                              </div>
+                            </div>
+                            <Button variant="outline" onClick={() => setIsStudioAssetPickerOpen(true)}>
+                              <ImagePlus className="mr-2 h-4 w-4" />
+                              从素材库选择图片
+                            </Button>
+                          </div>
+                        </div>
+
+                        <div className="hidden space-y-3 rounded-xl border bg-secondary/10 p-4">
+                            <div>
+                              <div className="text-sm font-medium">引用素材库图片</div>
+                              <div className="text-xs text-muted-foreground">
+                                直接从项目素材库中选择图片加入当前图库，不再区分来源场景或来源图库。
                               </div>
                             </div>
 
-                          <div className="grid gap-3 md:grid-cols-2">
-                            <div className="space-y-2">
-                              <label className="text-xs font-medium text-muted-foreground">来源场景</label>
-                              <Select
-                                value={selectedSourceLocationId ? String(selectedSourceLocationId) : undefined}
-                                onValueChange={(value) => {
-                                  setSelectedSourceLocationId(Number(value));
-                                  setSelectedSourceVersionId(null);
-                                  setSourceVersionAssets([]);
-                                }}
-                                disabled={sourceLocationOptions.length === 0}
-                              >
-                                <SelectTrigger>
-                                  <SelectValue placeholder="选择来源场景" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  {sourceLocationOptions.map((location) => (
-                                    <SelectItem key={location.id} value={String(location.id)}>
-                                      {location.id === locDetail?.id ? `${location.name}（当前场景）` : `${location.name} (${location.loc_code})`}
-                                    </SelectItem>
-                                  ))}
-                                </SelectContent>
-                              </Select>
-                            </div>
-
-                            <div className="space-y-2">
-                              <label className="text-xs font-medium text-muted-foreground">来源图库</label>
-                              <Select
-                                value={selectedSourceVersionId === null ? '__base__' : String(selectedSourceVersionId)}
-                                onValueChange={(value) => {
-                                  setSelectedSourceVersionId(value === '__base__' ? null : Number(value));
-                                  setSourceVersionAssets([]);
-                                }}
-                                disabled={!sourceLocationDetail || sourceLocationOptions.length === 0}
-                              >
-                                <SelectTrigger>
-                                  <SelectValue placeholder="选择主图库或版本图库" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  <SelectItem value="__base__">主场景图库</SelectItem>
-                                  {sourceLocationDetail?.versions.map((version) => (
-                                    <SelectItem key={version.id} value={String(version.id)}>
-                                      {version.label} ({version.version_code})
-                                    </SelectItem>
-                                  ))}
-                                </SelectContent>
-                              </Select>
-                            </div>
-                          </div>
-
-                          {sourceLocationOptions.length === 0 ? (
-                            <div className="rounded-xl border border-dashed p-6 text-center text-sm text-muted-foreground">
-                              当前项目还没有可引用的场景或版本图库。
-                            </div>
-                          ) : sourceLibraryMatchesCurrentTarget ? (
-                            <div className="rounded-xl border border-dashed p-6 text-center text-sm text-muted-foreground">
-                              当前选中的来源就是正在编辑的图库本身，请切换到当前场景的其他版本，或选择其他场景/版本进行引用。
-                            </div>
-                          ) : loadingSourceLibrary ? (
-                            <div className="flex items-center justify-center rounded-xl border border-dashed p-6 text-sm text-muted-foreground">
-                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                              正在加载来源图库...
-                            </div>
-                          ) : externalSourceImageItems.length > 0 ? (
+                          {projectLibraryImageItems.length > 0 ? (
                             <div className="grid gap-3 sm:grid-cols-2">
-                              {externalSourceImageItems.map((item, index) => (
-                                <div key={`${item.url}-${index}`} className="overflow-hidden rounded-xl border bg-card">
+                              {projectLibraryImageItems.map((item) => (
+                                <div key={item.url} className="overflow-hidden rounded-xl border bg-card">
                                   <img src={item.url} alt="" className="aspect-video w-full object-cover" />
                                   <div className="flex items-center justify-between gap-2 p-3">
-                                    <div className="text-xs text-muted-foreground">
-                                      {selectedSourceVersion ? `${sourceLocationDetail?.name} / ${selectedSourceVersion.label}` : sourceLocationDetail?.name}
-                                    </div>
+                                    <div className="text-xs text-muted-foreground">素材库图片</div>
                                     <Button size="sm" variant="outline" onClick={() => handleAddReusableStudioImage(item.url)}>
                                       引用到当前图库
                                     </Button>
@@ -1457,7 +1654,7 @@ export default function LocationsPage({
                             </div>
                           ) : (
                             <div className="rounded-xl border border-dashed p-6 text-center text-sm text-muted-foreground">
-                              当前来源图库暂无可引用图片，或者这些图片已经在当前图库中了。
+                              当前素材库里暂无可引用图片，或者这些图片已经在当前图库中了。
                             </div>
                           )}
                         </div>
@@ -1472,7 +1669,19 @@ export default function LocationsPage({
                               const url = item.url;
                               return (
                               <div key={item.url} className="overflow-hidden rounded-xl border bg-card">
-                                <img src={item.url} alt={`场景图 ${index + 1}`} className="aspect-video w-full object-cover" />
+                                <button
+                                  type="button"
+                                  onClick={() => setPreviewUrl(item.url)}
+                                  className="group relative block w-full overflow-hidden"
+                                >
+                                  <img src={item.url} alt={`场景图 ${index + 1}`} className="aspect-video w-full object-cover transition group-hover:scale-[1.01]" />
+                                  <div className="absolute inset-x-0 bottom-0 flex items-center justify-end bg-gradient-to-t from-black/55 to-transparent p-3 opacity-0 transition group-hover:opacity-100">
+                                    <span className="inline-flex items-center gap-1 rounded-full bg-white/90 px-2 py-1 text-xs font-medium text-foreground">
+                                      <Eye className="h-3 w-3" />
+                                      预览
+                                    </span>
+                                  </div>
+                                </button>
                                 <div className="flex items-center justify-between gap-2 p-3">
                                   <div className="text-xs text-muted-foreground">场景图 #{index + 1}</div>
                                   <div className="flex items-center gap-2">
@@ -1493,32 +1702,23 @@ export default function LocationsPage({
                             })}
                           </div>
                         )}
-                        {reusableVersionImages.length > 0 ? (
-                          <div className="space-y-3">
-                            <div>
-                              <div className="text-sm font-medium">其他版本可复用场景图</div>
-                              <div className="text-xs text-muted-foreground">可直接加入当前选中目标的场景图库。</div>
-                            </div>
-                            <div className="grid gap-4 sm:grid-cols-2">
-                              {reusableVersionImages.map((item) => (
-                                <div key={item.key} className="overflow-hidden rounded-xl border bg-card">
-                                  <img src={item.url} alt={item.versionLabel} className="aspect-video w-full object-cover" />
-                                  <div className="flex items-center justify-between gap-2 p-3">
-                                    <div>
-                                      <div className="text-xs text-muted-foreground">{item.versionLabel}</div>
-                                      <div className="text-xs text-muted-foreground">来自其他版本</div>
-                                    </div>
-                                    <Button size="sm" variant="outline" onClick={() => handleAddReusableStudioImage(item.url)}>
-                                      加入当前图库
-                                    </Button>
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        ) : null}
                       </CardContent>
                     </Card>
+                    <AssetLibraryPickerDialog
+                      open={isStudioAssetPickerOpen}
+                      onOpenChange={setIsStudioAssetPickerOpen}
+                      projectId={projectIdNum}
+                      excludedUrls={studioImageItems.map((item) => item.url)}
+                      onSelect={handleAddReusableStudioImage}
+                      title={activeStudioVersion ? '选择素材库图片加入当前版本' : '选择素材库图片加入主场景'}
+                      description="弹窗中按页浏览项目素材库图片，选择后会直接加入当前右侧图库。"
+                      selectLabel="加入当前图库"
+                    />
+                    <FullscreenPreview
+                      url={previewUrl}
+                      open={!!previewUrl}
+                      onOpenChange={() => setPreviewUrl(null)}
+                    />
                   </div>
                 </TabsContent>
 
@@ -1592,6 +1792,10 @@ export default function LocationsPage({
                               >
                                 <Sparkles className="mr-2 h-4 w-4" />
                                 图片工作台
+                              </Button>
+                              <Button variant="outline" size="sm" onClick={() => openVersionDetailPage(version)}>
+                                <ArrowRight className="mr-2 h-4 w-4" />
+                                详情
                               </Button>
                               <Button variant="outline" size="sm" onClick={() => openEditVersionDialog(version)}>
                                 编辑版本
@@ -1992,8 +2196,11 @@ function LocationVersionStudioDialog({
   const [imgResolution, setImgResolution] = useState('1K');
   const [img2imgFiles, setImg2imgFiles] = useState<PendingImageFile[]>([]);
   const [versionAssets, setVersionAssets] = useState<AssetResponse[]>([]);
+  const [locationLibraryAssets, setLocationLibraryAssets] = useState<AssetResponse[]>([]);
   const [selectedReferenceUrls, setSelectedReferenceUrls] = useState<string[]>([]);
   const [imgGenerating, setImgGenerating] = useState(false);
+  const [isVersionAssetPickerOpen, setIsVersionAssetPickerOpen] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
   const resetPreviewFiles = useCallback((files: PendingImageFile[]) => {
     files.forEach((item) => URL.revokeObjectURL(item.preview));
@@ -2001,7 +2208,7 @@ function LocationVersionStudioDialog({
 
   useEffect(() => {
     if (!open || !version) return;
-    setSelectedReferenceUrls(version.reference_image_urls.slice(0, 5));
+    setSelectedReferenceUrls((prev) => prev.filter((url) => version.reference_image_urls.includes(url)));
   }, [open, version]);
 
   const loadVersionAssets = useCallback(async () => {
@@ -2019,9 +2226,19 @@ function LocationVersionStudioDialog({
     return items;
   }, [locationId, projectId, version]);
 
+  const loadLocationLibraryAssets = useCallback(async () => {
+    const items = await assetsApi.list(projectId, 1, 100, {
+      assetType: 'image',
+      isCurrent: true,
+    }).then((response) => response.items);
+    setLocationLibraryAssets(items.filter((asset) => asset.file_url && !version?.reference_image_urls.includes(asset.file_url)));
+    return items;
+  }, [projectId, version?.reference_image_urls]);
+
   useEffect(() => {
     if (open) {
       loadVersionAssets().catch(() => setVersionAssets([]));
+      loadLocationLibraryAssets().catch(() => setLocationLibraryAssets([]));
       return;
     }
     resetPreviewFiles(uploadFiles);
@@ -2040,12 +2257,30 @@ function LocationVersionStudioDialog({
     setImgResolution('1K');
     setSelectedReferenceUrls([]);
     setVersionAssets([]);
-  }, [img2imgFiles, loadVersionAssets, open, resetPreviewFiles, uploadFiles]);
+    setLocationLibraryAssets([]);
+  }, [img2imgFiles, loadLocationLibraryAssets, loadVersionAssets, open, resetPreviewFiles, uploadFiles]);
 
   const versionImageItems = useMemo(
     () => buildSceneImageItems(version?.reference_image_urls || [], versionAssets),
     [version?.reference_image_urls, versionAssets],
   );
+
+  const reusableLibraryItems = useMemo(() => {
+    const currentUrls = new Set(version?.reference_image_urls || []);
+    return Array.from(
+      new Map<string, { url: string; sourceLabel: string }>(
+        locationLibraryAssets
+          .filter((asset) => !currentUrls.has(asset.file_url))
+          .map((asset) => [
+            asset.file_url,
+            {
+              url: asset.file_url,
+              sourceLabel: '素材库图片',
+            },
+          ]),
+      ).values(),
+    );
+  }, [locationLibraryAssets, version?.reference_image_urls]);
 
   const addPendingFiles = useCallback((files: FileList | null, target: 'upload' | 'img2img') => {
     if (!files || files.length === 0) return;
@@ -2114,22 +2349,26 @@ function LocationVersionStudioDialog({
     throw new Error('生成耗时较长，请稍后刷新查看结果');
   }, []);
 
-  const handleUpload = useCallback(async () => {
-    if (!version || uploadFiles.length === 0) return;
+  const handleUpload = useCallback(async (files: FileList | null) => {
+    if (!version || uploading) return;
+    const nextFiles = createPendingImageFiles(files, 10);
+    if (nextFiles.length === 0) return;
+    setUploadFiles(nextFiles);
     setUploading(true);
     try {
-      const urls = await uploadFilesToVersion(uploadFiles);
+      const urls = await uploadFilesToVersion(nextFiles);
       await syncReferenceUrls([...(version.reference_image_urls || []), ...urls]);
       await loadVersionAssets();
+      await loadLocationLibraryAssets();
       toast.success('版本场景图已上传');
-      resetPreviewFiles(uploadFiles);
-      setUploadFiles([]);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '上传失败');
     } finally {
+      resetPreviewFiles(nextFiles);
+      setUploadFiles([]);
       setUploading(false);
     }
-  }, [loadVersionAssets, resetPreviewFiles, syncReferenceUrls, uploadFiles, uploadFilesToVersion, version]);
+  }, [loadLocationLibraryAssets, loadVersionAssets, resetPreviewFiles, syncReferenceUrls, uploadFilesToVersion, version, uploading]);
 
   const handlePromptGenerate = useCallback(async () => {
     if (!version || !prompt.trim()) {
@@ -2147,17 +2386,19 @@ function LocationVersionStudioDialog({
         aspect_ratio: aspectRatio,
         resolution,
         style_preset: stylePreset.trim() || undefined,
+        reference_image_urls: selectedReferenceUrls.length > 0 ? selectedReferenceUrls : undefined,
       });
       await waitForTask(task.id);
       await onRefresh();
       await loadVersionAssets();
-      toast.success('版本场景图生成完成');
+      await loadLocationLibraryAssets();
+      toast.success(selectedReferenceUrls.length > 0 ? '版本图生图完成' : '版本场景图生成完成');
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '生成失败');
     } finally {
       setGenerating(false);
     }
-  }, [aspectRatio, loadVersionAssets, locationId, negativePrompt, onRefresh, projectId, prompt, resolution, stylePreset, version, waitForTask]);
+  }, [aspectRatio, loadLocationLibraryAssets, loadVersionAssets, locationId, negativePrompt, onRefresh, projectId, prompt, resolution, selectedReferenceUrls, stylePreset, version, waitForTask]);
 
   const handleImageGenerate = useCallback(async () => {
     if (!version || !imgPrompt.trim()) {
@@ -2216,6 +2457,18 @@ function LocationVersionStudioDialog({
     waitForTask,
     loadVersionAssets,
   ]);
+
+  const handleAddLibraryImage = useCallback(async (url: string) => {
+    if (!version) return;
+    try {
+      await syncReferenceUrls([...(version.reference_image_urls || []), url]);
+      await loadVersionAssets();
+      await loadLocationLibraryAssets();
+      toast.success('已加入当前版本图库');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '加入图库失败');
+    }
+  }, [loadLocationLibraryAssets, loadVersionAssets, syncReferenceUrls, version]);
 
   const handleRemoveReferenceImage = useCallback(async (url: string) => {
     if (!version) return;
@@ -2278,207 +2531,187 @@ function LocationVersionStudioDialog({
         <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">生成与上传</CardTitle>
+              <CardTitle className="text-base">生成场景图</CardTitle>
             </CardHeader>
-            <CardContent>
-              <Tabs defaultValue="prompt" className="space-y-4">
-                <TabsList className="grid w-full grid-cols-3">
-                  <TabsTrigger value="prompt">提示词生图</TabsTrigger>
-                  <TabsTrigger value="upload">本地上传</TabsTrigger>
-                  <TabsTrigger value="img2img">图生图</TabsTrigger>
-                </TabsList>
-
-                <TabsContent value="prompt" className="space-y-4">
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">正向提示词</label>
-                    <Textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={5} />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">负向提示词</label>
-                    <Input value={negativePrompt} onChange={(event) => setNegativePrompt(event.target.value)} />
-                  </div>
-                  <div className="grid gap-4 md:grid-cols-3">
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium">画幅比例</label>
-                      <Select value={aspectRatio} onValueChange={setAspectRatio}>
-                        <SelectTrigger><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          {aspectRatios.map((item) => (
-                            <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium">分辨率</label>
-                      <Select value={resolution} onValueChange={setResolution}>
-                        <SelectTrigger><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          {resolutions.map((item) => (
-                            <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium">风格预设</label>
-                      <Input value={stylePreset} onChange={(event) => setStylePreset(event.target.value)} />
-                    </div>
-                  </div>
-                  <div className="flex justify-end">
-                    <Button onClick={handlePromptGenerate} disabled={generating || !prompt.trim()}>
-                      {generating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wand2 className="mr-2 h-4 w-4" />}
-                      生成版本场景图
-                    </Button>
-                  </div>
-                </TabsContent>
-
-                <TabsContent value="upload" className="space-y-4">
-                  <FileDropZone
-                    onSelect={(files) => addPendingFiles(files, 'upload')}
-                    disabled={uploading}
-                    title="上传版本场景图"
-                    description="支持 JPG、PNG、WebP、GIF，单张不超过 10MB"
-                  />
-                  {uploadFiles.length > 0 ? (
-                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                      {uploadFiles.map((item) => (
-                        <div key={item.id} className="rounded-xl border bg-secondary/20 p-2">
-                          <div className="relative overflow-hidden rounded-lg">
-                            <img src={item.preview} alt={item.file.name} className="aspect-video w-full object-cover" />
-                            <Button variant="secondary" size="icon" className="absolute right-2 top-2 h-7 w-7" onClick={() => removePendingFile(item.id, 'upload')}>
-                              <X className="h-4 w-4" />
-                            </Button>
-                          </div>
-                          <div className="mt-2 truncate text-xs text-muted-foreground">{item.file.name}</div>
-                        </div>
+            <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">正向提示词</label>
+                <Textarea
+                  value={prompt}
+                  onChange={(event) => setPrompt(event.target.value)}
+                  rows={5}
+                  placeholder="描述你想要的版本场景；如果右侧已选择参考图，会在这些参考图基础上继续生成。"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">负向提示词</label>
+                <Input value={negativePrompt} onChange={(event) => setNegativePrompt(event.target.value)} />
+              </div>
+              <div className="grid gap-4 md:grid-cols-3">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">画幅比例</label>
+                  <Select value={aspectRatio} onValueChange={setAspectRatio}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {aspectRatios.map((item) => (
+                        <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
                       ))}
-                    </div>
-                  ) : null}
-                  <div className="flex justify-end">
-                    <Button onClick={handleUpload} disabled={uploading || uploadFiles.length === 0}>
-                      {uploading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ImagePlus className="mr-2 h-4 w-4" />}
-                      保存到当前版本
-                    </Button>
-                  </div>
-                </TabsContent>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">分辨率</label>
+                  <Select value={resolution} onValueChange={setResolution}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {resolutions.map((item) => (
+                        <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">风格预设</label>
+                  <Input value={stylePreset} onChange={(event) => setStylePreset(event.target.value)} />
+                </div>
+              </div>
 
-                <TabsContent value="img2img" className="space-y-4">
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">图生图提示词</label>
-                    <Textarea value={imgPrompt} onChange={(event) => setImgPrompt(event.target.value)} rows={4} />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">负向提示词</label>
-                    <Input value={imgNegativePrompt} onChange={(event) => setImgNegativePrompt(event.target.value)} />
-                  </div>
-                  <div className="grid gap-4 md:grid-cols-3">
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium">画幅比例</label>
-                      <Select value={imgAspectRatio} onValueChange={setImgAspectRatio}>
-                        <SelectTrigger><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          {aspectRatios.map((item) => (
-                            <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium">分辨率</label>
-                      <Select value={imgResolution} onValueChange={setImgResolution}>
-                        <SelectTrigger><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          {resolutions.map((item) => (
-                            <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium">风格预设</label>
-                      <Input value={imgStylePreset} onChange={(event) => setImgStylePreset(event.target.value)} />
-                    </div>
-                  </div>
-
-                  <Separator />
-
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <div className="text-sm font-medium">选择已有版本参考图</div>
-                      <Badge variant="secondary">{selectedReferenceUrls.length}/5</Badge>
-                    </div>
-                    {selectedReferenceUrls.length > 0 ? (
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        {selectedReferenceUrls.map((url) => {
-                          return (
-                            <button
-                              key={url}
-                              type="button"
-                              onClick={() => toggleReferenceSelection(url)}
-                              className="overflow-hidden rounded-xl border border-primary ring-2 ring-primary/20 text-left transition"
-                            >
-                              <img src={url} alt="" className="aspect-video w-full object-cover" />
-                            </button>
-                          );
-                        })}
-                      </div>
-                    ) : version.reference_image_urls.length > 0 ? (
-                      <div className="rounded-xl border border-dashed p-6 text-sm text-muted-foreground">
-                        暂未选中参考图，请在右侧版本图库中点击“设为参考图”。
-                      </div>
-                    ) : (
-                      <div className="rounded-xl border border-dashed p-6 text-sm text-muted-foreground">
-                        当前版本还没有参考图，可先上传再进行图生图。
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="space-y-3">
+              {selectedReferenceUrls.length > 0 ? (
+                <div className="space-y-3 rounded-xl border border-primary/20 bg-primary/5 p-4">
+                  <div className="flex items-center justify-between">
                     <div>
-                      <div className="text-sm font-medium">补充新的参考图</div>
-                      <div className="text-xs text-muted-foreground">上传后会自动并入当前版本的场景图库。</div>
+                      <div className="text-sm font-medium">已选择参考图</div>
+                      <div className="text-xs text-muted-foreground">当前会按图生图模式生成，可在右侧点击取消选择。</div>
                     </div>
-                    <FileDropZone
-                      onSelect={(files) => addPendingFiles(files, 'img2img')}
-                      disabled={imgGenerating}
-                      title="添加参考图"
-                      description="支持上传 1-5 张图作为图生图参考"
-                    />
-                    {img2imgFiles.length > 0 ? (
-                      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                        {img2imgFiles.map((item) => (
-                          <div key={item.id} className="rounded-xl border bg-secondary/20 p-2">
-                            <div className="relative overflow-hidden rounded-lg">
-                              <img src={item.preview} alt={item.file.name} className="aspect-video w-full object-cover" />
-                              <Button variant="secondary" size="icon" className="absolute right-2 top-2 h-7 w-7" onClick={() => removePendingFile(item.id, 'img2img')}>
-                                <X className="h-4 w-4" />
-                              </Button>
-                            </div>
-                            <div className="mt-2 truncate text-xs text-muted-foreground">{item.file.name}</div>
+                    <Badge variant="secondary">{selectedReferenceUrls.length}/5</Badge>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {selectedReferenceUrls.map((url) => (
+                      <div key={url} className="overflow-hidden rounded-xl border border-primary ring-2 ring-primary/20">
+                        <button
+                          type="button"
+                          onClick={() => setPreviewUrl(url)}
+                          className="group relative block w-full overflow-hidden"
+                        >
+                          <img src={url} alt="" className="aspect-video w-full object-cover transition group-hover:scale-[1.01]" />
+                          <div className="absolute inset-x-0 bottom-0 flex items-center justify-end bg-gradient-to-t from-black/55 to-transparent p-3 opacity-0 transition group-hover:opacity-100">
+                            <span className="inline-flex items-center gap-1 rounded-full bg-white/90 px-2 py-1 text-xs font-medium text-foreground">
+                              <Eye className="h-3 w-3" />
+                              预览
+                            </span>
                           </div>
-                        ))}
+                        </button>
+                        <div className="flex justify-end p-2">
+                          <Button variant="ghost" size="sm" onClick={() => toggleReferenceSelection(url)}>
+                            取消选择
+                          </Button>
+                        </div>
                       </div>
-                    ) : null}
+                    ))}
                   </div>
+                </div>
+              ) : (
+                <div className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
+                  当前未选择参考图。你可以直接文生图，或者在右侧图库中点击“设为参考图”切换为图生图。
+                </div>
+              )}
 
-                  <div className="flex justify-end">
-                    <Button onClick={handleImageGenerate} disabled={imgGenerating || !imgPrompt.trim()}>
-                      {imgGenerating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}
-                      根据参考图生成
-                    </Button>
-                  </div>
-                </TabsContent>
-              </Tabs>
+              <div className="flex justify-end">
+                <Button onClick={handlePromptGenerate} disabled={generating || !prompt.trim()}>
+                  {generating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : selectedReferenceUrls.length > 0 ? <Sparkles className="mr-2 h-4 w-4" /> : <Wand2 className="mr-2 h-4 w-4" />}
+                  {selectedReferenceUrls.length > 0 ? '根据参考图生成版本场景图' : '生成版本场景图'}
+                </Button>
+              </div>
             </CardContent>
           </Card>
 
           <Card>
             <CardHeader>
               <CardTitle className="text-base">当前版本图库</CardTitle>
-              <CardDescription>每张图都只属于当前版本，可独立删除和复用。</CardDescription>
+              <CardDescription>这里展示当前版本图库，同时支持直接从项目素材库引用图片。</CardDescription>
             </CardHeader>
-            <CardContent>
+            <CardContent className="space-y-4">
+              <div className="space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-medium">上传到当前版本图库</div>
+                    <div className="text-xs text-muted-foreground">支持点击或拖拽上传，保存后会进入当前版本的素材图库。</div>
+                  </div>
+                  {uploading ? (
+                    <div className="inline-flex items-center gap-2 rounded-full bg-primary/10 px-3 py-1 text-xs font-medium text-primary">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      正在上传
+                    </div>
+                  ) : null}
+                  {false ? (
+                    <Button onClick={() => undefined} disabled={uploading || uploadFiles.length === 0}>
+                      {uploading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ImagePlus className="mr-2 h-4 w-4" />}
+                      保存到当前版本
+                    </Button>
+                  ) : null}
+                </div>
+                <FileDropZone
+                  onSelect={handleUpload}
+                  disabled={uploading}
+                  title="上传版本场景图"
+                  description="支持 JPG、PNG、WebP、GIF，单张不超过 10MB"
+                />
+                {uploadFiles.length > 0 ? (
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {uploadFiles.map((item) => (
+                      <div key={item.id} className="rounded-xl border bg-secondary/20 p-2">
+                        <div className="relative overflow-hidden rounded-lg">
+                          <img src={item.preview} alt={item.file.name} className="aspect-video w-full object-cover" />
+                          <Button variant="secondary" size="icon" className="hidden" onClick={() => removePendingFile(item.id, 'upload')}>
+                            <X className="h-4 w-4" />
+                          </Button>
+                        </div>
+                        <div className="mt-2 truncate text-xs text-muted-foreground">{item.file.name}</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="rounded-xl border bg-secondary/10 p-4">
+                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                  <div className="space-y-1">
+                    <div className="text-sm font-medium">引用素材库图片</div>
+                    <div className="text-xs text-muted-foreground">点击按钮后在弹窗中分页浏览素材库图片，选择后再加入当前版本图库。</div>
+                  </div>
+                  <Button variant="outline" onClick={() => setIsVersionAssetPickerOpen(true)}>
+                    <ImagePlus className="mr-2 h-4 w-4" />
+                    从素材库选择图片
+                  </Button>
+                </div>
+              </div>
+
+              <div className="hidden space-y-3 rounded-xl border bg-secondary/10 p-4">
+                <div>
+                  <div className="text-sm font-medium">引用素材库图片</div>
+                  <div className="text-xs text-muted-foreground">这里会列出当前场景主图库或其他版本的素材图，可直接加入当前版本。</div>
+                </div>
+                {reusableLibraryItems.length > 0 ? (
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {reusableLibraryItems.map((item) => (
+                      <div key={item.url} className="overflow-hidden rounded-xl border bg-card">
+                        <img src={item.url} alt="" className="aspect-video w-full object-cover" />
+                        <div className="flex items-center justify-between gap-2 p-3">
+                          <div className="text-xs text-muted-foreground">{item.sourceLabel}</div>
+                          <Button size="sm" variant="outline" onClick={() => handleAddLibraryImage(item.url)}>
+                            引用到当前图库
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="rounded-xl border border-dashed p-6 text-center text-sm text-muted-foreground">
+                    当前没有可引用的其他素材图，或者这些图片已经在当前版本中了。
+                  </div>
+                )}
+              </div>
+
               {versionImageItems.length === 0 ? (
                 <div className="rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">
                   当前版本还没有场景图。
@@ -2489,7 +2722,19 @@ function LocationVersionStudioDialog({
                     const url = item.url;
                     return (
                     <div key={url} className="overflow-hidden rounded-xl border bg-card">
-                      <img src={url} alt={`版本场景图 ${index + 1}`} className="aspect-video w-full object-cover" />
+                      <button
+                        type="button"
+                        onClick={() => setPreviewUrl(url)}
+                        className="group relative block w-full overflow-hidden"
+                      >
+                        <img src={url} alt={`版本场景图 ${index + 1}`} className="aspect-video w-full object-cover transition group-hover:scale-[1.01]" />
+                        <div className="absolute inset-x-0 bottom-0 flex items-center justify-end bg-gradient-to-t from-black/55 to-transparent p-3 opacity-0 transition group-hover:opacity-100">
+                          <span className="inline-flex items-center gap-1 rounded-full bg-white/90 px-2 py-1 text-xs font-medium text-foreground">
+                            <Eye className="h-3 w-3" />
+                            预览
+                          </span>
+                        </div>
+                      </button>
                       <div className="flex items-center justify-between gap-2 p-3">
                         <div className="text-xs text-muted-foreground">版本场景图 #{index + 1}</div>
                         <div className="flex items-center gap-2">
@@ -2512,6 +2757,21 @@ function LocationVersionStudioDialog({
               )}
             </CardContent>
           </Card>
+          <AssetLibraryPickerDialog
+            open={isVersionAssetPickerOpen}
+            onOpenChange={setIsVersionAssetPickerOpen}
+            projectId={projectId}
+            excludedUrls={versionImageItems.map((item) => item.url)}
+            onSelect={handleAddLibraryImage}
+            title={`选择素材库图片加入 ${version.label}`}
+            description="弹窗中按页浏览项目素材库图片，选择后会直接加入当前版本右侧图库。"
+            selectLabel="加入当前版本"
+          />
+          <FullscreenPreview
+            url={previewUrl}
+            open={!!previewUrl}
+            onOpenChange={() => setPreviewUrl(null)}
+          />
         </div>
       </DialogContent>
     </Dialog>

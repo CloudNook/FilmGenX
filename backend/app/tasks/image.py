@@ -100,6 +100,7 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
                 aspect_ratio = params.get("aspect_ratio", "16:9")
                 resolution = params.get("resolution", "1K")
                 style_preset = params.get("style_preset")
+                character_image_kind = params.get("character_image_kind")
                 reference_image_urls = params.get("reference_image_urls") or []
                 save_to_library = params.get("save_to_shot", True)
 
@@ -138,7 +139,7 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
                     )
 
                 logger.info(
-                    "Start image generation task=%s project=%s shot=%s location=%s location_version=%s character=%s character_version=%s refs=%s",
+                    "Start image generation task=%s project=%s shot=%s location=%s location_version=%s character=%s character_version=%s image_kind=%s refs=%s",
                     task_db_id,
                     project_id,
                     shot_id,
@@ -146,6 +147,7 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
                     location_version_id,
                     character_id,
                     character_version_id,
+                    character_image_kind,
                     len(reference_image_urls),
                 )
 
@@ -225,6 +227,8 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
                         tags = [character.char_code, "image", "generated", "character"]
                         if character_version:
                             tags.append(character_version.version_code)
+                        if character_image_kind:
+                            tags.append(character_image_kind)
                     elif location:
                         tags = [location.loc_code, "image", "generated", "location"]
                         if location_version:
@@ -278,13 +282,19 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
 
                     # Update character version with generated image
                     if character_version:
-                        reference_urls = list(character_version.reference_image_urls or [])
-                        if image_url not in reference_urls:
-                            reference_urls.append(image_url)
+                        if character_image_kind == "three_view":
                             await character_version_repo.update(
                                 character_version,
-                                {"reference_image_urls": reference_urls},
+                                {"three_view_url": image_url},
                             )
+                        else:
+                            reference_urls = list(character_version.reference_image_urls or [])
+                            if image_url not in reference_urls:
+                                reference_urls.append(image_url)
+                                await character_version_repo.update(
+                                    character_version,
+                                    {"reference_image_urls": reference_urls},
+                                )
                     elif character:
                         # If no version specified, update the character's default reference images
                         pass  # Character doesn't have direct reference_image_urls, only versions do
