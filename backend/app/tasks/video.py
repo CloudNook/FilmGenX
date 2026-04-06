@@ -419,21 +419,31 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
                 if has_ref_images or group_image_start:
                     # 图生视频模式：优先使用 group 首帧图 + 参考图
                     # 使用 build_i2v_prompt 为每个镜头构建精简提示词
-                    from app.prompts import build_i2v_prompt
+                    # 统一收集所有参考图 URL（来自 group_refs 或 shot-level refs），避免索引错位
+                    from app.prompts import build_i2v_prompt, build_image_ref_header
+                    # 统一参考图列表：组级优先，shot 级补充去重。
+                    # 保证 ref_header 和每个 i2v_prompt 使用一致的索引序列。
+                    unified_refs: list[dict] = []
+                    for ref in (group_refs or []):
+                        for url in (ref.get("urls") or []):
+                            unified_refs.append({"name": ref.get("label", "参考图"), "url": url})
+                    seen_urls = {r["url"] for r in unified_refs}
+                    for shot in member_shots:
+                        char_refs_s: list[dict] = getattr(shot, "char_image_refs", None) or []
+                        loc_refs_s: list[dict] = getattr(shot, "location_image_refs", None) or []
+                        for ref in char_refs_s + loc_refs_s:
+                            for url in (ref.get("urls") or []):
+                                if url not in seen_urls:
+                                    unified_refs.append({"name": ref.get("name", "参考图"), "url": url})
+                                    seen_urls.add(url)
+
+                    ref_header = build_image_ref_header(unified_refs, None, None) if unified_refs else ""
+
                     i2v_multi_prompts = []
                     for i, (shot, normalized_duration) in enumerate(zip(member_shots, shot_durations, strict=False)):
-                        # 为每个镜头收集其专属的参考图
-                        char_refs: list[dict] = getattr(shot, "char_image_refs", None) or []
-                        loc_refs: list[dict] = getattr(shot, "location_image_refs", None) or []
-                        shot_refs = char_refs + loc_refs
-                        # 优先用组级参考图，没有则用 shot-level
-                        shot_ref_urls = [url for ref in group_refs for url in (ref.get("urls") or [])]
-                        if not shot_ref_urls:
-                            shot_ref_urls = [url for ref in shot_refs for url in (ref.get("urls") or [])]
-                        shot_header = build_shot_image_ref_header(shot) if shot_ref_urls else ""
-                        i2v_prompt_text = build_i2v_prompt(shot, shot_refs)
-                        if shot_header:
-                            i2v_prompt_text = shot_header + i2v_prompt_text
+                        i2v_prompt_text = build_i2v_prompt(shot, unified_refs if unified_refs else None)
+                        if ref_header:
+                            i2v_prompt_text = ref_header + i2v_prompt_text
                         if len(i2v_prompt_text) > 512:
                             i2v_prompt_text = i2v_prompt_text[:512]
                         i2v_multi_prompts.append(MultiShotPrompt(

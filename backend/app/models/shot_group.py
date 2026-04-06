@@ -55,6 +55,17 @@ class ShotGroup(Base):
         comment="Phase 2 Creator AI 对应的 Celery 任务ID（预留）"
     )
 
+    # 组间连续性
+    prev_shot_group_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("shot_groups.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+        comment="前一分镜组 ID，用于组间画面连续性"
+    )
+    end_frame_description: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True,
+        comment="Phase 3 导演输出的本组终态描述（中文），供下一组生成时参考"
+    )
+
     # 关联的参考图片（用于 image-to-video 生成）
     image_references: Mapped[list] = mapped_column(
         JSON, nullable=False, default=list,
@@ -69,4 +80,7 @@ class ShotGroup(Base):
     storyboard: Mapped["Storyboard"] = relationship("Storyboard", back_populates="shot_groups")
     shots: Mapped[List["Shot"]] = relationship(
         "Shot", back_populates="shot_group", order_by="Shot.sequence"
+    )
+    prev_group: Mapped[Optional["ShotGroup"]] = relationship(
+        "ShotGroup", remote_side="ShotGroup.id", backref="next_group"
     )

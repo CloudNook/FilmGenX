@@ -4,7 +4,7 @@
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.base import BaseResponse
 
@@ -184,3 +184,16 @@ class ShotResponse(BaseResponse):
     video_url: Optional[str] = None
     char_image_refs: list = Field(default_factory=list, description="镜头关联的角色参考图")
     location_image_refs: list = Field(default_factory=list, description="镜头关联的场景参考图")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_characters_config(cls, data):
+        """Normalize characters_config: wrap single dicts in a list (fixes legacy DB entries)."""
+        if hasattr(data, "__dict__"):
+            # SQLAlchemy model instance — convert to dict
+            data = {k: v for k, v in data.__dict__.items() if not k.startswith("_")}
+        if isinstance(data, dict):
+            cc = data.get("characters_config")
+            if cc is not None and isinstance(cc, dict):
+                data["characters_config"] = [cc]
+        return data

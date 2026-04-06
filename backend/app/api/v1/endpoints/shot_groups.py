@@ -4,16 +4,20 @@
 路由前缀：/api/v1/storyboards/{storyboard_id}/groups
 """
 
-from typing import List
+from typing import List, Optional
+from pydantic import BaseModel, Field
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user_id, get_db
+from app.repositories.scene import SceneRepository
 from app.repositories.shot_group import ShotGroupRepository
 from app.repositories.shot import ShotRepository
 from app.repositories.storyboard import StoryboardRepository
+from app.repositories.task import TaskRepository
 from app.schemas.shot_group import ShotGroupCreate, ShotGroupResponse, ShotGroupUpdate
+from app.schemas.task import TaskResponse
 
 router = APIRouter()
 
@@ -59,6 +63,8 @@ def _build_group_response(group, member_shots=None):
         "plan_intent": getattr(group, 'plan_intent', None),
         "image_references": getattr(group, 'image_references', []) or [],
         "image_start_url": getattr(group, 'image_start_url', None),
+        "prev_shot_group_id": getattr(group, 'prev_shot_group_id', None),
+        "end_frame_description": getattr(group, 'end_frame_description', None),
         "created_at": group.created_at,
         "updated_at": group.updated_at,
         "shots": [
@@ -216,3 +222,176 @@ async def delete_group(
 
     await group_repo.soft_delete(group)
     await db.commit()
+
+
+class FrameGenerationRequest(BaseModel):
+    """分镜组首帧图生成请求体。
+
+    用户在分镜组页面选择基础图（角色图/场景图），结合 Phase 1 输出的
+    image_prompt_for_generation 生成首帧参考图，写入 ShotGroup.image_start_url。
+    """
+    prompt: Optional[str] = Field(
+        None,
+        description="图生图提示词（可覆盖 plan_data 中的默认值）",
+    )
+    negative_prompt: Optional[str] = Field(
+        None,
+        max_length=1000,
+        description="负向提示词",
+    )
+    aspect_ratio: str = Field(
+        "16:9",
+        pattern="^(1:1|16:9|9:16|4:3|3:4)$",
+        description="画幅比例",
+    )
+    resolution: str = Field(
+        "1K",
+        pattern="^(512|1K|2K|4K)$",
+        description="分辨率：512 / 1K / 2K / 4K",
+    )
+    style_preset: Optional[str] = Field(None, max_length=100, description="风格预设")
+    reference_image_urls: Optional[List[str]] = Field(
+        None,
+        max_length=5,
+        description="基础参考图 URL 列表（来自角色库/场景库），最多 5 张",
+    )
+
+
+class FramePlanResponse(BaseModel):
+    """单个分镜组首帧图方案。"""
+    group_code: str
+    image_prompt: str
+    negative_prompt: Optional[str] = None
+    style_preset: str = "intense"
+    generation_priority: int = 1
+    frame_description: Optional[str] = None
+    key_elements: list[str] = []
+    camera_notes: Optional[str] = None
+    lighting_notes: Optional[str] = None
+
+
+@router.get(
+    "/{group_id}/frame-plan",
+    response_model=Optional[FramePlanResponse],
+    summary="获取分镜组首帧图方案",
+)
+async def get_group_frame_plan(
+    storyboard_id: int,
+    group_id: int,
+    db: AsyncSession = Depends(get_db),
+    user_id: int = Depends(get_current_user_id),
+):
+    """从 Storyboard.plan_data 中获取指定分镜组的首帧图生成方案。
+
+    返回 image_prompt_for_generation（英文图生图提示词）及其他元数据，
+    供前端在生成页面展示和用户选择基础图后触发图生图。
+    """
+    storyboard = await _require_storyboard(storyboard_id, db)
+    group_repo = ShotGroupRepository(db)
+
+    group = await group_repo.get_by_id_and_storyboard(group_id, storyboard_id)
+    if not group:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="分镜组不存在")
+
+    plan_data = storyboard.plan_data or {}
+    frame_plans = plan_data.get("shot_group_frame_plans", [])
+    frame_plan = next((fp for fp in frame_plans if fp.get("group_code") == group.group_code), None)
+
+    if not frame_plan:
+        return None
+
+    # 提取 frame_plan.frame_plan 子对象的字段
+    inner = frame_plan.get("frame_plan") or {}
+    return FramePlanResponse(
+        group_code=frame_plan.get("group_code", group.group_code),
+        image_prompt=frame_plan.get("image_prompt_for_generation", ""),
+        negative_prompt=frame_plan.get("negative_prompt"),
+        style_preset=frame_plan.get("style_preset", "intense"),
+        generation_priority=frame_plan.get("generation_priority", 1),
+        frame_description=inner.get("image_start_description"),
+        key_elements=inner.get("key_elements", []),
+        camera_notes=inner.get("camera_for_frame"),
+        lighting_notes=inner.get("lighting_for_frame"),
+    )
+
+
+@router.post("/{group_id}/generate-frame", response_model=TaskResponse, status_code=status.HTTP_202_ACCEPTED, summary="生成分镜组首帧参考图")
+async def generate_group_frame(
+    storyboard_id: int,
+    group_id: int,
+    body: FrameGenerationRequest,
+    db: AsyncSession = Depends(get_db),
+    user_id: int = Depends(get_current_user_id),
+):
+    """生成分镜组首帧参考图。
+
+    流程：
+    1. 根据 group_id 找到分镜组，从 Storyboard.plan_data 中取对应的 frame_plan
+    2. 用用户选择的 base reference images + frame_plan 的 prompt 生成图片
+    3. 图片 URL 写入 ShotGroup.image_start_url
+    4. 图片资产写入第一个分镜的素材库
+    """
+    storyboard = await _require_storyboard(storyboard_id, db)
+    group_repo = ShotGroupRepository(db)
+
+    group = await group_repo.get_by_id_and_storyboard(group_id, storyboard_id)
+    if not group:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="分镜组不存在")
+
+    # 从 plan_data 取出 frame_plan
+    plan_data = storyboard.plan_data or {}
+    frame_plans = plan_data.get("shot_group_frame_plans", [])
+    frame_plan = next((fp for fp in frame_plans if fp.get("group_code") == group.group_code), None)
+
+    if not frame_plan:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"分镜组 {group.group_code} 在 plan_data 中无首帧图方案",
+        )
+
+    # 取 prompt（用户可覆盖）
+    prompt = body.prompt or frame_plan.get("image_prompt_for_generation", "")
+    if not prompt:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="无可用图生图提示词，请传入 prompt 参数",
+        )
+
+    # 取组内第一个分镜（用于保存素材）
+    shot_repo = ShotRepository(db)
+    group_shots = await shot_repo.get_by_shot_group(group.id)
+    first_shot = min(group_shots, key=lambda s: s.sequence) if group_shots else None
+
+    # 从 scene 获取 project_id
+    scene = await SceneRepository(db).get(storyboard.scene_id)
+    project_id = scene.project_id if scene else None
+
+    task_repo = TaskRepository(db)
+
+    input_params = {
+        "project_id": project_id,
+        "shot_id": first_shot.id if first_shot else None,
+        "prompt": prompt,
+        "negative_prompt": body.negative_prompt or frame_plan.get("negative_prompt"),
+        "style_preset": body.style_preset or frame_plan.get("style_preset", "intense"),
+        "aspect_ratio": body.aspect_ratio,
+        "resolution": body.resolution,
+        "reference_image_urls": body.reference_image_urls or [],
+        "save_to_shot": True,
+        "shot_group_id": group.id,
+    }
+
+    gen_task = await task_repo.create(
+        task_type="image_generation",
+        input_params=input_params,
+    )
+    await db.commit()
+    await db.refresh(gen_task)
+
+    # 异步提交（不等待结果）
+    from app.tasks.image import generate_image_task  # noqa: PLC0415 — Celery task import deferred to avoid circular import
+    celery_result = generate_image_task.delay(gen_task.id)
+    await task_repo.update(gen_task, {"celery_task_id": celery_result.id})
+    await db.commit()
+
+    return gen_task

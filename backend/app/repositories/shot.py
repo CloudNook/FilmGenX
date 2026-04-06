@@ -37,6 +37,16 @@ class ShotRepository(BaseRepository[Shot]):
         )
         return result.scalar_one_or_none()
 
+    async def get_by_shot_group(self, shot_group_id: int) -> List[Shot]:
+        """获取指定分镜组的所有镜头，按 sequence 排序。"""
+        result = await self.session.execute(
+            select(Shot).where(
+                Shot.shot_group_id == shot_group_id,
+                Shot.is_deleted.is_(False),
+            ).order_by(Shot.sequence.asc())
+        )
+        return list(result.scalars().all())
+
     async def get_by_id_and_storyboard(self, id: int, storyboard_id: int) -> Optional[Shot]:
         """按 ID + 分镜脚本ID 查询，防止越权访问。"""
         result = await self.session.execute(

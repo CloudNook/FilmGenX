@@ -58,6 +58,7 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
     from app.repositories.character import CharacterRepository, CharacterVersionRepository
     from app.repositories.location import LocationRepository, LocationVersionRepository
     from app.repositories.shot import ShotRepository
+    from app.repositories.shot_group import ShotGroupRepository
     from app.repositories.task import TaskRepository
     from app.utils.image_gen import image_gen_client
     from app.utils.oss import oss_client
@@ -219,6 +220,7 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
                 logger.info("Generated image uploaded to %s", image_url)
 
                 asset_id = None
+                shot_group_id = params.get("shot_group_id")
                 if save_to_library and project_id:
                     tags = ["image", "generated", "global"]
                     if shot:
@@ -312,6 +314,13 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
                         if image_url not in reference_urls:
                             reference_urls.append(image_url)
                             await location_repo.update(location, {"reference_image_urls": reference_urls})
+
+                # 将生成的图片写入 ShotGroup.image_start_url（首帧参考图）
+                if shot_group_id:
+                    shot_group_repo = ShotGroupRepository(session)
+                    shot_group = await shot_group_repo.get(shot_group_id)
+                    if shot_group:
+                        await shot_group_repo.update(shot_group, {"image_start_url": image_url})
 
                 await task_repo.update(
                     gen_task,

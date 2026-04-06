@@ -5,7 +5,9 @@
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Any
 
 from app.api.deps import get_current_user_id, get_db
 from app.repositories.scene import SceneRepository
@@ -13,6 +15,14 @@ from app.repositories.storyboard import StoryboardRepository
 from app.schemas.storyboard import StoryboardCreate, StoryboardResponse, StoryboardUpdate
 
 router = APIRouter()
+
+
+class VisualPromptsResponse(BaseModel):
+    """图生图视觉提示词响应。"""
+    character_image_prompts: list[dict[str, Any]] = []
+    scene_image_prompts: list[dict[str, Any]] = []
+    shot_group_frame_plans: list[dict[str, Any]] = []
+    visual_style_guide: dict[str, Any] = {}
 
 
 async def _require_scene(scene_id: int, user_id: int, db: AsyncSession):
@@ -88,3 +98,28 @@ async def update_storyboard(
     sb = await repo.update(sb, data)
     await db.commit()
     return sb
+
+
+@router.get("/visual-prompts", response_model=VisualPromptsResponse, summary="获取图生图视觉提示词")
+async def get_visual_prompts(
+    scene_id: int,
+    db: AsyncSession = Depends(get_db),
+    user_id: int = Depends(get_current_user_id),
+):
+    """获取分镜脚本的四层视觉提示词（角色图、场景图、分镜组首帧图、全局风格）。
+
+    从 Storyboard.plan_data 中提取，供前端在角色/场景/分镜组页面
+    人工选择基础图后触发图生图。
+    """
+    await _require_scene(scene_id, user_id, db)
+    sb = await StoryboardRepository(db).get_by_scene(scene_id)
+    if not sb:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="分镜脚本不存在")
+
+    plan_data = sb.plan_data or {}
+    return VisualPromptsResponse(
+        character_image_prompts=plan_data.get("character_image_prompts", []),
+        scene_image_prompts=plan_data.get("scene_image_prompts", []),
+        shot_group_frame_plans=plan_data.get("shot_group_frame_plans", []),
+        visual_style_guide=plan_data.get("visual_style_guide", {}),
+    )

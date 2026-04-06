@@ -26,6 +26,9 @@ class ShotGroupUpdate(BaseModel):
         description="参考图列表：[{char_version_id, location_id, url, label}]",
     )
     image_start_url: Optional[str] = Field(None, description="视频首帧图片URL")
+    end_frame_description: Optional[str] = Field(
+        None, description="Phase 3 导演输出的本组终态描述（中文），供下一组参考"
+    )
 
 
 class ShotGroupResponse(BaseResponse):
@@ -43,3 +46,5 @@ class ShotGroupResponse(BaseResponse):
         default_factory=list, description="参考图列表：[{char_version_id, location_id, url, label}]"
     )
     image_start_url: Optional[str] = Field(None, description="视频首帧图片URL")
+    prev_shot_group_id: Optional[int] = Field(None, description="前一分镜组 ID")
+    end_frame_description: Optional[str] = Field(None, description="本组终态描述，供下一组参考")

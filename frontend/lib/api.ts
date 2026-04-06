@@ -772,6 +772,13 @@ export const charactersApi = {
 // Storyboards API
 // ---------------------------------------------------------------------------
 
+export interface VisualPromptsResponse {
+  character_image_prompts: Record<string, unknown>[];
+  scene_image_prompts: Record<string, unknown>[];
+  shot_group_frame_plans: Record<string, unknown>[];
+  visual_style_guide: Record<string, unknown>;
+}
+
 export interface StoryboardResponse {
   id: number;
   scene_id: number;
@@ -803,6 +810,12 @@ export const storyboardsApi = {
     return request<StoryboardResponse>(`/scenes/${sceneId}/storyboard`, {
       method: 'PATCH',
       body: data,
+    });
+  },
+
+  getVisualPrompts(sceneId: number) {
+    return request<VisualPromptsResponse>(`/scenes/${sceneId}/storyboard/visual-prompts`, {
+      method: 'GET',
     });
   },
 };
@@ -923,6 +936,18 @@ export interface LocationImageRef {
   urls: string[];
 }
 
+export interface FramePlanResponse {
+  group_code: string;
+  image_prompt: string;
+  negative_prompt?: string;
+  style_preset: string;
+  generation_priority: number;
+  frame_description?: string;
+  key_elements: string[];
+  camera_notes?: string;
+  lighting_notes?: string;
+}
+
 export interface ShotGroupResponse {
   id: number;
   storyboard_id: number;
@@ -936,6 +961,8 @@ export interface ShotGroupResponse {
   shots: ShotGroupMember[] | null;
   image_references: ImageRef[];
   image_start_url: string | null;
+  prev_shot_group_id: number | null;
+  end_frame_description: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -962,10 +989,35 @@ export const shotGroupsApi = {
     );
   },
 
-  update(storyboardId: number, groupId: number, data: { name?: string; shot_ids?: number[]; status?: string; image_references?: ImageRef[]; image_start_url?: string | null }) {
+  update(storyboardId: number, groupId: number, data: { name?: string; shot_ids?: number[]; status?: string; image_references?: ImageRef[]; image_start_url?: string | null; end_frame_description?: string; prev_shot_group_id?: number | null }) {
     return request<ShotGroupResponse>(
       `/storyboards/${storyboardId}/groups/${groupId}`,
       { method: 'PATCH', body: data },
+    );
+  },
+
+  getFramePlan(storyboardId: number, groupId: number) {
+    return request<FramePlanResponse | null>(
+      `/storyboards/${storyboardId}/groups/${groupId}/frame-plan`,
+      { method: 'GET' },
+    );
+  },
+
+  generateFrame(
+    storyboardId: number,
+    groupId: number,
+    body: {
+      prompt?: string;
+      negative_prompt?: string;
+      aspect_ratio?: string;
+      resolution?: string;
+      style_preset?: string;
+      reference_image_urls?: string[];
+    },
+  ) {
+    return request<TaskResponse>(
+      `/storyboards/${storyboardId}/groups/${groupId}/generate-frame`,
+      { method: 'POST', body },
     );
   },
 

@@ -74,6 +74,7 @@ import {
   Group,
 } from 'lucide-react';
 import { ImagePickerDialog } from '@/components/shots/ImagePickerDialog';
+import { FrameGenerationDialog } from '@/components/shots/FrameGenerationDialog';
 
 const shotStatusColors: Record<string, string> = {
   draft: 'bg-muted text-muted-foreground',
@@ -103,6 +104,7 @@ export default function StoryboardPage({
   const [selectedGroup, setSelectedGroup] = useState<ShotGroupResponse | null>(null);
   const [generatingGroupVideo, setGeneratingGroupVideo] = useState(false);
   const [imagePickerOpen, setImagePickerOpen] = useState(false);
+  const [frameGenOpen, setFrameGenOpen] = useState(false);
 
   // Loading state
   const [loadingProject, setLoadingProject] = useState(true);
@@ -1058,6 +1060,15 @@ export default function StoryboardPage({
                       <Button
                         variant="outline"
                         size="sm"
+                        className="h-7 border-border text-primary hover:bg-primary/10"
+                        onClick={() => setFrameGenOpen(true)}
+                      >
+                        <Wand2 className="h-3.5 w-3.5 mr-1" />
+                        首帧图
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
                         className="h-7 border-primary/50 text-primary hover:bg-primary/10"
                         onClick={handleGenerateGroupVideo}
                         disabled={isAnyGenerating}
@@ -1196,6 +1207,24 @@ export default function StoryboardPage({
           </div>
         </ResizablePanel>
       </ResizablePanelGroup>
+
+      {/* Frame Generation Dialog */}
+      {activeGroup && (
+        <FrameGenerationDialog
+          open={frameGenOpen}
+          onOpenChange={setFrameGenOpen}
+          storyboardId={storyboard?.id ?? 0}
+          groupId={activeGroup.id}
+          groupCode={activeGroup.group_code}
+          projectId={projectIdNum}
+          existingImageStartUrl={activeGroup.image_start_url}
+          existingRefs={activeGroup.image_references}
+          onGroupUpdated={(group) => {
+            setShotGroups((prev) => prev.map((g) => (g.id === group.id ? group : g)));
+            setSelectedGroup((prev) => (prev?.id === group.id ? group : prev));
+          }}
+        />
+      )}
 
       {/* Image Picker Dialog for Shot */}
       <ImagePickerDialog
