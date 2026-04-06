@@ -4,7 +4,7 @@
 
 from typing import List, Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -30,6 +30,67 @@ class CharacterRepository(BaseRepository[Character]):
             page=page,
             page_size=page_size,
         )
+
+    async def get_recent_by_project(self, project_id: int, *, limit: int = 5) -> List[Character]:
+        """获取项目下最近更新的角色。"""
+        result = await self.session.execute(
+            select(Character)
+            .where(
+                Character.project_id == project_id,
+                Character.is_deleted.is_(False),
+            )
+            .order_by(Character.updated_at.desc(), Character.id.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def get_dashboard_stats(self, project_id: int) -> tuple[int, int, int]:
+        """获取角色总览统计。"""
+        total_characters = (
+            await self.session.execute(
+                select(func.count(Character.id)).where(
+                    Character.project_id == project_id,
+                    Character.is_deleted.is_(False),
+                )
+            )
+        ).scalar_one()
+
+        total_versions = (
+            await self.session.execute(
+                select(func.count(CharacterVersion.id))
+                .select_from(CharacterVersion)
+                .join(Character, Character.id == CharacterVersion.character_id)
+                .where(
+                    Character.project_id == project_id,
+                    Character.is_deleted.is_(False),
+                    CharacterVersion.is_deleted.is_(False),
+                )
+            )
+        ).scalar_one()
+
+        image_rows = (
+            await self.session.execute(
+                select(
+                    CharacterVersion.reference_image_urls,
+                    CharacterVersion.three_view_url,
+                )
+                .select_from(CharacterVersion)
+                .join(Character, Character.id == CharacterVersion.character_id)
+                .where(
+                    Character.project_id == project_id,
+                    Character.is_deleted.is_(False),
+                    CharacterVersion.is_deleted.is_(False),
+                )
+            )
+        ).all()
+
+        total_images = 0
+        for reference_urls, three_view_url in image_rows:
+            total_images += len(reference_urls or [])
+            if three_view_url:
+                total_images += 1
+
+        return total_characters, total_versions, total_images
 
     async def get_by_code(self, char_code: str, *, include_deleted: bool = False) -> Optional[Character]:
         """按业务ID查询。include_deleted=True 时也查软删除记录（用于唯一性校验）。"""

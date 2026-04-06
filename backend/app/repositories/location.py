@@ -35,6 +35,69 @@ class LocationRepository(BaseRepository[Location]):
             page_size=page_size,
         )
 
+    async def get_recent_by_project(self, project_id: int, *, limit: int = 5) -> List[Location]:
+        """获取项目下最近更新的场景。"""
+        result = await self.session.execute(
+            select(Location)
+            .where(
+                Location.project_id == project_id,
+                Location.is_deleted.is_(False),
+            )
+            .order_by(Location.updated_at.desc(), Location.id.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def get_dashboard_stats(self, project_id: int) -> tuple[int, int, int]:
+        """获取场景总览统计。"""
+        total_locations = (
+            await self.session.execute(
+                select(func.count(Location.id)).where(
+                    Location.project_id == project_id,
+                    Location.is_deleted.is_(False),
+                )
+            )
+        ).scalar_one()
+
+        total_versions = (
+            await self.session.execute(
+                select(func.count(LocationVersion.id))
+                .select_from(LocationVersion)
+                .join(Location, Location.id == LocationVersion.location_id)
+                .where(
+                    Location.project_id == project_id,
+                    Location.is_deleted.is_(False),
+                    LocationVersion.is_deleted.is_(False),
+                )
+            )
+        ).scalar_one()
+
+        base_image_rows = (
+            await self.session.execute(
+                select(Location.reference_image_urls).where(
+                    Location.project_id == project_id,
+                    Location.is_deleted.is_(False),
+                )
+            )
+        ).all()
+        version_image_rows = (
+            await self.session.execute(
+                select(LocationVersion.reference_image_urls)
+                .select_from(LocationVersion)
+                .join(Location, Location.id == LocationVersion.location_id)
+                .where(
+                    Location.project_id == project_id,
+                    Location.is_deleted.is_(False),
+                    LocationVersion.is_deleted.is_(False),
+                )
+            )
+        ).all()
+
+        total_images = sum(len(row[0] or []) for row in base_image_rows)
+        total_images += sum(len(row[0] or []) for row in version_image_rows)
+
+        return total_locations, total_versions, total_images
+
     async def get_by_code(self, loc_code: str, *, include_deleted: bool = False) -> Optional[Location]:
         """按业务ID查询。"""
         filters = [Location.loc_code == loc_code]

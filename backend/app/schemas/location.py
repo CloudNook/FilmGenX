@@ -202,6 +202,18 @@ class LocationDetailResponse(LocationResponse):
     version_count: int = 0
 
 
+class LocationDashboardResponse(BaseModel):
+    """场景总览响应。"""
+
+    total_locations: int = Field(..., description="场景总数")
+    total_versions: int = Field(..., description="场景版本总数")
+    total_images: int = Field(..., description="场景图片总数")
+    recent_locations: List[LocationResponse] = Field(
+        default_factory=list,
+        description="最近更新的场景列表",
+    )
+
+
 # 更新 forward references
 LocationResponse.model_rebuild()
 LocationWithVersionsResponse.model_rebuild()

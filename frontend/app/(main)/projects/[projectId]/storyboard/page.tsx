@@ -17,7 +17,6 @@ import {
   type StoryboardResponse,
   type ShotResponse,
   type ShotGroupResponse,
-  type CharacterResponse,
   type LocationResponse,
   type ImageRef,
   type CharImageRef,
@@ -67,7 +66,6 @@ import {
   Eye,
   Edit,
   Check,
-  X,
   ChevronLeft,
   ChevronRight,
   GripVertical,
@@ -1183,7 +1181,6 @@ export default function StoryboardPage({
                 shot={selectedShot}
                 projectId={projectIdNum}
                 storyboardId={storyboard?.id}
-                activeGroup={activeGroup}
                 onOpenImagePicker={() => setImagePickerOpen(true)}
                 onSave={handleUpdateShot}
                 onDelete={handleDeleteShot}
@@ -1243,7 +1240,6 @@ function ShotDetailPanel({
   shot,
   projectId,
   storyboardId,
-  activeGroup,
   onOpenImagePicker,
   onSave,
   onDelete,
@@ -1251,7 +1247,6 @@ function ShotDetailPanel({
   shot: ShotResponse;
   projectId: number;
   storyboardId?: number;
-  activeGroup?: ShotGroupResponse | null;
   onOpenImagePicker?: () => void;
   onSave: (shotId: number, data: Record<string, unknown>) => Promise<void>;
   onDelete: (shotId: number) => Promise<void>;
@@ -1262,7 +1257,6 @@ function ShotDetailPanel({
   const [saving, setSaving] = useState(false);
 
   // Character & location data for pickers
-  const [characters, setCharacters] = useState<CharacterResponse[]>([]);
   const [locations, setLocations] = useState<LocationResponse[]>([]);
   const [loadingChars, setLoadingChars] = useState(false);
   const [loadingLocs, setLoadingLocs] = useState(false);
@@ -1317,7 +1311,6 @@ function ShotDetailPanel({
     if (!projectId) return;
     setLoadingChars(true);
     charactersApi.list(projectId, 1, 100).then(async (page) => {
-      setCharacters(page.items);
       // Fetch details for each character to get versions
       const versionMap: Record<number, CharVersionInfo> = {};
       await Promise.allSettled(
@@ -1349,30 +1342,6 @@ function ShotDetailPanel({
       // ignore errors silently
     }).finally(() => setLoadingLocs(false));
   }, [projectId]);
-
-  // Add a character version to the shot
-  const handleAddCharacter = (charVersionId: number, charName: string, versionLabel: string) => {
-    const currentIds = (form.char_version_ids as number[]) || [];
-    if (currentIds.includes(charVersionId)) return; // already added
-
-    const newIds = [...currentIds, charVersionId];
-    const newConfig = [
-      ...((form.characters_config as Array<Record<string, unknown>>) || []),
-      { char_version_id: charVersionId, action: '', expression: '' },
-    ];
-    updateField('char_version_ids', newIds);
-    updateField('characters_config', newConfig);
-  };
-
-  // Remove a character version from the shot
-  const handleRemoveCharacter = (charVersionId: number) => {
-    const newIds = ((form.char_version_ids as number[]) || []).filter((id) => id !== charVersionId);
-    const newConfig = ((form.characters_config as Array<Record<string, unknown>>) || []).filter(
-      (c) => c.char_version_id !== charVersionId,
-    );
-    updateField('char_version_ids', newIds);
-    updateField('characters_config', newConfig);
-  };
 
   // Change location
   const handleLocationChange = async (locationId: number | null) => {
@@ -1435,8 +1404,14 @@ function ShotDetailPanel({
   const composition = (form.composition as Record<string, string>) || {};
   const environment = (form.environment as Record<string, string>) || {};
   const charactersConfig = (form.characters_config as Array<Record<string, string>>) || [];
+  const charVersionIds = (form.char_version_ids as number[]) || [];
   const soundDesign = (form.sound_design as Record<string, string | string[]>) || {};
   const dialogueDelivery = (form.dialogue_delivery as Record<string, string>) || {};
+  const shotCharImageRefs = (shot.char_image_refs || []).map((ref) => ({
+    ...ref,
+    name: ref.name || charVersionMap[ref.char_version_id]?.charName || `角色版本 #${ref.char_version_id}`,
+  }));
+  const shotLocationImageRefs = shot.location_image_refs || [];
 
   return (
     <ScrollArea className="flex-1 min-h-0">
@@ -1587,95 +1562,44 @@ function ShotDetailPanel({
 
         <Separator />
 
-        {/* Characters Config */}
+        {/* Characters */}
         <div className="space-y-3">
           <div className="flex items-center justify-between">
-            <h3 className="text-sm font-medium text-foreground">角色关联</h3>
-            {loadingChars ? (
+            <h3 className="text-sm font-medium text-foreground">镜头角色</h3>
+            {loadingChars && (
               <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-            ) : (
-              <Select
-                onValueChange={(val) => {
-                  const [charId, versionId] = val.split(':');
-                  handleAddCharacter(Number(versionId), '', '');
-                }}
-              >
-                <SelectTrigger className="h-7 text-xs w-auto min-w-[80px]">
-                  <Plus className="h-3 w-3 mr-1" />
-                  <SelectValue placeholder="添加角色" />
-                </SelectTrigger>
-                <SelectContent>
-                  {/* Grouped by character — show one version per character as option */}
-                  {(() => {
-                    const seen = new Set<number>();
-                    return characters
-                      .filter((char) => {
-                        if (seen.has(char.id)) return false;
-                        seen.add(char.id);
-                        return true;
-                      })
-                      .map((char) => {
-                        const versionId = Object.keys(charVersionMap).find(
-                          (k) => charVersionMap[Number(k)]?.charId === char.id,
-                        );
-                        const info = versionId ? charVersionMap[Number(versionId)] : undefined;
-                        return (
-                          <SelectItem
-                            key={`char-${char.id}`}
-                            value={`${char.id}:${versionId ?? 0}`}
-                            disabled={!versionId}
-                          >
-                            {char.name}
-                            {info ? ` — ${info.versionLabel}` : ''}
-                          </SelectItem>
-                        );
-                      });
-                  })()}
-                </SelectContent>
-              </Select>
             )}
           </div>
+          <p className="text-xs text-muted-foreground">
+            角色信息由分镜结果和参考图自动带出，这里无需手动关联角色。
+          </p>
 
-          {/* Selected character badges */}
-          {(form.char_version_ids as number[])?.length > 0 && (
+          {charVersionIds.length > 0 && (
             <div className="flex flex-wrap gap-1.5">
-              {(form.char_version_ids as number[]).map((versionId) => {
+              {charVersionIds.map((versionId) => {
                 const info = charVersionMap[versionId];
                 return (
                   <Badge
                     key={versionId}
                     variant="outline"
-                    className="flex items-center gap-1 pr-1 pl-2 py-0.5 text-xs cursor-pointer hover:bg-destructive/10"
-                    onClick={() => handleRemoveCharacter(versionId)}
-                    title="点击移除"
+                    className="px-2 py-0.5 text-xs"
                   >
                     {info ? `${info.charName} — ${info.versionLabel}` : `版本 #${versionId}`}
-                    <X className="h-3 w-3 text-muted-foreground hover:text-destructive" />
                   </Badge>
                 );
               })}
             </div>
           )}
 
-          {/* Action/expression fields per character */}
           <div className="space-y-2">
             {charactersConfig.length > 0 ? (
               charactersConfig.map((char, idx) => {
                 const info = charVersionMap[char.char_version_id as unknown as number];
                 return (
                   <div key={idx} className="p-2 bg-secondary/50 rounded-lg space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-medium text-foreground">
-                        {info ? `${info.charName} — ${info.versionLabel}` : `角色版本 #${char.char_version_id}`}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveCharacter(char.char_version_id as unknown as number)}
-                        className="text-xs text-muted-foreground hover:text-destructive"
-                      >
-                        移除
-                      </button>
-                    </div>
+                    <span className="text-xs font-medium text-foreground block">
+                      {info ? `${info.charName} — ${info.versionLabel}` : `角色版本 #${char.char_version_id}`}
+                    </span>
                     <div>
                       <label className="text-xs text-muted-foreground">动作</label>
                       <Textarea
@@ -1704,8 +1628,12 @@ function ShotDetailPanel({
                   </div>
                 );
               })
+            ) : charVersionIds.length > 0 ? (
+              <p className="text-xs text-muted-foreground">
+                当前镜头已识别到角色，可在下方参考图区域查看每个角色的参考素材。
+              </p>
             ) : (
-              <p className="text-xs text-muted-foreground">点击右上角「+」添加角色关联</p>
+              <p className="text-xs text-muted-foreground">当前镜头暂无角色信息。</p>
             )}
           </div>
         </div>
@@ -1717,61 +1645,47 @@ function ShotDetailPanel({
           <div className="space-y-3">
             <h3 className="text-sm font-medium text-foreground">参考图</h3>
             <div className="space-y-2">
-              {activeGroup ? (
-                <>
-                  <p className="text-xs text-muted-foreground">
-                    为所属分镜组「{activeGroup.name || activeGroup.group_code}」选择角色图和场景图，用于 image-to-video 生成。
-                  </p>
-                  {(activeGroup.image_references?.length || 0) > 0 && (
-                    <div className="flex flex-wrap gap-1.5">
-                      {activeGroup.image_references.map((ref, i) => (
-                        <div key={`ref-${i}`} className="relative w-10 h-10 rounded overflow-hidden border border-border">
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img src={ref.url} alt={ref.label} className="w-full h-full object-cover" />
-                          <div className={`absolute bottom-0 left-0 right-0 text-[8px] text-center ${
-                            ref.char_version_id ? 'bg-primary/80 text-primary-foreground' : 'bg-emerald-500/80 text-white'
-                          }`}>
-                            {ref.char_version_id ? '角色' : '场景'}
-                          </div>
-                        </div>
-                      ))}
-                      {activeGroup.image_start_url && (
-                        <div className="relative w-10 h-10 rounded overflow-hidden border border-amber-500/50">
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img src={activeGroup.image_start_url} alt="首帧" className="w-full h-full object-cover" />
-                          <div className="absolute bottom-0 left-0 right-0 bg-amber-500/80 text-[8px] text-white text-center">首帧</div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="w-full h-7 border-border"
-                    onClick={onOpenImagePicker}
-                  >
-                    <Camera className="h-3.5 w-3.5 mr-1" />
-                    {activeGroup.image_references?.length
-                      ? '修改参考图'
-                      : '选择参考图'}
-                  </Button>
-                </>
+              <p className="text-xs text-muted-foreground">
+                上传或选择参考图后，会按角色和场景自动分组展示，无需手动做角色关联。
+              </p>
+
+              {shotCharImageRefs.length === 0 && shotLocationImageRefs.length === 0 ? (
+                <div className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-xs text-muted-foreground">
+                  当前镜头还没有参考图。
+                </div>
               ) : (
-                <>
-                  <p className="text-xs text-muted-foreground">
-                    选择角色图和场景图作为参考，用于 image-to-video 生成。
-                  </p>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="w-full h-7 border-border"
-                    onClick={onOpenImagePicker}
-                  >
-                    <Camera className="h-3.5 w-3.5 mr-1" />
-                    选择参考图
-                  </Button>
-                </>
+                <div className="space-y-3">
+                  {shotCharImageRefs.map((ref) => (
+                    <ReferenceImageGroup
+                      key={`char-${ref.char_version_id}`}
+                      title={ref.name}
+                      badge="角色"
+                      urls={ref.urls}
+                    />
+                  ))}
+
+                  {shotLocationImageRefs.map((ref, index) => (
+                    <ReferenceImageGroup
+                      key={`location-${ref.location_version_id ?? ref.location_id ?? index}`}
+                      title={ref.name}
+                      badge="场景"
+                      urls={ref.urls}
+                    />
+                  ))}
+                </div>
               )}
+
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full h-7 border-border"
+                onClick={onOpenImagePicker}
+              >
+                <Camera className="h-3.5 w-3.5 mr-1" />
+                {shotCharImageRefs.length > 0 || shotLocationImageRefs.length > 0
+                  ? '修改参考图'
+                  : '选择参考图'}
+              </Button>
             </div>
           </div>
         )}
@@ -2117,5 +2031,46 @@ function ShotDetailPanel({
         </div>
       </div>
     </ScrollArea>
+  );
+}
+
+function ReferenceImageGroup({
+  title,
+  badge,
+  urls,
+}: {
+  title: string;
+  badge: string;
+  urls: string[];
+}) {
+  if (!urls.length) return null;
+
+  return (
+    <div className="rounded-lg border border-border bg-secondary/30 p-2 space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-medium text-foreground truncate">{title}</span>
+        <Badge variant="outline" className="h-5 shrink-0 px-1.5 text-[10px]">
+          {badge} {urls.length}
+        </Badge>
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        {urls.map((url, index) => (
+          <div
+            key={`${url}-${index}`}
+            className="overflow-hidden rounded-md border border-border bg-muted/40"
+          >
+            <div className="aspect-square">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={url}
+                alt={`${title}-${index + 1}`}
+                className="h-full w-full object-cover"
+                loading="lazy"
+              />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }

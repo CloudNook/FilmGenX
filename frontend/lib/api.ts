@@ -39,8 +39,22 @@ interface RequestOptions extends Omit<RequestInit, 'body'> {
   noAuth?: boolean;
 }
 
+const inFlightGetRequests = new Map<string, Promise<unknown>>();
+
+function buildGetRequestKey(
+  path: string,
+  headers: Record<string, string>,
+): string {
+  const normalizedHeaders = Object.entries(headers)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}:${value}`)
+    .join('|');
+  return `GET:${BASE_URL}${path}:${normalizedHeaders}`;
+}
+
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { body, noAuth = false, headers: customHeaders, ...rest } = options;
+  const method = (rest.method || 'GET').toUpperCase();
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -55,33 +69,52 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     }
   }
 
-  const res = await fetch(`${BASE_URL}${path}`, {
-    ...rest,
-    headers,
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  const executeRequest = async (): Promise<T> => {
+    const res = await fetch(`${BASE_URL}${path}`, {
+      ...rest,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+    });
 
-  // 处理 401：token 过期 → 清除
-  if (res.status === 401 && typeof window !== 'undefined') {
-    removeToken();
-    throw new Error('登录已过期，请重新登录');
-  }
-
-  if (!res.ok) {
-    let detail = `请求失败 (${res.status})`;
-    try {
-      const errBody = await res.json();
-      detail = errBody.detail || detail;
-    } catch {
-      // ignore
+    // 处理 401：token 过期 → 清除
+    if (res.status === 401 && typeof window !== 'undefined') {
+      removeToken();
+      throw new Error('登录已过期，请重新登录');
     }
-    throw new Error(detail);
+
+    if (!res.ok) {
+      let detail = `请求失败 (${res.status})`;
+      try {
+        const errBody = await res.json();
+        detail = errBody.detail || detail;
+      } catch {
+        // ignore
+      }
+      throw new Error(detail);
+    }
+
+    // 204 No Content
+    if (res.status === 204) return undefined as T;
+
+    return res.json();
+  };
+
+  // 开发环境下 React Strict Mode 可能导致同一 GET 在挂载阶段并发触发两次，这里复用同一 Promise。
+  if (method === 'GET' && !body) {
+    const key = buildGetRequestKey(path, headers);
+    const existing = inFlightGetRequests.get(key);
+    if (existing) {
+      return existing as Promise<T>;
+    }
+
+    const promise = executeRequest().finally(() => {
+      inFlightGetRequests.delete(key);
+    });
+    inFlightGetRequests.set(key, promise);
+    return promise;
   }
 
-  // 204 No Content
-  if (res.status === 204) return undefined as T;
-
-  return res.json();
+  return executeRequest();
 }
 
 // ---------------------------------------------------------------------------
@@ -549,10 +582,24 @@ export interface CharacterDetailResponse extends CharacterResponse {
   versions: CharacterVersionResponse[];
 }
 
+export interface CharacterDashboardResponse {
+  total_characters: number;
+  total_versions: number;
+  total_images: number;
+  recent_characters: CharacterResponse[];
+}
+
 export const charactersApi = {
   list(projectId: number, page = 1, pageSize = 50) {
     return request<PageResponse<CharacterResponse>>(
       `/projects/${projectId}/characters?page=${page}&page_size=${pageSize}`,
+      { method: 'GET' },
+    );
+  },
+
+  dashboard(projectId: number) {
+    return request<CharacterDashboardResponse>(
+      `/projects/${projectId}/dashboard/character`,
       { method: 'GET' },
     );
   },
@@ -959,6 +1006,12 @@ export interface AssetResponse {
   updated_at: string;
 }
 
+export interface AssetDashboardResponse {
+  total_assets: number;
+  asset_type_counts: Record<string, number>;
+  recent_assets: AssetResponse[];
+}
+
 export const assetsApi = {
   list(
     projectId: number,
@@ -990,6 +1043,13 @@ export const assetsApi = {
   stats(projectId: number) {
     return request<Record<string, number>>(
       `/projects/${projectId}/assets/stats`,
+      { method: 'GET' },
+    );
+  },
+
+  dashboard(projectId: number) {
+    return request<AssetDashboardResponse>(
+      `/projects/${projectId}/dashboard/asset`,
       { method: 'GET' },
     );
   },
@@ -1173,12 +1233,26 @@ export interface LocationDetailResponse extends LocationResponse {
   version_count: number;
 }
 
+export interface LocationDashboardResponse {
+  total_locations: number;
+  total_versions: number;
+  total_images: number;
+  recent_locations: LocationResponse[];
+}
+
 export const locationsApi = {
   list(projectId: number, page = 1, pageSize = 50, isActive?: boolean) {
     const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
     if (isActive !== undefined) params.set('is_active', String(isActive));
     return request<PageResponse<LocationResponse>>(
       `/projects/${projectId}/locations?${params}`,
+      { method: 'GET' },
+    );
+  },
+
+  dashboard(projectId: number) {
+    return request<LocationDashboardResponse>(
+      `/projects/${projectId}/dashboard/location`,
       { method: 'GET' },
     );
   },

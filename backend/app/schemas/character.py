@@ -161,6 +161,18 @@ class CharacterDetailResponse(CharacterResponse):
     versions: List[CharacterVersionResponse] = []
 
 
+class CharacterDashboardResponse(BaseModel):
+    """角色总览响应。"""
+
+    total_characters: int = Field(..., description="角色总数")
+    total_versions: int = Field(..., description="角色版本总数")
+    total_images: int = Field(..., description="角色图片总数")
+    recent_characters: List[CharacterResponse] = Field(
+        default_factory=list,
+        description="最近更新的角色列表",
+    )
+
+
 # ---------------------------------------------------------------------------
 # 预定义状态类型
 # ---------------------------------------------------------------------------

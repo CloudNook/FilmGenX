@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -48,3 +48,17 @@ class AssetResponse(BaseResponse):
     version: int
     is_current: bool
     parent_asset_id: Optional[int]
+
+
+class AssetDashboardResponse(BaseModel):
+    """素材总览响应。"""
+
+    total_assets: int = Field(..., description="素材总数")
+    asset_type_counts: Dict[str, int] = Field(
+        default_factory=dict,
+        description="按素材类型统计的数量",
+    )
+    recent_assets: List[AssetResponse] = Field(
+        default_factory=list,
+        description="最近更新的素材列表",
+    )

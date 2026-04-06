@@ -380,6 +380,7 @@ function FullscreenPreview({ url, open, onOpenChange }: { url: string | null; op
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-4xl p-0 overflow-hidden">
+        <DialogTitle className="sr-only">图片全屏预览</DialogTitle>
         <img src={url} alt="Preview" className="w-full h-auto" />
       </DialogContent>
     </Dialog>

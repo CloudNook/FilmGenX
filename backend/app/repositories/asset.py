@@ -49,6 +49,19 @@ class AssetRepository(BaseRepository[Asset]):
             page_size=page_size,
         )
 
+    async def get_recent_by_project(self, project_id: int, *, limit: int = 6) -> List[Asset]:
+        """获取项目下最近更新的素材。"""
+        result = await self.session.execute(
+            select(Asset)
+            .where(
+                Asset.project_id == project_id,
+                Asset.is_deleted.is_(False),
+            )
+            .order_by(Asset.updated_at.desc(), Asset.id.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
     async def get_by_shot(self, shot_id: int, *, current_only: bool = True) -> List[Asset]:
         """获取镜头关联的素材，current_only=True 时只返回当前版本。"""
         cond = [Asset.shot_id == shot_id, Asset.is_deleted.is_(False)]
