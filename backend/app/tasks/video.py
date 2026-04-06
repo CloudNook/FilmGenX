@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from celery import Task
 
 from app.tasks.celery_app import celery_app
-from app.prompts import build_video_prompt, build_compact_video_prompt
+from app.prompts import build_video_prompt, build_compact_video_prompt, build_i2v_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -137,20 +137,40 @@ async def _run_video_generation(task: VideoGenerationTask, task_db_id: int) -> d
 
             evolink_task_id = params.get("evolink_task_id")
 
-            # 根据是否有首帧图决定调用文生视频还是图生视频
-            if params.get("use_image_start") and shot.assets:
-                # 找到当前镜头的图片素材作为首帧
+            # 加载 shot_group（用于获取首帧图和组级参考图）
+            from app.repositories.shot_group import ShotGroupRepository
+            group_repo = ShotGroupRepository(session)
+            shot_group = None
+            if getattr(shot, "shot_group_id", None):
+                shot_group = await group_repo.get(shot.shot_group_id)
+
+            # 确定首帧图：优先用 shot_group.image_start_url（Phase 1 首帧图方案生成），
+            # 次选用 shot 的最新图片资产
+            image_start = None
+            if shot_group and shot_group.image_start_url:
+                image_start = shot_group.image_start_url
+            elif shot.assets:
                 asset_repo = AssetRepository(session)
                 image_assets = await asset_repo.get_by_shot(shot.id, current_only=True)
                 image_asset = next((a for a in image_assets if a.asset_type == "image"), None)
-                image_start = image_asset.file_url if image_asset else None
+                if image_asset:
+                    image_start = image_asset.file_url
+
+            # 收集组级参考图（来自 shot_group.image_references）
+            group_refs: list[dict] = []
+            if shot_group and shot_group.image_references:
+                group_refs = shot_group.image_references
+
+            # 根据是否有首帧图决定提示词构建策略
+            if image_start:
+                # 有首帧图 → 用精简的 build_i2v_prompt（只聚焦动态信息）
+                prompt = build_i2v_prompt(shot, group_refs or shot_image_refs)
             else:
-                image_start = None
+                # 无首帧图 → 用完整的 build_video_prompt（包含外观描述）
+                prompt = build_video_prompt(shot, None, None, shot_image_refs)
 
-            # 构建完整的视频提示词（含角色参考图标记，name 直接从 shot.char_image_refs / shot.location_image_refs 读取）
-            prompt = build_video_prompt(shot, None, None, shot_image_refs)
-
-            logger.info("开始生成视频：shot=%s quality=%s sound=%s", shot.shot_code, quality, sound)
+            logger.info("开始生成视频：shot=%s quality=%s sound=%s has_image_start=%s",
+                        shot.shot_code, quality, sound, bool(image_start))
             logger.info("=" * 60)
             logger.info("Kling 视频提示词:\n%s", prompt)
             logger.info("=" * 60)
@@ -168,6 +188,7 @@ async def _run_video_generation(task: VideoGenerationTask, task_db_id: int) -> d
                     video_task = await evolink_client.image_to_video(
                         prompt=prompt,
                         image_start=image_start,
+                        image_urls=group_refs if group_refs else None,
                         duration=normalized_duration,
                         quality=quality,
                         sound=sound,
@@ -381,34 +402,56 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
 
             evolink_task_id = params.get("evolink_task_id")
 
+            # 优先用 group.image_start_url（Phase 1 首帧图方案生成）作为首帧
+            group_image_start: str | None = group.image_start_url or None
+
+            # 收集参考图：优先用 group.image_references，次选 shot-level refs
+            group_refs: list[dict] = group.image_references or []
+            all_ref_urls: list[str] = [url for ref in group_refs for url in (ref.get("urls") or [])]
+            # 如果组级参考图为空，降级到 shot-level 参考图
+            if not all_ref_urls:
+                all_ref_urls = all_shot_ref_urls
+            has_ref_images = len(all_ref_urls) > 0
+
             if evolink_task_id:
                 logger.info("检测到已提交的 Evolink 任务，继续轮询：%s", evolink_task_id)
             else:
-                # 从各成员 shot 的 char_image_refs / location_image_refs 收集参考图
-                has_images = len(all_shot_ref_urls) > 0
-
-                if has_images:
-                    # 使用 shot-level 参考图作为 image-to-video 的 reference_urls
-                    image_start = None
-
-                    # If no explicit image_start, use the first reference image
-                    if not image_start and all_shot_ref_urls:
-                        image_start = all_shot_ref_urls[0]
-
-                    # Inject 角色参考图标记 into prompts（每个 shot 已在上方单独注入，无需再次调用）
-
-
+                if has_ref_images or group_image_start:
+                    # 图生视频模式：优先使用 group 首帧图 + 参考图
+                    # 使用 build_i2v_prompt 为每个镜头构建精简提示词
+                    from app.prompts import build_i2v_prompt
+                    i2v_multi_prompts = []
+                    for i, (shot, normalized_duration) in enumerate(zip(member_shots, shot_durations, strict=False)):
+                        # 为每个镜头收集其专属的参考图
+                        char_refs: list[dict] = getattr(shot, "char_image_refs", None) or []
+                        loc_refs: list[dict] = getattr(shot, "location_image_refs", None) or []
+                        shot_refs = char_refs + loc_refs
+                        # 优先用组级参考图，没有则用 shot-level
+                        shot_ref_urls = [url for ref in group_refs for url in (ref.get("urls") or [])]
+                        if not shot_ref_urls:
+                            shot_ref_urls = [url for ref in shot_refs for url in (ref.get("urls") or [])]
+                        shot_header = build_shot_image_ref_header(shot) if shot_ref_urls else ""
+                        i2v_prompt_text = build_i2v_prompt(shot, shot_refs)
+                        if shot_header:
+                            i2v_prompt_text = shot_header + i2v_prompt_text
+                        if len(i2v_prompt_text) > 512:
+                            i2v_prompt_text = i2v_prompt_text[:512]
+                        i2v_multi_prompts.append(MultiShotPrompt(
+                            index=i + 1,
+                            prompt=i2v_prompt_text,
+                            duration=str(normalized_duration),
+                        ))
 
                     logger.info(
-                        "使用 image-to-video 模式：image_start=%s, reference_urls=%d张, 提示词:\n%s",
-                        image_start,
-                        len(all_shot_ref_urls),
-                        "\n".join([f"  镜头 {mp.index} 提示词:\n{mp.prompt}" for mp in multi_prompts])
+                        "使用 image-to-video 模式：image_start=%s, ref_urls=%d张, 提示词:\n%s",
+                        group_image_start,
+                        len(all_ref_urls),
+                        "\n".join([f"  镜头 {mp.index} 提示词:\n{mp.prompt}" for mp in i2v_multi_prompts])
                     )
                     video_task = await evolink_client.image_to_video(
-                        multi_shot_prompts=multi_prompts,
-                        image_start=None,
-                        image_urls=all_shot_ref_urls if all_shot_ref_urls else None,
+                        multi_shot_prompts=i2v_multi_prompts,
+                        image_start=group_image_start,
+                        image_urls=all_ref_urls if all_ref_urls else None,
                         duration=total_duration,
                         quality=quality,
                         sound=sound,

@@ -65,6 +65,48 @@ ALLOWED_MODELS = {
 DEFAULT_MODEL = "gemini-3-flash-preview"
 
 
+# 不支持的 JSON Schema 关键字（Gemini API 不识别）
+_UNSUPPORTED_SCHEMA_KEYS: frozenset = frozenset({
+    "exclusiveMinimum", "exclusiveMaximum", "prefixItems", "contains",
+    "propertyNames", "if", "then", "else", "allOf", "anyOf", "oneOf", "not",
+    "additionalProperties",
+})
+
+
+def _inline_schema(schema: dict) -> dict:
+    """将 Pydantic JSON Schema 转为 Gemini 兼容的扁平结构。
+
+    - 移除 $defs 并把所有 $ref 替换为内联定义
+    - 过滤掉 Gemini 不支持的关键字
+    """
+    import copy
+    defs = schema.get("$defs", {})
+
+    def _inline(s: dict) -> dict:
+        if not isinstance(s, dict):
+            return s
+        if s.get("type") == "array":
+            return {"type": "array", "items": _inline(s.get("items", {}))}
+        if "$ref" in s:
+            ref_name = s["$ref"].split("/")[-1]
+            return _inline(copy.deepcopy(defs.get(ref_name, {})))
+        result = {}
+        for k, v in s.items():
+            if k in _UNSUPPORTED_SCHEMA_KEYS:
+                continue
+            if k == "properties":
+                result[k] = {pk: _inline(pv) for pk, pv in v.items()}
+            elif k == "items" and isinstance(v, dict):
+                result[k] = _inline(v)
+            elif k == "$defs":
+                continue
+            else:
+                result[k] = v
+        return result
+
+    return _inline(copy.deepcopy(schema))
+
+
 async def call_llm(
     *,
     messages: List[dict],
@@ -111,7 +153,7 @@ async def call_llm(
         config_kwargs["system_instruction"] = system_prompt
     if response_schema is not None:
         config_kwargs["response_mime_type"] = "application/json"
-        config_kwargs["response_schema"] = response_schema
+        config_kwargs["response_schema"] = _inline_schema(response_schema.model_json_schema())
 
     response = await client.aio.models.generate_content(
         model=model_name,
@@ -174,43 +216,7 @@ async def call_llm_stream(
     # JSON 强制输出（用于结构化生成）
     if response_schema is not None:
         config_kwargs["response_mime_type"] = "application/json"
-        # Pydantic v2 JSON Schema 包含 exclusiveMinimum 等 Gemini 不支持的字段，
-        # 且会用 $defs / $ref 引用嵌套模型；将 schema 展开为扁平结构，
-        # 所有嵌套对象的定义内联到 properties 中，移除不支持的字段。
-        import copy
-        raw_schema = response_schema.model_json_schema()
-        # 先收集所有 $defs 中的类型定义
-        defs = raw_schema.get("$defs", {})
-        # 不支持的顶层/嵌套字段
-        _skip = {"exclusiveMinimum", "exclusiveMaximum", "prefixItems", "contains",
-                 "propertyNames", "if", "then", "else", "allOf", "anyOf", "oneOf", "not"}
-
-        def _inline(schema: dict) -> dict:
-            """将 $ref 替换为内联定义，移除不支持字段。"""
-            if not isinstance(schema, dict):
-                return schema
-            if schema.get("type") == "array":
-                return {"type": "array", "items": _inline(schema.get("items", {}))}
-            if "$ref" in schema:
-                # 查找 $defs 中的定义并内联
-                ref_name = schema["$ref"].split("/")[-1]
-                ref_def = defs.get(ref_name, {})
-                return _inline(ref_def)
-            result = {}
-            for k, v in schema.items():
-                if k in _skip:
-                    continue
-                if k == "properties":
-                    result[k] = {pk: _inline(pv) for pk, pv in v.items()}
-                elif k == "items" and isinstance(v, dict):
-                    result[k] = _inline(v)
-                elif k == "$defs":
-                    continue  # 已全部内联，不需要了
-                else:
-                    result[k] = v
-            return result
-
-        config_kwargs["response_schema"] = _inline(copy.deepcopy(raw_schema))
+        config_kwargs["response_schema"] = _inline_schema(response_schema.model_json_schema())
     elif "JSON" in system_prompt.upper():
         # 系统提示词提到 JSON 时也启用 JSON 模式
         config_kwargs["response_mime_type"] = "application/json"

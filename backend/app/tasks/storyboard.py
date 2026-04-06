@@ -508,6 +508,23 @@ async def _run_storyboard_generation_v2(task_db_id: int) -> dict:
             else:
                 logger.warning("v2 Phase 3 跳过：没有成功生成的镜头")
 
+            # ── Phase 4：自动图生图 ────────────────────────────────────────
+            await sb_repo.update(storyboard, {"generation_phase": "phase4_image_generation"})
+            await session.commit()
+
+            logger.info("v2 Phase 4 开始：自动图生图编排")
+            phase4_result = await _phase4_generate_images(
+                scene=scene,
+                storyboard=storyboard,
+                session=session,
+            )
+            logger.info(
+                "v2 Phase 4 完成：char_tasks=%d scene_tasks=%d frame_tasks=%d",
+                phase4_result["char_tasks"],
+                phase4_result["scene_tasks"],
+                phase4_result["frame_tasks"],
+            )
+
             # ── 收尾 ────────────────────────────────────────────────────────
             total_dur = sum(s.duration_sec or 3.0 for s in all_shots)
             await sb_repo.update(storyboard, {
@@ -843,3 +860,319 @@ async def _phase3_director_adjust(
 
     await session.commit()
     logger.info("Phase 3 patch 应用完成：%d/%d 个 patch 生效", applied, len(patches))
+
+
+# ===========================================================================
+# Phase 4：自动图生图编排
+# ===========================================================================
+
+async def _phase4_generate_images(
+    scene,
+    storyboard,
+    session,
+) -> dict:
+    """
+    Phase 4：根据 Phase 1 输出的四层视觉规划，自动编排图生图任务。
+
+    优先级：
+      P1 帧图（shot_group_frame_plans）→ 写入 ShotGroup.image_start_url
+      P2 角色图（character_image_prompts）→ 写入 CharacterVersion.reference_image_urls
+      P3 场景图（scene_image_prompts）→ 写入 LocationVersion.reference_image_urls
+
+    各任务完成后自动写回数据库（通过 generate_image_task 的已有逻辑）。
+    Phase 4 负责：提交任务 → 轮询等待完成 → 从 Asset 表读取帧图 URL → 更新 ShotGroup。
+    """
+    from app.models.task import GenerationTask
+    from app.repositories.asset import AssetRepository
+    from app.repositories.character import CharacterRepository, CharacterVersionRepository
+    from app.repositories.location import LocationRepository, LocationVersionRepository
+    from app.repositories.shot import ShotRepository
+    from app.repositories.shot_group import ShotGroupRepository
+    from app.repositories.task import TaskRepository
+    from sqlalchemy import select
+
+    task_repo = TaskRepository(session)
+    shot_repo = ShotRepository(session)
+    group_repo = ShotGroupRepository(session)
+    asset_repo = AssetRepository(session)
+    char_repo = CharacterRepository(session)
+    char_ver_repo = CharacterVersionRepository(session)
+    loc_repo = LocationRepository(session)
+    loc_ver_repo = LocationVersionRepository(session)
+
+    project_id = scene.project_id
+
+    # ── 1. 解析 Phase 1 输出的 plan_data ───────────────────────────────────
+    plan_data = storyboard.plan_data or {}
+    style_guide = plan_data.get("visual_style_guide") or {}
+    char_prompts = plan_data.get("character_image_prompts") or []
+    scene_prompts = plan_data.get("scene_image_prompts") or []
+    frame_plans = plan_data.get("shot_group_frame_plans") or []
+
+    # ── 2. 构建 lookup 字典 ───────────────────────────────────────────────
+    # scene.character_ids 格式：[{name: "萧炎", id: 1}, ...]
+    char_id_map: dict[str, int] = {}
+    for entry in (scene.character_ids or []):
+        if isinstance(entry, dict):
+            char_id_map[entry.get("name", "")] = entry.get("id", 0)
+        elif isinstance(entry, int):
+            # 如果存的是纯 ID 列表，需要反向查，这里暂时跳过
+            pass
+
+    # scene.primary_location → 查 Location 表
+    primary_loc_name = scene.primary_location or ""
+    primary_loc_id: int | None = None
+    primary_loc_ver_id: int | None = None
+    if primary_loc_name:
+        loc_result = await session.execute(
+            select(loc_repo.model).where(
+                loc_repo.model.project_id == project_id,
+                loc_repo.model.name == primary_loc_name,
+            ).limit(1)
+        )
+        loc = loc_result.scalar_one_or_none()
+        if loc:
+            primary_loc_id = loc.id
+            # 取最新版本
+            ver_result = await session.execute(
+                select(loc_ver_repo.model).where(
+                    loc_ver_repo.model.location_id == primary_loc_id
+                ).order_by(loc_ver_repo.model.id.desc()).limit(1)
+            )
+            loc_ver = ver_result.scalar_one_or_none()
+            if loc_ver:
+                primary_loc_ver_id = loc_ver.id
+
+    logger.info(
+        "[Phase 4] 开始编排：chars=%d scenes=%d frames=%d, loc_id=%s",
+        len(char_prompts), len(scene_prompts), len(frame_plans), primary_loc_id,
+    )
+
+    # ── 3. 批量提交所有图生图任务 ─────────────────────────────────────────
+    submitted_task_ids: list[int] = []
+
+    # 3a. 角色图任务
+    for cp in char_prompts:
+        char_name = cp.get("char_name", "")
+        char_id = char_id_map.get(char_name)
+        if not char_id:
+            logger.warning("[Phase 4] 角色 '%s' 未找到 ID，跳过角色图生成", char_name)
+            continue
+
+        # 取该角色的最新版本
+        ver_result = await session.execute(
+            select(char_ver_repo.model).where(
+                char_ver_repo.model.character_id == char_id
+            ).order_by(char_ver_repo.model.id.desc()).limit(1)
+        )
+        char_ver = ver_result.scalar_one_or_none()
+        if not char_ver:
+            logger.warning("[Phase 4] 角色 '%s' 无版本记录，跳过", char_name)
+            continue
+
+        art = cp.get("art_prompt") or {}
+        art_base = art.get("base", "") or cp.get("image_prompt_for_generation", "")
+        if not art_base:
+            logger.warning("[Phase 4] 角色 '%s' 无图生图提示词，跳过", char_name)
+            continue
+
+        gen_task = await task_repo.create(
+            task_type="image_generation",
+            input_params={
+                "project_id": project_id,
+                "character_id": char_id,
+                "character_version_id": char_ver.id,
+                "prompt": art_base,
+                "negative_prompt": cp.get("negative_prompt"),
+                "style_preset": cp.get("style_preset"),
+                "aspect_ratio": "16:9",
+                "resolution": "1K",
+                "character_image_kind": "reference",
+                "save_to_shot": False,
+            },
+        )
+        await session.commit()
+
+        # 异步提交（不等待结果）
+        from app.tasks.image import generate_image_task
+        celery_result = generate_image_task.delay(gen_task.id)
+        await task_repo.update(gen_task, {"celery_task_id": celery_result.id})
+        await session.commit()
+        submitted_task_ids.append(gen_task.id)
+        logger.info("[Phase 4] 提交角色图任务: char=%s task_id=%d", char_name, gen_task.id)
+
+    # 3b. 场景图任务
+    if primary_loc_id and primary_loc_ver_id:
+        for sp in scene_prompts:
+            scene_name = sp.get("scene_name", "")
+            art = sp.get("art_prompt") or {}
+            art_str = " ".join(
+                str(v) for v in [
+                    art.get("architecture", ""),
+                    art.get("atmosphere", ""),
+                    art.get("lighting", ""),
+                ] if v
+            )
+            if not art_str:
+                logger.warning("[Phase 4] 场景 '%s' 无图生图提示词，跳过", scene_name)
+                continue
+
+            gen_task = await task_repo.create(
+                task_type="image_generation",
+                input_params={
+                    "project_id": project_id,
+                    "location_id": primary_loc_id,
+                    "location_version_id": primary_loc_ver_id,
+                    "prompt": art_str,
+                    "negative_prompt": None,
+                    "aspect_ratio": "16:9",
+                    "resolution": "1K",
+                    "save_to_shot": False,
+                },
+            )
+            await session.commit()
+
+            from app.tasks.image import generate_image_task
+            celery_result = generate_image_task.delay(gen_task.id)
+            await task_repo.update(gen_task, {"celery_task_id": celery_result.id})
+            await session.commit()
+            submitted_task_ids.append(gen_task.id)
+            logger.info("[Phase 4] 提交场景图任务: scene=%s task_id=%d", scene_name, gen_task.id)
+
+    # 3c. 分镜组首帧图任务（需先找到对应 shot_group 和成员 shot）
+    all_shots = await shot_repo.get_by_storyboard(storyboard.id)
+    group_code_to_shot = {s.shot_group_id: s for s in all_shots if s.shot_group_id}
+
+    frame_task_ids_by_group: dict[int, int] = {}  # shot_group_id → gen_task_id
+    for fp in frame_plans:
+        group_code = fp.get("group_code", "")
+        prompt_str = fp.get("image_prompt_for_generation", "")
+        if not prompt_str:
+            logger.warning("[Phase 4] 分镜组 '%s' 无首帧图提示词，跳过", group_code)
+            continue
+
+        # 找到对应的 ShotGroup
+        group_result = await session.execute(
+            select(group_repo.model).where(
+                group_repo.model.storyboard_id == storyboard.id,
+                group_repo.model.group_code == group_code,
+            ).limit(1)
+        )
+        group = group_result.scalar_one_or_none()
+        if not group:
+            logger.warning("[Phase 4] 未找到 ShotGroup: %s，跳过首帧图", group_code)
+            continue
+
+        # 找到该组的第一个成员 shot
+        member_shots = [s for s in all_shots if s.shot_group_id == group.id]
+        if not member_shots:
+            logger.warning("[Phase 4] ShotGroup %s 无成员分镜，跳过首帧图", group_code)
+            continue
+        first_shot = min(member_shots, key=lambda s: s.sequence)
+
+        # 构建任务参数（shot_id → 自动写入 Shot 的 Asset）
+        gen_task = await task_repo.create(
+            task_type="image_generation",
+            input_params={
+                "project_id": project_id,
+                "shot_id": first_shot.id,
+                "prompt": prompt_str,
+                "negative_prompt": fp.get("negative_prompt"),
+                "style_preset": fp.get("style_preset", "intense"),
+                "aspect_ratio": "16:9",
+                "resolution": "1K",
+                "save_to_shot": True,
+            },
+        )
+        await session.commit()
+
+        from app.tasks.image import generate_image_task
+        celery_result = generate_image_task.delay(gen_task.id)
+        await task_repo.update(gen_task, {"celery_task_id": celery_result.id})
+        await session.commit()
+        submitted_task_ids.append(gen_task.id)
+        frame_task_ids_by_group[group.id] = gen_task.id
+        logger.info(
+            "[Phase 4] 提交首帧图任务: group=%s shot_id=%d task_id=%d",
+            group_code, first_shot.id, gen_task.id,
+        )
+
+    char_scene_count = submitted_task_ids.__len__() - len(frame_task_ids_by_group)
+    logger.info(
+        "[Phase 4] 全部任务已提交：char_scene=%d frames=%d，等待完成…",
+        char_scene_count, len(frame_task_ids_by_group),
+    )
+
+    # ── 4. 轮询等待任务完成 ───────────────────────────────────────────────
+    if submitted_task_ids:
+        timeout_sec = 600  # 最多等 10 分钟
+        poll_interval = 10  # 每 10 秒查一次
+        elapsed = 0
+        pending_ids = set(submitted_task_ids)
+
+        while pending_ids and elapsed < timeout_sec:
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+
+            result = await session.execute(
+                select(GenerationTask).where(
+                    GenerationTask.id.in_(pending_ids),
+                )
+            )
+            tasks = result.scalars().all()
+            still_pending = set()
+            for t in tasks:
+                if t.status in ("pending", "running"):
+                    still_pending.add(t.id)
+                elif t.status == "failed":
+                    logger.warning("[Phase 4] 任务 %d 失败: %s", t.id, t.error_message)
+
+            done = len(pending_ids) - len(still_pending)
+            pending_ids = still_pending
+            logger.info(
+                "[Phase 4] 进度 %d/%d 完成，剩余 %d 个任务…",
+                done, len(submitted_task_ids), len(pending_ids),
+            )
+
+    # ── 5. 首帧图：从 Asset 表读取 URL，更新 ShotGroup.image_start_url ──────
+    for group_id, task_id in frame_task_ids_by_group.items():
+        task_result = await session.execute(
+            select(GenerationTask).where(GenerationTask.id == task_id)
+        )
+        gen_task = task_result.scalar_one_or_none()
+        if not gen_task or gen_task.status != "success":
+            continue
+
+        # 通过 result_asset_id 找到 Asset
+        if gen_task.result_asset_id:
+            asset = await asset_repo.get(gen_task.result_asset_id)
+            if asset and asset.file_url:
+                group = await group_repo.get(group_id)
+                if group:
+                    await group_repo.update(group, {"image_start_url": asset.file_url})
+                logger.info(
+                    "[Phase 4] ShotGroup %d 首帧图已更新: %s", group_id, asset.file_url
+                )
+        else:
+            # 兜底：从 shot_id 查最新 current 图片资产
+            task_params = gen_task.input_params or {}
+            shot_id = task_params.get("shot_id")
+            if shot_id:
+                assets = await asset_repo.get_by_shot(shot_id, current_only=True)
+                img_asset = next((a for a in assets if a.asset_type == "image"), None)
+                if img_asset and img_asset.file_url:
+                    group = await group_repo.get(group_id)
+                    if group:
+                        await group_repo.update(group, {"image_start_url": img_asset.file_url})
+                    logger.info(
+                        "[Phase 4] ShotGroup %d 首帧图已更新（兜底）: %s",
+                        group_id, img_asset.file_url,
+                    )
+
+    logger.info("[Phase 4] 全部完成")
+    return {
+        "char_tasks": len(char_prompts),
+        "scene_tasks": len(scene_prompts),
+        "frame_tasks": len(frame_task_ids_by_group),
+    }
+

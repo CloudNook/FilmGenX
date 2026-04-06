@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     # AI 服务
     EVOLINK_API_KEY: str = ""
     EVOLINK_BASE_URL: str = "https://api.evolink.ai"
-    HTTP_TRUST_ENV: bool = False
+    HTTP_TRUST_ENV: bool = True
     EVOLINK_REQUEST_RETRIES: int = 3
 
     # Google

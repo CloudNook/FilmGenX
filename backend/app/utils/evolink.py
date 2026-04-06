@@ -368,8 +368,8 @@ class EvolinkClient:
         payload: dict = {
             "model": IMAGE_TO_VIDEO_MODEL,
             "prompt": prompt if not multi_shot_prompts else None,
-            # "image_start": image_start,
-            # "image_end": image_end,
+            "image_start": image_start,
+            "image_end": image_end,
             "image_urls": image_urls,
             "duration": duration,
             "aspect_ratio": aspect_ratio,
