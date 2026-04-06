@@ -802,28 +802,64 @@ def build_image_ref_header(
         角色萧炎: <<<image_1>>>
         角色纳兰嫣然: <<<image_2>>>
         场景云岚宗·夜: <<<image_3>>>
+
+    优先使用 ref 中存储的 name（shot.char_image_refs / shot.location_image_refs 格式），
+    回退到 char_version_lookup / location_version_lookup（shot_group.image_references 格式）。
     """
     if not image_refs:
         return ""
     lines = []
     image_idx = 0
+
+    # 角色参考图
     for ref in image_refs:
-        if ref.get("char_version_id"):
-            image_idx += 1
-            vid = ref["char_version_id"]
-            name = char_version_lookup.get(vid, f"角色{vid}") if char_version_lookup else f"角色{vid}"
+        vid = ref.get("char_version_id")
+        if not vid:
+            continue
+        image_idx += 1
+        # 优先使用存储的 name（shot.char_image_refs 格式）
+        if ref.get("name"):
+            lines.append(f"角色{ref['name']}: <<<image_{image_idx}>>>")
+        elif char_version_lookup:
+            name = char_version_lookup.get(vid, f"角色{vid}")
             lines.append(f"角色{name}: <<<image_{image_idx}>>>")
+        else:
+            lines.append(f"角色{vid}: <<<image_{image_idx}>>>")
+
+    # 场景参考图
     for ref in image_refs:
-        vid = ref.get("location_version_id")
-        if vid and location_version_lookup:
-            image_idx += 1
+        loc_ver_id = ref.get("location_version_id")
+        loc_id = ref.get("location_id")
+        if not loc_ver_id and not loc_id:
+            continue
+        image_idx += 1
+        vid = loc_ver_id or loc_id
+        # 优先使用存储的 name（shot.location_image_refs 格式）
+        if ref.get("name"):
+            lines.append(f"场景{ref['name']}: <<<image_{image_idx}>>>")
+        elif location_version_lookup:
             name = location_version_lookup.get(vid, f"场景{vid}")
             lines.append(f"场景{name}: <<<image_{image_idx}>>>")
-        elif ref.get("location_id"):
-            image_idx += 1
-            lid = ref["location_id"]
-            lines.append(f"场景{lid}: <<<image_{image_idx}>>>")
+        else:
+            lines.append(f"场景{vid}: <<<image_{image_idx}>>>")
+
     return "\n".join(lines) + "\n"
+
+
+def build_shot_image_ref_header(shot: "Shot") -> str:
+    """从 Shot 对象的 char_image_refs 和 location_image_refs 构建参考图声明头。
+
+    直接使用存储的 name，无需 DB 查询。
+
+    示例输出：
+        角色萧炎: <<<image_1>>>
+        角色纳兰嫣然: <<<image_2>>>
+        场景云岚宗·夜: <<<image_3>>>
+    """
+    char_refs: list[dict] = getattr(shot, "char_image_refs", None) or []
+    loc_refs: list[dict] = getattr(shot, "location_image_refs", None) or []
+    all_refs = char_refs + loc_refs
+    return build_image_ref_header(all_refs, None, None)
 
 
 def inject_image_refs_into_prompts(

@@ -40,6 +40,7 @@ from app.schemas.conversation import (
 router = APIRouter()
 
 from app.prompts import CHAT_SYSTEM_PROMPT, SUMMARIZE_SYSTEM_PROMPT
+from app.schemas.conversation import EpisodeOutline
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +234,7 @@ async def chat_message(
             system_prompt=CHAT_SYSTEM_PROMPT,
         ):
             full_response += chunk
-            # SSE 格式：data: <chunk>\n\n
+            # 每个 chunk 单独作为一个完整 SSE 事件发送，避免多行 chunk 导致的解析问题
             yield f"data: {chunk}\n\n"
 
         # 4. 流式结束后，保存 AI 完整回复
@@ -245,7 +246,7 @@ async def chat_message(
         )
         await db.commit()
 
-        # 发送完成标记（让前端知道流式结束）
+        # 发送完成标记
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(
@@ -313,6 +314,7 @@ async def summarize_outline(
                 messages=messages_for_summary,
                 llm_config=body.llm_config,
                 system_prompt=summarize_prompt,
+                response_schema=EpisodeOutline,
             ):
                 full_response += chunk
                 yield f"data: {chunk}\n\n"

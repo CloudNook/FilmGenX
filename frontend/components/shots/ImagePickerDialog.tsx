@@ -39,6 +39,8 @@ interface ImageItem {
   /** 来源场景ID（场景图时设置） */
   locationId?: number;
   locationVersionId?: number;
+  /** 角色或场景的显示名称 */
+  name?: string;
 }
 
 export function ImagePickerDialog({
@@ -69,6 +71,7 @@ export function ImagePickerDialog({
     ...(item.charVersionId ? { char_version_id: item.charVersionId } : {}),
     ...(item.locationId ? { location_id: item.locationId } : {}),
     ...(item.locationVersionId ? { location_version_id: item.locationVersionId } : {}),
+    ...(item.name ? { name: item.name } : {}),
   }), []);
 
   // Reset selection when dialog opens
@@ -351,6 +354,7 @@ async function fetchCharacterImages(
             url: version.reference_image_urls[i],
             label: `参考图 ${i + 1}`,
             charVersionId: version.id,
+            name: detail.name,
           });
         }
 
@@ -359,6 +363,7 @@ async function fetchCharacterImages(
             url: version.three_view_url,
             label: '三视图',
             charVersionId: version.id,
+            name: detail.name,
           });
         }
 
@@ -369,6 +374,7 @@ async function fetchCharacterImages(
                 url: stateUrl,
                 label: `状态: ${stateKey}`,
                 charVersionId: version.id,
+                name: detail.name,
               });
             }
           }
@@ -418,12 +424,14 @@ async function fetchLocationImages(
 
       for (const version of versions) {
         const images: ImageItem[] = [];
+        const locationName = `${detail.name}·${version.label || version.version_code || '默认'}`;
         for (let i = 0; i < (version.reference_image_urls?.length || 0); i++) {
           images.push({
             url: version.reference_image_urls[i],
             label: `参考图 ${i + 1}`,
             locationId: detail.id,
             locationVersionId: version.id,
+            name: locationName,
           });
         }
         if (images.length > 0) {

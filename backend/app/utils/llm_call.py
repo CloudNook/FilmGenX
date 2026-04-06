@@ -126,6 +126,7 @@ async def call_llm_stream(
     messages: List[dict],
     llm_config: dict,
     system_prompt: str = "",
+    response_schema=None,
 ) -> AsyncGenerator[str, None]:
     """调用 Google Gemini 流式生成，逐块 yield 文本。
 
@@ -133,6 +134,7 @@ async def call_llm_stream(
         messages:     消息历史 [{"role": "user", "content": "..."}]
         llm_config:   前端传入的 LLM 配置，仅使用 model / temperature
         system_prompt: 可选的系统提示词覆盖
+        response_schema: 可选 Pydantic 模型，传入后强制 JSON 结构化输出
 
     Yields:
         文本片段（chunk）
@@ -169,10 +171,55 @@ async def call_llm_stream(
     if system_prompt:
         config_kwargs["system_instruction"] = system_prompt
 
+    # JSON 强制输出（用于结构化生成）
+    if response_schema is not None:
+        config_kwargs["response_mime_type"] = "application/json"
+        # Pydantic v2 JSON Schema 包含 exclusiveMinimum 等 Gemini 不支持的字段，
+        # 且会用 $defs / $ref 引用嵌套模型；将 schema 展开为扁平结构，
+        # 所有嵌套对象的定义内联到 properties 中，移除不支持的字段。
+        import copy
+        raw_schema = response_schema.model_json_schema()
+        # 先收集所有 $defs 中的类型定义
+        defs = raw_schema.get("$defs", {})
+        # 不支持的顶层/嵌套字段
+        _skip = {"exclusiveMinimum", "exclusiveMaximum", "prefixItems", "contains",
+                 "propertyNames", "if", "then", "else", "allOf", "anyOf", "oneOf", "not"}
+
+        def _inline(schema: dict) -> dict:
+            """将 $ref 替换为内联定义，移除不支持字段。"""
+            if not isinstance(schema, dict):
+                return schema
+            if schema.get("type") == "array":
+                return {"type": "array", "items": _inline(schema.get("items", {}))}
+            if "$ref" in schema:
+                # 查找 $defs 中的定义并内联
+                ref_name = schema["$ref"].split("/")[-1]
+                ref_def = defs.get(ref_name, {})
+                return _inline(ref_def)
+            result = {}
+            for k, v in schema.items():
+                if k in _skip:
+                    continue
+                if k == "properties":
+                    result[k] = {pk: _inline(pv) for pk, pv in v.items()}
+                elif k == "items" and isinstance(v, dict):
+                    result[k] = _inline(v)
+                elif k == "$defs":
+                    continue  # 已全部内联，不需要了
+                else:
+                    result[k] = v
+            return result
+
+        config_kwargs["response_schema"] = _inline(copy.deepcopy(raw_schema))
+    elif "JSON" in system_prompt.upper():
+        # 系统提示词提到 JSON 时也启用 JSON 模式
+        config_kwargs["response_mime_type"] = "application/json"
+
     # 流式调用
     try:
         print(f"[DEBUG] Gemini call: model={model_name}, contents={len(contents)} msgs, "
-              f"system_prompt={'yes' if system_prompt else 'no'}, temp={temperature}")
+              f"system_prompt={'yes' if system_prompt else 'no'}, temp={temperature}, "
+              f"json_mode={response_schema is not None or 'JSON' in system_prompt.upper()}")
 
         response = await client.aio.models.generate_content_stream(
             model=model_name,

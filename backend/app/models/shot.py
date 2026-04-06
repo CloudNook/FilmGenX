@@ -91,6 +91,16 @@ class Shot(Base):
     # 生成的视频 URL
     video_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="生成的视频 URL")
 
+    # 镜头内关联的角色/场景参考图（存 name + urls，生成提示词时直接用）
+    char_image_refs: Mapped[list] = mapped_column(
+        JSON, nullable=False, default=list,
+        comment="角色参考图：[{char_version_id, name, urls}]"
+    )
+    location_image_refs: Mapped[list] = mapped_column(
+        JSON, nullable=False, default=list,
+        comment="场景参考图：[{location_version_id, location_id, name, urls}]"
+    )
+
     # 质量审核
     qc_character_consistency: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     qc_lighting_match: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

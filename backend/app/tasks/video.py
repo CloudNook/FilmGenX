@@ -111,61 +111,21 @@ async def _run_video_generation(task: VideoGenerationTask, task_db_id: int) -> d
         await session.commit()
 
         try:
-            from app.repositories.character import CharacterRepository
-            from app.repositories.location import LocationRepository
-            from app.repositories.shot_group import ShotGroupRepository
+            from app.repositories.asset import AssetRepository
+            from app.repositories.shot import ShotRepository
+            from app.repositories.task import TaskRepository
+            from app.utils.evolink import evolink_client
 
             shot_repo = ShotRepository(session)
-            char_repo = CharacterRepository(session)
-            loc_repo = LocationRepository(session)
-            group_repo = ShotGroupRepository(session)
 
             shot = await shot_repo.get(gen_task.shot_id)
             if not shot:
                 raise ValueError(f"Shot {gen_task.shot_id} 不存在")
 
-            # 获取镜头的分镜组（用于获取 image_references）
-            group_image_refs: list[dict] = []
-            if shot.shot_group_id:
-                group = await group_repo.get(shot.shot_group_id)
-                if group and group.image_references:
-                    group_image_refs = group.image_references
-
-            # 构建角色版本ID→角色名映射
-            char_version_lookup: dict[int, str] = {}
-            if shot.char_version_ids:
-                from app.repositories.storyboard import StoryboardRepository
-                sb_repo = StoryboardRepository(session)
-                project_id = await sb_repo.get_project_id(shot.storyboard_id) or 0
-
-                chars = await char_repo.get_by_project(project_id, page=1, page_size=100)
-                for char in chars.items if hasattr(chars, 'items') else chars:
-                    for v in char.versions:
-                        if v.id in shot.char_version_ids:
-                            char_version_lookup[v.id] = char.name
-
-            # 构建场景版本ID→"场景名·版本名"映射
-            from app.repositories.storyboard import StoryboardRepository
-            sb_repo = StoryboardRepository(session)
-            project_id = await sb_repo.get_project_id(shot.storyboard_id) or 0
-
-            location_version_lookup: dict[int, str] = {}
-            env = shot.environment or {}
-            loc_ver_id = env.get("location_version_id") or env.get("location_id")
-            if loc_ver_id:
-                locs = await loc_repo.get_by_project(project_id, page=1, page_size=100)
-                for loc in locs.items if hasattr(locs, 'items') else locs:
-                    for v in loc.versions:
-                        if v.id == loc_ver_id or v.location_id == loc_ver_id:
-                            label = v.label or v.version_code or f"版本{v.id}"
-                            location_version_lookup[v.id] = f"{loc.name}·{label}"
-            # Also build all location version mappings for image refs
-            locs = await loc_repo.get_by_project(project_id, page=1, page_size=100)
-            for loc in locs.items if hasattr(locs, 'items') else locs:
-                for v in loc.versions:
-                    if v.id not in location_version_lookup:
-                        label = v.label or v.version_code or f"版本{v.id}"
-                        location_version_lookup[v.id] = f"{loc.name}·{label}"
+            # 从 shot 直接读取关联的角色/场景参考图（已含 name，无需 DB 查询）
+            shot_char_refs: list[dict] = getattr(shot, "char_image_refs", None) or []
+            shot_loc_refs: list[dict] = getattr(shot, "location_image_refs", None) or []
+            shot_image_refs = shot_char_refs + shot_loc_refs
 
             # 更新镜头状态为生成中
             await shot_repo.update(shot, {"status": "generating"})
@@ -187,8 +147,8 @@ async def _run_video_generation(task: VideoGenerationTask, task_db_id: int) -> d
             else:
                 image_start = None
 
-            # 构建完整的视频提示词（含角色参考图标记、角色名、场景名）
-            prompt = build_video_prompt(shot, char_version_lookup, location_version_lookup, group_image_refs)
+            # 构建完整的视频提示词（含角色参考图标记，name 直接从 shot.char_image_refs / shot.location_image_refs 读取）
+            prompt = build_video_prompt(shot, None, None, shot_image_refs)
 
             logger.info("开始生成视频：shot=%s quality=%s sound=%s", shot.shot_code, quality, sound)
             logger.info("=" * 60)
@@ -326,8 +286,6 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
     from app.models.task import GenerationTask
     from app.repositories.shot import ShotRepository
     from app.repositories.shot_group import ShotGroupRepository
-    from app.repositories.character import CharacterRepository
-    from app.repositories.storyboard import StoryboardRepository
     from app.repositories.task import TaskRepository
     from app.utils.evolink import evolink_client, MultiShotPrompt
 
@@ -372,39 +330,30 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
             await group_repo.update(group, {"status": "generating"})
             await session.commit()
 
-            # 构建角色版本ID→角色名映射 & 场景版本ID→"场景名·版本名"映射
-            char_version_lookup: dict[int, str] = {}
-            location_version_lookup: dict[int, str] = {}
-            all_char_version_ids = set()
-            all_location_version_ids = set()
-            for s in member_shots:
-                all_char_version_ids.update(s.char_version_ids or [])
-                env = s.environment or {}
-                lvid = env.get("location_version_id") or env.get("location_id")
-                if lvid:
-                    all_location_version_ids.add(lvid)
-            if all_char_version_ids or all_location_version_ids:
-                char_repo = CharacterRepository(session)
-                loc_repo = LocationRepository(session)
-                sb_repo = StoryboardRepository(session)
-                project_id = await sb_repo.get_project_id(group.storyboard_id) or 0
-                chars = await char_repo.get_by_project(project_id, page=1, page_size=100)
-                for char in chars.items if hasattr(chars, 'items') else chars:
-                    for v in char.versions:
-                        if v.id in all_char_version_ids:
-                            char_version_lookup[v.id] = char.name
-                locs = await loc_repo.get_by_project(project_id, page=1, page_size=100)
-                for loc in locs.items if hasattr(locs, 'items') else locs:
-                    for v in loc.versions:
-                        if v.id in all_location_version_ids:
-                            label = v.label or v.version_code or f"版本{v.id}"
-                            location_version_lookup[v.id] = f"{loc.name}·{label}"
-
             # 构建多镜头提示词
+            from app.prompts import build_shot_image_ref_header
             shot_durations = [_normalize_kling_duration(shot.duration_sec) for shot in member_shots]
             multi_prompts = []
+            # 收集所有 shot-level 参考图 URL（flatten 所有 shot 的 refs）
+            all_shot_ref_urls: list[str] = []
             for i, (shot, normalized_duration) in enumerate(zip(member_shots, shot_durations, strict=False)):
+                # 收集该 shot 的参考图 URL
+                char_refs: list[dict] = getattr(shot, "char_image_refs", None) or []
+                loc_refs: list[dict] = getattr(shot, "location_image_refs", None) or []
+                shot_urls = []
+                for ref in char_refs + loc_refs:
+                    for url in ref.get("urls", []):
+                        if url and url not in all_shot_ref_urls:
+                            all_shot_ref_urls.append(url)
+                            shot_urls.append(url)
+                # 为该 shot 构建独立的参考图 header
+                shot_header = build_shot_image_ref_header(shot)
                 prompt_text = build_compact_video_prompt(shot)
+                if shot_header:
+                    prompt_text = shot_header + prompt_text
+                    # 确保不超过 512 字符
+                    if len(prompt_text) > 512:
+                        prompt_text = prompt_text[:512]
                 multi_prompts.append(MultiShotPrompt(
                     index=i + 1,
                     prompt=prompt_text,
@@ -435,34 +384,31 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
             if evolink_task_id:
                 logger.info("检测到已提交的 Evolink 任务，继续轮询：%s", evolink_task_id)
             else:
-                # Check if the group has associated reference images for image-to-video
-                image_refs = getattr(group, 'image_references', None) or []
-                has_images = len(image_refs) > 0
+                # 从各成员 shot 的 char_image_refs / location_image_refs 收集参考图
+                has_images = len(all_shot_ref_urls) > 0
 
                 if has_images:
-                    # Use image-to-video mode
-                    image_start = getattr(group, 'image_start_url', None) or None
-                    reference_urls = [ref['url'] for ref in image_refs if ref.get('url')]
+                    # 使用 shot-level 参考图作为 image-to-video 的 reference_urls
+                    image_start = None
 
                     # If no explicit image_start, use the first reference image
-                    if not image_start and reference_urls:
-                        image_start = reference_urls[0]
+                    if not image_start and all_shot_ref_urls:
+                        image_start = all_shot_ref_urls[0]
 
-                    # Inject 角色参考图标记 into prompts
-                    from app.prompts import inject_image_refs_into_prompts
-                    multi_prompts = inject_image_refs_into_prompts(multi_prompts, image_refs, char_version_lookup, location_version_lookup)
+                    # Inject 角色参考图标记 into prompts（每个 shot 已在上方单独注入，无需再次调用）
+
 
 
                     logger.info(
                         "使用 image-to-video 模式：image_start=%s, reference_urls=%d张, 提示词:\n%s",
                         image_start,
-                        len(reference_urls),
+                        len(all_shot_ref_urls),
                         "\n".join([f"  镜头 {mp.index} 提示词:\n{mp.prompt}" for mp in multi_prompts])
                     )
                     video_task = await evolink_client.image_to_video(
                         multi_shot_prompts=multi_prompts,
                         image_start=None,
-                        image_urls=reference_urls if reference_urls else None,
+                        image_urls=all_shot_ref_urls if all_shot_ref_urls else None,
                         duration=total_duration,
                         quality=quality,
                         sound=sound,

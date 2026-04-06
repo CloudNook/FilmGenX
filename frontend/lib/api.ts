@@ -794,6 +794,10 @@ export interface ShotResponse {
   qc_score: number | null;
   status: string;
   video_url: string | null;
+  /** 镜头关联的角色参考图：[{char_version_id, name, urls}] */
+  char_image_refs: CharImageRef[];
+  /** 镜头关联的场景参考图：[{location_version_id, location_id, name, urls}] */
+  location_image_refs: LocationImageRef[];
   created_at: string;
   updated_at: string;
 }
@@ -850,8 +854,26 @@ export interface ShotGroupMember {
 export interface ImageRef {
   char_version_id?: number | null;
   location_id?: number | null;
+  location_version_id?: number | null;
+  /** 角色或场景的显示名称，用于提示词生成 */
+  name?: string;
   url: string;
   label: string;
+}
+
+/** 镜头关联的角色参考图（存储格式） */
+export interface CharImageRef {
+  char_version_id: number;
+  name: string;
+  urls: string[];
+}
+
+/** 镜头关联的场景参考图（存储格式） */
+export interface LocationImageRef {
+  location_version_id?: number | null;
+  location_id?: number | null;
+  name: string;
+  urls: string[];
 }
 
 export interface ShotGroupResponse {

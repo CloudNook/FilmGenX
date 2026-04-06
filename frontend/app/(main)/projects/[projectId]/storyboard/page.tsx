@@ -20,6 +20,8 @@ import {
   type CharacterResponse,
   type LocationResponse,
   type ImageRef,
+  type CharImageRef,
+  type LocationImageRef,
 } from '@/lib/api';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -544,45 +546,65 @@ export default function StoryboardPage({
   const selectedShotGroup = selectedShot ? getGroupForShot(selectedShot) : null;
   const activeGroup = selectedGroup || selectedShotGroup;
 
-  // Save image picker selections to shot group
+  // Save image picker selections to the current shot's char_image_refs / location_image_refs
   const handleImagePickerConfirm = useCallback(
-    async (refs: ImageRef[], imgStartUrl: string | null) => {
+    async (refs: ImageRef[], _imgStartUrl: string | null) => {
       if (!storyboard || !selectedShot) return;
       try {
-        let group = activeGroup;
+        // Group refs by char_version_id
+        const charMap = new Map<number, { name: string; urls: Set<string> }>();
+        const locMap = new Map<number, { name: string; urls: Set<string> }>();
 
-        // If no group exists, auto-create a single-shot group
-        if (!group) {
-          const groupCode = `G${String(shotGroups.length + 1).padStart(3, '0')}`;
-          group = await shotGroupsApi.create(storyboard.id, {
-            group_code: groupCode,
-            shot_ids: [selectedShot.id],
-          });
-          setShotGroups((prev) => [...prev, group!]);
-          setSelectedGroup(group);
-          const refreshed = await shotsApi.list(storyboard.id);
-          setShots(refreshed);
+        for (const ref of refs) {
+          if (ref.char_version_id) {
+            if (!charMap.has(ref.char_version_id)) {
+              charMap.set(ref.char_version_id, { name: ref.name ?? '', urls: new Set() });
+            }
+            charMap.get(ref.char_version_id)!.urls.add(ref.url);
+            if (ref.name) {
+              charMap.get(ref.char_version_id)!.name = ref.name;
+            }
+          } else if (ref.location_version_id || ref.location_id) {
+            const key = ref.location_version_id ?? ref.location_id!;
+            if (!locMap.has(key)) {
+              locMap.set(key, { name: ref.name ?? '', urls: new Set() });
+            }
+            locMap.get(key)!.urls.add(ref.url);
+            if (ref.name) {
+              locMap.get(key)!.name = ref.name;
+            }
+          }
         }
 
-        const updatedGroup = await shotGroupsApi.update(
-          storyboard.id,
-          group.id,
-          {
-            image_references: refs,
-            image_start_url: imgStartUrl,
-          },
+        const char_image_refs: CharImageRef[] = Array.from(charMap.entries()).map(
+          ([char_version_id, { name, urls }]) => ({
+            char_version_id,
+            name,
+            urls: Array.from(urls),
+          }),
         );
-        setShotGroups((prev) =>
-          prev.map((g) => (g.id === updatedGroup.id ? updatedGroup : g)),
+
+        const location_image_refs: LocationImageRef[] = Array.from(locMap.entries()).map(
+          ([key, { name, urls }]) => ({
+            location_version_id: key,
+            name,
+            urls: Array.from(urls),
+          }),
         );
-        setSelectedGroup(updatedGroup);
+
+        const updatedShot = await shotsApi.update(storyboard.id, selectedShot.id, {
+          char_image_refs,
+          location_image_refs,
+        });
+
+        setShots((prev) => prev.map((s) => (s.id === updatedShot.id ? updatedShot : s)));
+        setSelectedShot(updatedShot);
         setImagePickerOpen(false);
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : '保存图片关联失败');
       }
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [storyboard, selectedShot?.id, activeGroup, shotGroups.length],
+    [storyboard, selectedShot?.id],
   );
 
   // Derive generating state from API status (not simulated)
@@ -1178,13 +1200,35 @@ export default function StoryboardPage({
         </ResizablePanel>
       </ResizablePanelGroup>
 
-      {/* Image Picker Dialog for ShotGroup */}
+      {/* Image Picker Dialog for Shot */}
       <ImagePickerDialog
         open={imagePickerOpen}
         onOpenChange={setImagePickerOpen}
         projectId={projectIdNum}
-        existingRefs={activeGroup?.image_references || []}
-        existingImageStartUrl={activeGroup?.image_start_url || null}
+        existingRefs={
+          selectedShot
+            ? [
+                ...(selectedShot.char_image_refs ?? []).flatMap((r) =>
+                  r.urls.map((url) => ({
+                    char_version_id: r.char_version_id,
+                    name: r.name,
+                    url,
+                    label: r.name,
+                  })),
+                ),
+                ...(selectedShot.location_image_refs ?? []).flatMap((r) =>
+                  r.urls.map((url) => ({
+                    location_version_id: r.location_version_id,
+                    location_id: r.location_id,
+                    name: r.name,
+                    url,
+                    label: r.name,
+                  })),
+                ),
+              ]
+            : []
+        }
+        existingImageStartUrl={null}
         onConfirm={handleImagePickerConfirm}
       />
     </AppLayout>
