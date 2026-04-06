@@ -111,10 +111,61 @@ async def _run_video_generation(task: VideoGenerationTask, task_db_id: int) -> d
         await session.commit()
 
         try:
+            from app.repositories.character import CharacterRepository
+            from app.repositories.location import LocationRepository
+            from app.repositories.shot_group import ShotGroupRepository
+
             shot_repo = ShotRepository(session)
+            char_repo = CharacterRepository(session)
+            loc_repo = LocationRepository(session)
+            group_repo = ShotGroupRepository(session)
+
             shot = await shot_repo.get(gen_task.shot_id)
             if not shot:
                 raise ValueError(f"Shot {gen_task.shot_id} 不存在")
+
+            # 获取镜头的分镜组（用于获取 image_references）
+            group_image_refs: list[dict] = []
+            if shot.shot_group_id:
+                group = await group_repo.get(shot.shot_group_id)
+                if group and group.image_references:
+                    group_image_refs = group.image_references
+
+            # 构建角色版本ID→角色名映射
+            char_version_lookup: dict[int, str] = {}
+            if shot.char_version_ids:
+                from app.repositories.storyboard import StoryboardRepository
+                sb_repo = StoryboardRepository(session)
+                project_id = await sb_repo.get_project_id(shot.storyboard_id) or 0
+
+                chars = await char_repo.get_by_project(project_id, page=1, page_size=100)
+                for char in chars.items if hasattr(chars, 'items') else chars:
+                    for v in char.versions:
+                        if v.id in shot.char_version_ids:
+                            char_version_lookup[v.id] = char.name
+
+            # 构建场景版本ID→"场景名·版本名"映射
+            from app.repositories.storyboard import StoryboardRepository
+            sb_repo = StoryboardRepository(session)
+            project_id = await sb_repo.get_project_id(shot.storyboard_id) or 0
+
+            location_version_lookup: dict[int, str] = {}
+            env = shot.environment or {}
+            loc_ver_id = env.get("location_version_id") or env.get("location_id")
+            if loc_ver_id:
+                locs = await loc_repo.get_by_project(project_id, page=1, page_size=100)
+                for loc in locs.items if hasattr(locs, 'items') else locs:
+                    for v in loc.versions:
+                        if v.id == loc_ver_id or v.location_id == loc_ver_id:
+                            label = v.label or v.version_code or f"版本{v.id}"
+                            location_version_lookup[v.id] = f"{loc.name}·{label}"
+            # Also build all location version mappings for image refs
+            locs = await loc_repo.get_by_project(project_id, page=1, page_size=100)
+            for loc in locs.items if hasattr(locs, 'items') else locs:
+                for v in loc.versions:
+                    if v.id not in location_version_lookup:
+                        label = v.label or v.version_code or f"版本{v.id}"
+                        location_version_lookup[v.id] = f"{loc.name}·{label}"
 
             # 更新镜头状态为生成中
             await shot_repo.update(shot, {"status": "generating"})
@@ -136,8 +187,8 @@ async def _run_video_generation(task: VideoGenerationTask, task_db_id: int) -> d
             else:
                 image_start = None
 
-            # 构建完整的视频提示词（从 shot 各字段拼接，含负面提示词）
-            prompt = build_video_prompt(shot)
+            # 构建完整的视频提示词（含角色参考图标记、角色名、场景名）
+            prompt = build_video_prompt(shot, char_version_lookup, location_version_lookup, group_image_refs)
 
             logger.info("开始生成视频：shot=%s quality=%s sound=%s", shot.shot_code, quality, sound)
             logger.info("=" * 60)
@@ -275,6 +326,8 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
     from app.models.task import GenerationTask
     from app.repositories.shot import ShotRepository
     from app.repositories.shot_group import ShotGroupRepository
+    from app.repositories.character import CharacterRepository
+    from app.repositories.storyboard import StoryboardRepository
     from app.repositories.task import TaskRepository
     from app.utils.evolink import evolink_client, MultiShotPrompt
 
@@ -318,6 +371,34 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
                 await shot_repo.update(shot, {"status": "generating"})
             await group_repo.update(group, {"status": "generating"})
             await session.commit()
+
+            # 构建角色版本ID→角色名映射 & 场景版本ID→"场景名·版本名"映射
+            char_version_lookup: dict[int, str] = {}
+            location_version_lookup: dict[int, str] = {}
+            all_char_version_ids = set()
+            all_location_version_ids = set()
+            for s in member_shots:
+                all_char_version_ids.update(s.char_version_ids or [])
+                env = s.environment or {}
+                lvid = env.get("location_version_id") or env.get("location_id")
+                if lvid:
+                    all_location_version_ids.add(lvid)
+            if all_char_version_ids or all_location_version_ids:
+                char_repo = CharacterRepository(session)
+                loc_repo = LocationRepository(session)
+                sb_repo = StoryboardRepository(session)
+                project_id = await sb_repo.get_project_id(group.storyboard_id) or 0
+                chars = await char_repo.get_by_project(project_id, page=1, page_size=100)
+                for char in chars.items if hasattr(chars, 'items') else chars:
+                    for v in char.versions:
+                        if v.id in all_char_version_ids:
+                            char_version_lookup[v.id] = char.name
+                locs = await loc_repo.get_by_project(project_id, page=1, page_size=100)
+                for loc in locs.items if hasattr(locs, 'items') else locs:
+                    for v in loc.versions:
+                        if v.id in all_location_version_ids:
+                            label = v.label or v.version_code or f"版本{v.id}"
+                            location_version_lookup[v.id] = f"{loc.name}·{label}"
 
             # 构建多镜头提示词
             shot_durations = [_normalize_kling_duration(shot.duration_sec) for shot in member_shots]
@@ -367,9 +448,9 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
                     if not image_start and reference_urls:
                         image_start = reference_urls[0]
 
-                    # Inject <<<image_N>>> references into prompts
+                    # Inject 角色参考图标记 into prompts
                     from app.prompts import inject_image_refs_into_prompts
-                    multi_prompts = inject_image_refs_into_prompts(multi_prompts, image_refs)
+                    multi_prompts = inject_image_refs_into_prompts(multi_prompts, image_refs, char_version_lookup, location_version_lookup)
 
 
                     logger.info(

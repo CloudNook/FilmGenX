@@ -2000,13 +2000,8 @@ function LocationVersionDialog({
   }, [open, version]);
 
   const handleSave = useCallback(async () => {
-    const normalizedVersionCode = versionCode.trim().toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
     if (!label.trim()) {
       toast.error('请输入版本名称');
-      return;
-    }
-    if (!version && !normalizedVersionCode) {
-      toast.error('请输入版本编码');
       return;
     }
 
@@ -2029,10 +2024,7 @@ function LocationVersionDialog({
         await locationsApi.updateVersion(projectId, locationId, version.id, payload);
         toast.success('场景版本已更新');
       } else {
-        await locationsApi.createVersion(projectId, locationId, {
-          version_code: normalizedVersionCode,
-          ...payload,
-        });
+        await locationsApi.createVersion(projectId, locationId, payload);
         toast.success('场景版本已创建');
       }
 

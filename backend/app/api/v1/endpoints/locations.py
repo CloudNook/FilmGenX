@@ -196,6 +196,12 @@ async def create_version(
     if data.get("atmosphere_override") and hasattr(data["atmosphere_override"], "model_dump"):
         data["atmosphere_override"] = data["atmosphere_override"].model_dump()
 
+    # 如果没有传 version_code，从 label 自动生成
+    if not data.get("version_code"):
+        import re
+        generated = re.sub(r"[^a-z0-9]", "_", data["label"].lower().strip())
+        data["version_code"] = generated[:30]
+
     repo = LocationVersionRepository(db)
     version = await repo.create(location_id=location_id, **data)
     if version.is_default:

@@ -105,11 +105,11 @@ class LocationBrief(BaseModel):
 
 class LocationVersionCreate(BaseModel):
     """创建场景变体请求体。"""
-    version_code: str = Field(
-        ...,
+    version_code: Optional[str] = Field(
+        None,
         max_length=30,
-        pattern=r"^[a-z0-9_]+$",
-        description="版本标识，如 'night' / 'battle_damaged'"
+        pattern=r"^[a-z0-9_]*$",
+        description="版本标识，如 'night' / 'battle_damaged'，不填则自动从版本名称生成"
     )
     label: str = Field(..., max_length=100, description="版本显示名称")
     description: Optional[str] = Field(None, description="该变体的特殊描述")

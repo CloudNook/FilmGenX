@@ -849,6 +849,7 @@ export interface ShotGroupMember {
 
 export interface ImageRef {
   char_version_id?: number | null;
+  location_id?: number | null;
   url: string;
   label: string;
 }

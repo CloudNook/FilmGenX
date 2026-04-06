@@ -626,11 +626,22 @@ def _append_line(
         lines.append(f"{label}:{normalized}")
 
 
-def build_video_prompt(shot: "Shot") -> str:
+def build_video_prompt(
+    shot: "Shot",
+    char_version_lookup: dict[int, str] | None = None,
+    location_version_lookup: dict[int, str] | None = None,
+    image_refs: list[dict] | None = None,
+) -> str:
     """
     从 Shot 对象构建结构化的视频生成提示词（Kling 单镜头模式，≤2000 字符）。
 
     输出格式为 key:value 结构化文本，便于 Kling 模型理解和人类审阅。
+
+    Args:
+        shot: 镜头对象
+        char_version_lookup: 可选，角色版本ID→角色名称的映射
+        location_version_lookup: 可选，场景版本ID→"场景名·版本名"的映射
+        image_refs: 可选，image_references 列表（来自 ShotGroup），用于注入角色/场景参考图标记
     """
     lines = []
 
@@ -640,6 +651,24 @@ def build_video_prompt(shot: "Shot") -> str:
     characters_config = shot.characters_config or []
     dialogue_delivery = shot.dialogue_delivery or {}
     sound_design = shot.sound_design or {}
+
+    # ── 参考图标记（Kling 图生视频时需要） ──
+    if image_refs:
+        ref_header = build_image_ref_header(image_refs, char_version_lookup, location_version_lookup)
+        if ref_header:
+            lines.append(ref_header.rstrip("\n"))
+
+    # ── 角色关联说明 ──
+    if char_version_lookup and shot.char_version_ids:
+        char_names = [char_version_lookup.get(vid, f"角色{vid}") for vid in shot.char_version_ids]
+        _append_line(lines, "角色", "、".join(char_names))
+
+    # ── 场景关联说明 ──
+    if location_version_lookup:
+        loc_ver_id = environment.get("location_version_id") or environment.get("location_id")
+        if loc_ver_id:
+            loc_name = location_version_lookup.get(loc_ver_id, f"场景{loc_ver_id}")
+            _append_line(lines, "场景", loc_name)
 
     # ── 画面 ──
     _append_line(lines, "画面", shot.image_prompt or "anime style, high quality, dynamic lighting")
@@ -762,46 +791,68 @@ def build_negative_prompt(shot: "Shot") -> str:
     return base_negative
 
 
+def build_image_ref_header(
+    image_refs: list[dict],
+    char_version_lookup: dict[int, str] | None = None,
+    location_version_lookup: dict[int, str] | None = None,
+) -> str:
+    """根据 image_references 构建参考图声明头。
+
+    示例输出：
+        角色萧炎: <<<image_1>>>
+        角色纳兰嫣然: <<<image_2>>>
+        场景云岚宗·夜: <<<image_3>>>
+    """
+    if not image_refs:
+        return ""
+    lines = []
+    image_idx = 0
+    for ref in image_refs:
+        if ref.get("char_version_id"):
+            image_idx += 1
+            vid = ref["char_version_id"]
+            name = char_version_lookup.get(vid, f"角色{vid}") if char_version_lookup else f"角色{vid}"
+            lines.append(f"角色{name}: <<<image_{image_idx}>>>")
+    for ref in image_refs:
+        vid = ref.get("location_version_id")
+        if vid and location_version_lookup:
+            image_idx += 1
+            name = location_version_lookup.get(vid, f"场景{vid}")
+            lines.append(f"场景{name}: <<<image_{image_idx}>>>")
+        elif ref.get("location_id"):
+            image_idx += 1
+            lid = ref["location_id"]
+            lines.append(f"场景{lid}: <<<image_{image_idx}>>>")
+    return "\n".join(lines) + "\n"
+
+
 def inject_image_refs_into_prompts(
     multi_prompts: list,
     image_refs: list[dict],
+    char_version_lookup: dict[int, str] | None = None,
+    location_version_lookup: dict[int, str] | None = None,
 ) -> list:
     """将 image_references 注入到多镜头提示词中。
 
-    对每个提示词的 prompt 文本，在「人物」行中追加 <<<image_N>>> 引用标记，
-    使 Kling API 知道哪些参考图对应哪些角色。
+    对每个提示词的 prompt 文本，在开头追加参考图声明，
+    使 Kling API 知道哪些参考图对应哪些角色/场景。
 
-    image_refs 格式：[{char_version_id, url, label}, ...]
-    多个带有 char_version_id 的引用会依次编号为 image_1, image_2, ...
+    image_refs 格式：[{char_version_id, location_version_id, location_id, url, label}, ...]
 
     示例输出片段：
-        人物1:萧炎(<<<image_1>>>), action description
-        人物2:纳兰嫣然(<<<image_2>>>), action description
+        角色萧炎: <<<image_1>>>
+        角色纳兰嫣然: <<<image_2>>>
+        场景云岚宗·夜: <<<image_3>>>
     """
     if not image_refs:
         return multi_prompts
 
-    # 构建 char_version_id → image_N 映射
-    char_refs = [ref for ref in image_refs if ref.get("char_version_id")]
-    char_ref_index = {ref["char_version_id"]: i + 1 for i, ref in enumerate(char_refs)}
-
-    # 如果没有角色引用，直接返回原始提示词（场景图不需要注入到 prompt）
-    # if not char_refs:
-    #     return multi_prompts
+    header = build_image_ref_header(image_refs, char_version_lookup, location_version_lookup)
+    if not header:
+        return multi_prompts
 
     for mp in multi_prompts:
-        # 在提示词开头追加参考图声明
-        # ref_parts = []
-        # for ref in char_refs:
-        #     idx = char_ref_index[ref["char_version_id"]]
-        #     label = ref.get("label", f"角色萧炎: ")
-        #     # 提取角色名（label 格式通常是 "角色 - 参考图 1" 或 "角色 - 三视图"）
-        #     ref_parts.append(f"<<<image_{idx}>>>")
-
-        # if ref_parts:
-        image_header = "角色纳兰嫣然参考图: <<<image_1>>>\n 角色萧炎参考图: <<<image_2>>>\n"
-        # 在 prompt 最前面插入参考图标记，并确保总长度不超过 512 字符
-        new_prompt = f"{image_header}{mp.prompt}"
+        new_prompt = f"{header}{mp.prompt}"
         max_len = 512
         if len(new_prompt) > max_len:
             new_prompt = new_prompt[:max_len]

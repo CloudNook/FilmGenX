@@ -10,11 +10,15 @@ import {
   shotsApi,
   shotGroupsApi,
   tasksApi,
+  charactersApi,
+  locationsApi,
   type ProjectResponse,
   type SceneResponse,
   type StoryboardResponse,
   type ShotResponse,
   type ShotGroupResponse,
+  type CharacterResponse,
+  type LocationResponse,
   type ImageRef,
 } from '@/lib/api';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -1155,6 +1159,7 @@ export default function StoryboardPage({
               <ShotDetailPanel
                 key={selectedShot.id}
                 shot={selectedShot}
+                projectId={projectIdNum}
                 storyboardId={storyboard?.id}
                 activeGroup={activeGroup}
                 onOpenImagePicker={() => setImagePickerOpen(true)}
@@ -1192,6 +1197,7 @@ export default function StoryboardPage({
 
 function ShotDetailPanel({
   shot,
+  projectId,
   storyboardId,
   activeGroup,
   onOpenImagePicker,
@@ -1199,6 +1205,7 @@ function ShotDetailPanel({
   onDelete,
 }: {
   shot: ShotResponse;
+  projectId: number;
   storyboardId?: number;
   activeGroup?: ShotGroupResponse | null;
   onOpenImagePicker?: () => void;
@@ -1209,6 +1216,17 @@ function ShotDetailPanel({
   const [form, setForm] = useState<Record<string, unknown>>({});
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  // Character & location data for pickers
+  const [characters, setCharacters] = useState<CharacterResponse[]>([]);
+  const [locations, setLocations] = useState<LocationResponse[]>([]);
+  const [loadingChars, setLoadingChars] = useState(false);
+  const [loadingLocs, setLoadingLocs] = useState(false);
+  const [locationVersionMap, setLocationVersionMap] = useState<Record<number, { locationId: number; locationName: string; versionLabel: string }>>({});
+
+  // Map: charVersionId → { charId, charName, versionLabel }
+  type CharVersionInfo = { charId: number; charName: string; versionLabel: string };
+  const [charVersionMap, setCharVersionMap] = useState<Record<number, CharVersionInfo>>({});
 
   const initForm = (s: ShotResponse) => ({
     shot_code: s.shot_code,
@@ -1249,6 +1267,110 @@ function ShotDetailPanel({
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storyboardId, shot.id]);
+
+  // Fetch characters for picker
+  useEffect(() => {
+    if (!projectId) return;
+    setLoadingChars(true);
+    charactersApi.list(projectId, 1, 100).then(async (page) => {
+      setCharacters(page.items);
+      // Fetch details for each character to get versions
+      const versionMap: Record<number, CharVersionInfo> = {};
+      await Promise.allSettled(
+        page.items.map((char) =>
+          charactersApi.get(projectId, char.id).then((detail) => {
+            detail.versions.forEach((v) => {
+              versionMap[v.id] = {
+                charId: char.id,
+                charName: char.name,
+                versionLabel: v.label || v.version_code,
+              };
+            });
+          }),
+        ),
+      );
+      setCharVersionMap(versionMap);
+    }).catch(() => {
+      // ignore errors silently
+    }).finally(() => setLoadingChars(false));
+  }, [projectId]);
+
+  // Fetch locations for picker
+  useEffect(() => {
+    if (!projectId) return;
+    setLoadingLocs(true);
+    locationsApi.listBrief(projectId).then((locs) => {
+      setLocations(locs);
+    }).catch(() => {
+      // ignore errors silently
+    }).finally(() => setLoadingLocs(false));
+  }, [projectId]);
+
+  // Add a character version to the shot
+  const handleAddCharacter = (charVersionId: number, charName: string, versionLabel: string) => {
+    const currentIds = (form.char_version_ids as number[]) || [];
+    if (currentIds.includes(charVersionId)) return; // already added
+
+    const newIds = [...currentIds, charVersionId];
+    const newConfig = [
+      ...((form.characters_config as Array<Record<string, unknown>>) || []),
+      { char_version_id: charVersionId, action: '', expression: '' },
+    ];
+    updateField('char_version_ids', newIds);
+    updateField('characters_config', newConfig);
+  };
+
+  // Remove a character version from the shot
+  const handleRemoveCharacter = (charVersionId: number) => {
+    const newIds = ((form.char_version_ids as number[]) || []).filter((id) => id !== charVersionId);
+    const newConfig = ((form.characters_config as Array<Record<string, unknown>>) || []).filter(
+      (c) => c.char_version_id !== charVersionId,
+    );
+    updateField('char_version_ids', newIds);
+    updateField('characters_config', newConfig);
+  };
+
+  // Change location
+  const handleLocationChange = async (locationId: number | null) => {
+    const env = (form.environment as Record<string, unknown>) || {};
+
+    if (locationId == null) {
+      updateField('environment', { ...env, location_id: null, location_version_id: null });
+      return;
+    }
+
+    // Fetch location details to get versions
+    try {
+      const detail = await locationsApi.get(projectId, locationId);
+      const newMap = { ...locationVersionMap };
+
+      // Build version map for this location
+      const defaultVersionId = detail.default_version?.id ?? detail.versions?.[0]?.id ?? null;
+      for (const v of detail.versions || []) {
+        newMap[v.id] = {
+          locationId: detail.id,
+          locationName: detail.name,
+          versionLabel: v.label || v.version_code,
+        };
+      }
+      setLocationVersionMap(newMap);
+
+      updateField('environment', {
+        ...env,
+        location_id: locationId,
+        // Auto-select default version
+        location_version_id: defaultVersionId,
+      });
+    } catch {
+      updateField('environment', { ...env, location_id: locationId, location_version_id: null });
+    }
+  };
+
+  // Change location version
+  const handleLocationVersionChange = (versionId: number | null) => {
+    const env = (form.environment as Record<string, unknown>) || {};
+    updateField('environment', { ...env, location_version_id: versionId });
+  };
 
   const updateField = (key: string, value: unknown) => {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -1423,40 +1545,123 @@ function ShotDetailPanel({
 
         {/* Characters Config */}
         <div className="space-y-3">
-          <h3 className="text-sm font-medium text-foreground">角色配置</h3>
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-medium text-foreground">角色关联</h3>
+            {loadingChars ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+            ) : (
+              <Select
+                onValueChange={(val) => {
+                  const [charId, versionId] = val.split(':');
+                  handleAddCharacter(Number(versionId), '', '');
+                }}
+              >
+                <SelectTrigger className="h-7 text-xs w-auto min-w-[80px]">
+                  <Plus className="h-3 w-3 mr-1" />
+                  <SelectValue placeholder="添加角色" />
+                </SelectTrigger>
+                <SelectContent>
+                  {/* Grouped by character — show one version per character as option */}
+                  {(() => {
+                    const seen = new Set<number>();
+                    return characters
+                      .filter((char) => {
+                        if (seen.has(char.id)) return false;
+                        seen.add(char.id);
+                        return true;
+                      })
+                      .map((char) => {
+                        const versionId = Object.keys(charVersionMap).find(
+                          (k) => charVersionMap[Number(k)]?.charId === char.id,
+                        );
+                        const info = versionId ? charVersionMap[Number(versionId)] : undefined;
+                        return (
+                          <SelectItem
+                            key={`char-${char.id}`}
+                            value={`${char.id}:${versionId ?? 0}`}
+                            disabled={!versionId}
+                          >
+                            {char.name}
+                            {info ? ` — ${info.versionLabel}` : ''}
+                          </SelectItem>
+                        );
+                      });
+                  })()}
+                </SelectContent>
+              </Select>
+            )}
+          </div>
+
+          {/* Selected character badges */}
+          {(form.char_version_ids as number[])?.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {(form.char_version_ids as number[]).map((versionId) => {
+                const info = charVersionMap[versionId];
+                return (
+                  <Badge
+                    key={versionId}
+                    variant="outline"
+                    className="flex items-center gap-1 pr-1 pl-2 py-0.5 text-xs cursor-pointer hover:bg-destructive/10"
+                    onClick={() => handleRemoveCharacter(versionId)}
+                    title="点击移除"
+                  >
+                    {info ? `${info.charName} — ${info.versionLabel}` : `版本 #${versionId}`}
+                    <X className="h-3 w-3 text-muted-foreground hover:text-destructive" />
+                  </Badge>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Action/expression fields per character */}
           <div className="space-y-2">
             {charactersConfig.length > 0 ? (
-              charactersConfig.map((char, idx) => (
-                <div key={idx} className="p-2 bg-secondary/50 rounded-lg space-y-2">
-                  <div>
-                    <label className="text-xs text-muted-foreground">动作</label>
-                    <Textarea
-                      value={char.action || ''}
-                      onChange={(e) => {
-                        const updated = [...charactersConfig];
-                        updated[idx] = { ...updated[idx], action: e.target.value };
-                        updateField('characters_config', updated);
-                      }}
-                      className="mt-1 bg-secondary border-border text-xs resize-none"
-                      rows={2}
-                    />
+              charactersConfig.map((char, idx) => {
+                const info = charVersionMap[char.char_version_id as unknown as number];
+                return (
+                  <div key={idx} className="p-2 bg-secondary/50 rounded-lg space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-medium text-foreground">
+                        {info ? `${info.charName} — ${info.versionLabel}` : `角色版本 #${char.char_version_id}`}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveCharacter(char.char_version_id as unknown as number)}
+                        className="text-xs text-muted-foreground hover:text-destructive"
+                      >
+                        移除
+                      </button>
+                    </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground">动作</label>
+                      <Textarea
+                        value={char.action || ''}
+                        onChange={(e) => {
+                          const updated = [...charactersConfig];
+                          updated[idx] = { ...updated[idx], action: e.target.value };
+                          updateField('characters_config', updated);
+                        }}
+                        className="mt-1 bg-secondary border-border text-xs resize-none"
+                        rows={2}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground">表情</label>
+                      <Input
+                        value={char.expression || ''}
+                        onChange={(e) => {
+                          const updated = [...charactersConfig];
+                          updated[idx] = { ...updated[idx], expression: e.target.value };
+                          updateField('characters_config', updated);
+                        }}
+                        className="mt-1 bg-secondary border-border text-xs h-8"
+                      />
+                    </div>
                   </div>
-                  <div>
-                    <label className="text-xs text-muted-foreground">表情</label>
-                    <Input
-                      value={char.expression || ''}
-                      onChange={(e) => {
-                        const updated = [...charactersConfig];
-                        updated[idx] = { ...updated[idx], expression: e.target.value };
-                        updateField('characters_config', updated);
-                      }}
-                      className="mt-1 bg-secondary border-border text-xs h-8"
-                    />
-                  </div>
-                </div>
-              ))
+                );
+              })
             ) : (
-              <p className="text-xs text-muted-foreground">无角色配置</p>
+              <p className="text-xs text-muted-foreground">点击右上角「+」添加角色关联</p>
             )}
           </div>
         </div>
@@ -1533,6 +1738,80 @@ function ShotDetailPanel({
         <div className="space-y-3">
           <h3 className="text-sm font-medium text-foreground">场景环境</h3>
           <div className="space-y-2">
+            {/* Location picker */}
+            <div>
+              <label className="text-xs text-muted-foreground">场景地点</label>
+              <Select
+                value={String(environment.location_id || '')}
+                onValueChange={(val) => handleLocationChange(val === '__none__' ? null : Number(val))}
+              >
+                <SelectTrigger className="mt-1 bg-secondary border-border text-xs h-8">
+                  <SelectValue placeholder="选择场景地点（可选）" />
+                </SelectTrigger>
+                <SelectContent>
+                  {loadingLocs ? (
+                    <div className="flex items-center justify-center py-2">
+                      <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                    </div>
+                  ) : (
+                    <>
+                      <SelectItem value="__none__">（无）</SelectItem>
+                      {locations.map((loc) => (
+                        <SelectItem key={loc.id} value={String(loc.id)}>
+                          {loc.name}
+                        </SelectItem>
+                      ))}
+                    </>
+                  )}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {/* Location version picker — shown when a location is selected */}
+            {environment.location_id && (
+              <div>
+                <label className="text-xs text-muted-foreground">场景版本</label>
+                <Select
+                  value={String(environment.location_version_id || '')}
+                  onValueChange={(val) => handleLocationVersionChange(val ? Number(val) : null)}
+                >
+                  <SelectTrigger className="mt-1 bg-secondary border-border text-xs h-8">
+                    <SelectValue placeholder="选择场景版本（可选）" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {/* Dynamically show versions for selected location */}
+                    {(() => {
+                      const selectedLocId = environment.location_id as unknown as number;
+                      const relevantVersions = Object.entries(locationVersionMap)
+                        .filter(([, info]) => info.locationId === selectedLocId)
+                        .map(([vid, info]) => ({ id: Number(vid), ...info }));
+
+                      if (relevantVersions.length === 0) {
+                        return <SelectItem value="__none__" disabled>加载中...</SelectItem>;
+                      }
+                      return (
+                        <>
+                          <SelectItem value="__none__">（无）</SelectItem>
+                          {relevantVersions.map((v) => (
+                            <SelectItem key={v.id} value={String(v.id)}>
+                              {v.versionLabel}
+                            </SelectItem>
+                          ))}
+                        </>
+                      );
+                    })()}
+                  </SelectContent>
+                </Select>
+                {environment.location_version_id && (() => {
+                  const info = locationVersionMap[environment.location_version_id as unknown as number];
+                  return info ? (
+                    <p className="text-[10px] text-muted-foreground mt-0.5">
+                      已关联：{info.locationName} · {info.versionLabel}
+                    </p>
+                  ) : null;
+                })()}
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className="text-xs text-muted-foreground">时间</label>
