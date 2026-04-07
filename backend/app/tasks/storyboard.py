@@ -209,7 +209,7 @@ async def _run_storyboard_generation(task_db_id: int) -> dict:
 
             # 构建 AI 请求
             from app.utils.llm_call import call_llm
-            req = _build_storyboard_request(scene, shot_count, style_notes)
+            req = _build_storyboard_request(scene, style_notes=style_notes, shot_count=shot_count)
             effective_system = (system_prompt or "").strip() or STORYBOARD_SYSTEM_PROMPT
             effective_llm_config = llm_config or {"model": "gemini-2.0-flash"}
             raw = await call_llm(
@@ -357,7 +357,7 @@ class StoryboardRequest(BaseModel):
         return "\n".join(lines)
 
 
-def _build_storyboard_request(scene, style_notes: str) -> StoryboardRequest:
+def _build_storyboard_request(scene, style_notes: str, shot_count: int = 6) -> StoryboardRequest:
     return StoryboardRequest(
         scene_code=scene.scene_code,
         title=scene.title,
@@ -696,7 +696,7 @@ async def _phase2_create_shots_for_group(
     # 上一组的尾帧描述（Phase 1 Planner 填写），供第一镜叙事衔接
     prev_end_state = group_plan.get("prev_group_end_state")
 
-    req = _build_storyboard_request(scene, group_plan.get("shot_count", 2), "")
+    req = _build_storyboard_request(scene, style_notes="")
     # 组间衔接上下文：若有上一组尾帧描述，第一镜须从该状态自然过渡
     continuity_block = (
         f"\n\n## 上一组尾帧状态（请保证第一镜与此衔接）\n"
@@ -802,7 +802,7 @@ async def _phase3_director_adjust(
     from app.prompts import STORYBOARD_DIRECTOR_PROMPT, DirectorAdjustmentSchema
     import copy
 
-    req = _build_storyboard_request(scene, len(all_shots), "")
+    req = _build_storyboard_request(scene, style_notes="")
 
     # 构建镜头摘要供导演审阅
     shot_summary_lines = []
