@@ -445,12 +445,18 @@ async def _run_storyboard_generation_v2(task_db_id: int) -> dict:
                 raise ValueError(f"Scene {scene_id} 不存在")
 
             # 创建 Storyboard 记录（status=generating）
+            # 重试时可能已存在：复用已有的，不重复创建
             sb_repo = StoryboardRepository(session)
-            storyboard = await sb_repo.create(
-                scene_id=scene_id,
-                status="generating",
-                generation_phase="phase1_planning",
-            )
+            existing = await sb_repo.get_by_scene(scene_id)
+            if existing:
+                storyboard = existing
+                logger.info("复用已有 storyboard：id=%d scene=%s", storyboard.id, scene.scene_code)
+            else:
+                storyboard = await sb_repo.create(
+                    scene_id=scene_id,
+                    status="generating",
+                    generation_phase="phase1_planning",
+                )
             await session.commit()
 
             # ── Phase 1：规划师 AI ──────────────────────────────────────────
