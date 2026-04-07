@@ -65,6 +65,10 @@ class ShotGroup(Base):
         Text, nullable=True,
         comment="Phase 3 导演输出的本组终态描述（中文），供下一组生成时参考"
     )
+    end_frame_image_url: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True,
+        comment="本组视频的末帧截图 URL，用于下一组的 image_start"
+    )
 
     # 关联的参考图片（用于 image-to-video 生成）
     image_references: Mapped[list] = mapped_column(

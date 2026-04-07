@@ -963,6 +963,7 @@ export interface ShotGroupResponse {
   image_start_url: string | null;
   prev_shot_group_id: number | null;
   end_frame_description: string | null;
+  end_frame_image_url: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -989,7 +990,7 @@ export const shotGroupsApi = {
     );
   },
 
-  update(storyboardId: number, groupId: number, data: { name?: string; shot_ids?: number[]; status?: string; image_references?: ImageRef[]; image_start_url?: string | null; end_frame_description?: string; prev_shot_group_id?: number | null }) {
+  update(storyboardId: number, groupId: number, data: { name?: string; shot_ids?: number[]; status?: string; image_references?: ImageRef[]; image_start_url?: string | null; end_frame_description?: string; end_frame_image_url?: string | null; prev_shot_group_id?: number | null }) {
     return request<ShotGroupResponse>(
       `/storyboards/${storyboardId}/groups/${groupId}`,
       { method: 'PATCH', body: data },

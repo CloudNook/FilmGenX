@@ -593,18 +593,8 @@ async def _phase1_plan_groups(
             )
         expected_seq = g.get("sequence_end", 0) + 1
 
-    # 验证总时长一致性
-    pacing_ratio = data.get("pacing_ratio") or {}
-    target_total = pacing_ratio.get("target_total_duration_sec")
-    if target_total is not None:
-        actual_total = sum(g.get("target_duration_sec", 0) for g in groups)
-        if abs(actual_total - target_total) > 0.5:
-            logger.warning(
-                "Phase 1 时长不一致：实际 %.1fs vs 目标 %ds，将以实际为准",
-                actual_total, target_total,
-            )
-            # 用实际值覆盖，保持一致性
-            data["pacing_ratio"]["target_total_duration_sec"] = int(actual_total)
+    # Planner AI 不再强制约束全局总时长，仅验证各组内部时长合理性
+    # pacing_ratio 由 AI 根据实际情况输出，不再做与 outline estimated_duration 的对比
 
     # 将 Phase 1 结果持久化到 Storyboard
     sb_repo = StoryboardRepository(session)
@@ -641,8 +631,16 @@ async def _phase2_create_shots_for_group(
     seq_end = group_plan.get("sequence_end", 1)
     is_action = group_plan.get("is_action_group", False)
     target_duration = group_plan.get("target_duration_sec", 0)
+    # 上一组的尾帧描述（Phase 1 Planner 填写），供第一镜叙事衔接
+    prev_end_state = group_plan.get("prev_group_end_state")
 
     req = _build_storyboard_request(scene, group_plan.get("shot_count", 2), "")
+    # 组间衔接上下文：若有上一组尾帧描述，第一镜须从该状态自然过渡
+    continuity_block = (
+        f"\n\n## 上一组尾帧状态（请保证第一镜与此衔接）\n"
+        f"{prev_end_state}\n"
+        if prev_end_state else ""
+    )
     group_context = (
         f"\n\n## 本次创作任务\n"
         f"你被分配创作分镜组：{group_code} — {group_plan.get('name', '')}\n"
@@ -657,7 +655,7 @@ async def _phase2_create_shots_for_group(
         + f"\n\n请仅生成序号 {seq_start}-{seq_end} 的镜头，group_code 统一填写 {group_code}。"
     )
 
-    user_msg = req.to_prompt() + group_context
+    user_msg = req.to_prompt() + continuity_block + group_context
     effective_system = system_prompt or STORYBOARD_CREATOR_PROMPT
 
     logger.info("=" * 60)

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -13,16 +13,18 @@ import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { Switch } from '@/components/ui/switch';
+import { Label } from '@/components/ui/label';
+import { Separator } from '@/components/ui/separator';
 import { ImagePickerDialog } from '@/components/shots/ImagePickerDialog';
 import {
   Loader2,
   Wand2,
-  ImageIcon,
   Check,
-  RefreshCw,
-  ExternalLink,
   Camera,
   AlertCircle,
+  Link2,
+  X,
 } from 'lucide-react';
 import type { ImageRef, FramePlanResponse, TaskResponse, ShotGroupResponse } from '@/lib/api';
 
@@ -35,11 +37,21 @@ interface FrameGenerationDialogProps {
   projectId: number;
   existingImageStartUrl?: string | null;
   existingRefs?: ImageRef[];
+  /** 上一组分镜组的 end_frame_description（供用户参考生成当前组首帧） */
+  prevGroupEndState?: string | null;
   /** 刷新 shot group 列表 */
   onGroupUpdated?: (group: ShotGroupResponse) => void;
 }
 
 type GenerationState = 'idle' | 'loading' | 'generating' | 'done' | 'error';
+
+const STYLE_PRESETS = [
+  { value: 'intense', label: 'intense（热血战斗）' },
+  { value: 'anime', label: 'anime（通用动漫）' },
+  { value: 'cinematic', label: 'cinematic（电影感）' },
+  { value: 'realistic', label: 'realistic（写实）' },
+  { value: 'sketch', label: 'sketch（手绘）' },
+];
 
 export function FrameGenerationDialog({
   open,
@@ -50,6 +62,7 @@ export function FrameGenerationDialog({
   projectId,
   existingImageStartUrl,
   existingRefs = [],
+  prevGroupEndState,
   onGroupUpdated,
 }: FrameGenerationDialogProps) {
   // Frame plan loaded from backend
@@ -62,8 +75,15 @@ export function FrameGenerationDialog({
   const [negativePrompt, setNegativePrompt] = useState('');
   const [aspectRatio, setAspectRatio] = useState('16:9');
   const [resolution, setResolution] = useState('1K');
+  const [stylePreset, setStylePreset] = useState('intense');
   const [selectedRefs, setSelectedRefs] = useState<ImageRef[]>([]);
   const [imageStartUrl, setImageStartUrl] = useState<string | null>(null);
+  // 用户可编辑的尾帧描述（来自上一组，供生成当前组首帧时参考）
+  const [endFrameDesc, setEndFrameDesc] = useState<string>('');
+
+  // Sync state
+  const [syncingUrl, setSyncingUrl] = useState(false);
+  const [syncingDesc, setSyncingDesc] = useState(false);
 
   // Generation state
   const [genState, setGenState] = useState<GenerationState>('idle');
@@ -89,6 +109,7 @@ export function FrameGenerationDialog({
           if (plan) {
             setPrompt(plan.image_prompt || '');
             setNegativePrompt(plan.negative_prompt || '');
+            setStylePreset(plan.style_preset || 'intense');
           }
         })
         .catch((err) => {
@@ -98,13 +119,14 @@ export function FrameGenerationDialog({
     });
   }, [open, storyboardId, groupId]);
 
-  // Initialize refs / image start url from existing group data when dialog opens
+  // Initialize from existing group data when dialog opens
   useEffect(() => {
     if (open) {
       setSelectedRefs([...existingRefs]);
       setImageStartUrl(existingImageStartUrl ?? null);
+      setEndFrameDesc(prevGroupEndState ?? '');
     }
-  }, [open, existingRefs, existingImageStartUrl]);
+  }, [open, existingRefs, existingImageStartUrl, prevGroupEndState]);
 
   // Poll task while generating
   useEffect(() => {
@@ -119,10 +141,6 @@ export function FrameGenerationDialog({
           setGenState('done');
           clearInterval(interval);
 
-          // Write image_start_url back to shot group
-          const resultParams = task.input_params as Record<string, unknown> | null;
-          const assetShotGroupId = resultParams?.shot_group_id as number | undefined;
-
           // Refresh the group to get updated data
           const { shotGroupsApi } = await import('@/lib/api');
           const refreshedGroup = await shotGroupsApi.get(storyboardId, groupId);
@@ -132,7 +150,6 @@ export function FrameGenerationDialog({
           setErrorMsg(task.error_message || '生成失败');
           clearInterval(interval);
         }
-        // else: still generating, keep polling
       } catch {
         // ignore poll errors
       }
@@ -140,6 +157,45 @@ export function FrameGenerationDialog({
 
     return () => clearInterval(interval);
   }, [taskId, genState, storyboardId, groupId, onGroupUpdated]);
+
+  // Sync image_start_url to backend when user selects/deselects in ImagePickerDialog
+  const syncImageStartUrl = useCallback(
+    async (url: string | null) => {
+      setSyncingUrl(true);
+      try {
+        const { shotGroupsApi } = await import('@/lib/api');
+        const updated = await shotGroupsApi.update(storyboardId, groupId, {
+          image_start_url: url,
+        });
+        onGroupUpdated?.(updated);
+      } catch (err) {
+        console.error('同步首帧图URL失败:', err);
+      } finally {
+        setSyncingUrl(false);
+      }
+    },
+    [storyboardId, groupId, onGroupUpdated],
+  );
+
+  // Sync end_frame_description to backend (debounced via button)
+  const syncEndFrameDesc = useCallback(
+    async () => {
+      if (syncingDesc) return;
+      setSyncingDesc(true);
+      try {
+        const { shotGroupsApi } = await import('@/lib/api');
+        const updated = await shotGroupsApi.update(storyboardId, groupId, {
+          end_frame_description: endFrameDesc,
+        });
+        onGroupUpdated?.(updated);
+      } catch (err) {
+        console.error('同步尾帧描述失败:', err);
+      } finally {
+        setSyncingDesc(false);
+      }
+    },
+    [syncingDesc, storyboardId, groupId, endFrameDesc, onGroupUpdated],
+  );
 
   const handleGenerate = async () => {
     setGenState('generating');
@@ -154,6 +210,7 @@ export function FrameGenerationDialog({
         negative_prompt: negativePrompt || undefined,
         aspect_ratio: aspectRatio,
         resolution,
+        style_preset: stylePreset || undefined,
         reference_image_urls: refUrls.length > 0 ? refUrls : undefined,
       });
 
@@ -164,10 +221,18 @@ export function FrameGenerationDialog({
     }
   };
 
-  const handleImagePickerConfirm = (refs: ImageRef[], imgStartUrl: string | null) => {
+  const handleImagePickerConfirm = async (refs: ImageRef[], imgStartUrl: string | null) => {
     setSelectedRefs(refs);
     setImageStartUrl(imgStartUrl);
     setImagePickerOpen(false);
+
+    // Write image_start_url to backend immediately so it's ready for video generation
+    await syncImageStartUrl(imgStartUrl);
+  };
+
+  const handleClearImageStart = async () => {
+    setImageStartUrl(null);
+    await syncImageStartUrl(null);
   };
 
   const handleClose = () => {
@@ -182,11 +247,11 @@ export function FrameGenerationDialog({
   return (
     <>
       <Dialog open={open} onOpenChange={handleClose}>
-        <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col">
+        <DialogContent className="max-w-2xl max-h-[90vh] flex flex-col">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Wand2 className="h-4 w-4 text-primary" />
-              分镜组首帧图生成
+              首帧图生成
               <Badge variant="outline" className="text-xs">
                 {groupCode}
               </Badge>
@@ -211,9 +276,47 @@ export function FrameGenerationDialog({
                 </div>
               )}
 
-              {/* Frame plan loaded */}
+              {/* Dialog content when plan loaded */}
               {framePlan && !loadingPlan && (
                 <>
+                  {/* ── 上一组尾帧描述（可编辑） ── */}
+                  {prevGroupEndState !== undefined && (
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <label className="text-sm font-medium flex items-center gap-1">
+                          <Link2 className="h-3 w-3 text-muted-foreground" />
+                          上一组尾帧参考
+                        </label>
+                        <span className="text-xs text-muted-foreground">可编辑，基于此生成当前组首帧</span>
+                      </div>
+                      <Textarea
+                        value={endFrameDesc}
+                        onChange={(e) => setEndFrameDesc(e.target.value)}
+                        placeholder="描述上一组最后一帧的画面状态，角色位置/表情/光照/构图..."
+                        rows={2}
+                        className="text-xs"
+                        disabled={isGenerating}
+                      />
+                      <div className="flex items-center gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-6 text-xs"
+                          onClick={syncEndFrameDesc}
+                          disabled={isGenerating || syncingDesc}
+                        >
+                          {syncingDesc ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                          {syncingDesc ? '保存中...' : '保存'}
+                        </Button>
+                        <span className="text-xs text-muted-foreground">
+                          点击保存后，下一组生成首帧时会在提示词中引用此描述
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
+                  <Separator />
+
                   {/* Reference images section */}
                   <div className="space-y-2">
                     <div className="flex items-center justify-between">
@@ -223,6 +326,7 @@ export function FrameGenerationDialog({
                         size="sm"
                         className="h-7 text-xs"
                         onClick={() => setImagePickerOpen(true)}
+                        disabled={isGenerating}
                       >
                         <Camera className="h-3 w-3 mr-1" />
                         {selectedRefs.length > 0
@@ -254,9 +358,18 @@ export function FrameGenerationDialog({
                       </div>
                     )}
 
-                    {imageStartUrl && (
-                      <div className="space-y-1">
-                        <span className="text-xs text-muted-foreground">已选首帧图：</span>
+                    {/* Image start url */}
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs text-muted-foreground">首帧图：</span>
+                        {syncingUrl && (
+                          <span className="text-xs text-muted-foreground flex items-center gap-1">
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                            同步中
+                          </span>
+                        )}
+                      </div>
+                      {imageStartUrl ? (
                         <div className="relative group">
                           {/* eslint-disable-next-line @next/next/no-img-element */}
                           <img
@@ -265,14 +378,20 @@ export function FrameGenerationDialog({
                             className="h-24 w-full rounded-md object-cover border border-border"
                           />
                           <button
-                            onClick={() => setImageStartUrl(null)}
+                            onClick={handleClearImageStart}
                             className="absolute -top-1 -right-1 bg-destructive text-white rounded-full h-4 w-4 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-[10px]"
                           >
                             ×
                           </button>
                         </div>
-                      </div>
-                    )}
+                      ) : (
+                        <div className="h-24 rounded-md border border-dashed border-border flex items-center justify-center">
+                          <span className="text-xs text-muted-foreground">
+                            点击上方「选择参考图」中的星标指定首帧图
+                          </span>
+                        </div>
+                      )}
+                    </div>
                   </div>
 
                   {/* Prompt */}
@@ -339,7 +458,7 @@ export function FrameGenerationDialog({
                   </div>
 
                   {/* Generation params */}
-                  <div className="flex items-center gap-4">
+                  <div className="flex items-center gap-4 flex-wrap">
                     <div className="space-y-1">
                       <label className="text-xs font-medium text-muted-foreground">画幅</label>
                       <select
@@ -371,9 +490,18 @@ export function FrameGenerationDialog({
                     </div>
                     <div className="space-y-1">
                       <label className="text-xs font-medium text-muted-foreground">风格</label>
-                      <div className="h-8 rounded-md border border-input bg-background px-2 flex items-center text-xs">
-                        {framePlan.style_preset}
-                      </div>
+                      <select
+                        value={stylePreset}
+                        onChange={(e) => setStylePreset(e.target.value)}
+                        className="h-8 rounded-md border border-input bg-background px-2 text-xs"
+                        disabled={isGenerating}
+                      >
+                        {STYLE_PRESETS.map((p) => (
+                          <option key={p.value} value={p.value}>
+                            {p.label}
+                          </option>
+                        ))}
+                      </select>
                     </div>
                   </div>
 

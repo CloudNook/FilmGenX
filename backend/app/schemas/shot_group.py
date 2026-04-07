@@ -29,6 +29,9 @@ class ShotGroupUpdate(BaseModel):
     end_frame_description: Optional[str] = Field(
         None, description="Phase 3 导演输出的本组终态描述（中文），供下一组参考"
     )
+    end_frame_image_url: Optional[str] = Field(
+        None, description="本组视频的末帧截图 URL，供下一组作 image_start"
+    )
 
 
 class ShotGroupResponse(BaseResponse):
@@ -48,3 +51,4 @@ class ShotGroupResponse(BaseResponse):
     image_start_url: Optional[str] = Field(None, description="视频首帧图片URL")
     prev_shot_group_id: Optional[int] = Field(None, description="前一分镜组 ID")
     end_frame_description: Optional[str] = Field(None, description="本组终态描述，供下一组参考")
+    end_frame_image_url: Optional[str] = Field(None, description="本组视频末帧截图 URL，供下一组作 image_start")

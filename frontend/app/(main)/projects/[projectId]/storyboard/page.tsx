@@ -75,6 +75,7 @@ import {
 } from 'lucide-react';
 import { ImagePickerDialog } from '@/components/shots/ImagePickerDialog';
 import { FrameGenerationDialog } from '@/components/shots/FrameGenerationDialog';
+import { VideoGenerationDialog } from '@/components/shots/VideoGenerationDialog';
 
 const shotStatusColors: Record<string, string> = {
   draft: 'bg-muted text-muted-foreground',
@@ -105,6 +106,9 @@ export default function StoryboardPage({
   const [generatingGroupVideo, setGeneratingGroupVideo] = useState(false);
   const [imagePickerOpen, setImagePickerOpen] = useState(false);
   const [frameGenOpen, setFrameGenOpen] = useState(false);
+  // 视频生成弹窗
+  const [videoDialogOpen, setVideoDialogOpen] = useState(false);
+  const [videoDialogMode, setVideoDialogMode] = useState<'multi-shot' | 'single-shot'>('multi-shot');
 
   // Loading state
   const [loadingProject, setLoadingProject] = useState(true);
@@ -382,28 +386,14 @@ export default function StoryboardPage({
 
     const shotGroup = getGroupForShot(selectedShot);
     if (shotGroup) {
-      await runMultiShotGeneration(shotGroup, selectedShot.id);
+      setVideoDialogMode('multi-shot');
+      setVideoDialogOpen(true);
       return;
     }
 
-    setGeneratingVideo(true);
-    setError(null);
-    try {
-      await tasksApi.triggerVideo({
-        shot_id: selectedShot.id,
-        quality: '1080p',
-        sound: 'on',
-        use_image_start: false,
-      });
-      // Immediately refresh shot to get 'generating' status
-      const refreshedShot = await shotsApi.get(storyboard.id, selectedShot.id);
-      setSelectedShot(refreshedShot);
-      setShots((prev) => prev.map((s) => (s.id === refreshedShot.id ? refreshedShot : s)));
-    } catch (err: unknown) {
-      setGeneratingVideo(false);
-      setError(err instanceof Error ? err.message : '视频生成请求失败');
-    }
-  }, [getGroupForShot, runMultiShotGeneration, selectedShot, storyboard]);
+    setVideoDialogMode('single-shot');
+    setVideoDialogOpen(true);
+  }, [getGroupForShot, selectedShot, storyboard]);
 
   // Poll shot detail while status is 'generating'
   useEffect(() => {
@@ -475,8 +465,9 @@ export default function StoryboardPage({
   // Generate video for a shot group
   const handleGenerateGroupVideo = useCallback(async () => {
     if (!selectedGroup || !storyboard) return;
-    await runMultiShotGeneration(selectedGroup, selectedShot?.id);
-  }, [runMultiShotGeneration, selectedGroup, selectedShot?.id, storyboard]);
+    setVideoDialogMode('multi-shot');
+    setVideoDialogOpen(true);
+  }, [selectedGroup, storyboard]);
 
   // Delete a shot group
   const handleDeleteGroup = useCallback(async (groupId: number) => {
@@ -1219,6 +1210,12 @@ export default function StoryboardPage({
           projectId={projectIdNum}
           existingImageStartUrl={activeGroup.image_start_url}
           existingRefs={activeGroup.image_references}
+          prevGroupEndState={
+            activeGroup.prev_shot_group_id
+              ? shotGroups.find((g) => g.id === activeGroup.prev_shot_group_id)
+                  ?.end_frame_description ?? null
+              : null
+          }
           onGroupUpdated={(group) => {
             setShotGroups((prev) => prev.map((g) => (g.id === group.id ? group : g)));
             setSelectedGroup((prev) => (prev?.id === group.id ? group : prev));
@@ -1256,6 +1253,33 @@ export default function StoryboardPage({
         }
         existingImageStartUrl={null}
         onConfirm={handleImagePickerConfirm}
+      />
+
+      {/* Video Generation Dialog */}
+      <VideoGenerationDialog
+        open={videoDialogOpen}
+        onOpenChange={setVideoDialogOpen}
+        mode={videoDialogMode}
+        group={videoDialogMode === 'multi-shot' ? (selectedGroup ?? selectedShotGroup) : null}
+        shotId={videoDialogMode === 'single-shot' ? selectedShot?.id : undefined}
+        onGenerated={async () => {
+          if (!storyboard) return;
+          // Refresh group and shot data after video generation starts
+          if (selectedGroup || selectedShotGroup) {
+            const groupId = (selectedGroup ?? selectedShotGroup)?.id;
+            if (groupId) {
+              const refreshedGroup = await shotGroupsApi.get(storyboard.id, groupId);
+              const refreshedShots = await shotsApi.list(storyboard.id);
+              setShotGroups((prev) => prev.map((g) => (g.id === refreshedGroup.id ? refreshedGroup : g)));
+              setSelectedGroup(refreshedGroup);
+              setShots(refreshedShots);
+            }
+          } else if (selectedShot) {
+            const refreshedShot = await shotsApi.get(storyboard.id, selectedShot.id);
+            setSelectedShot(refreshedShot);
+            setShots((prev) => prev.map((s) => (s.id === refreshedShot.id ? refreshedShot : s)));
+          }
+        }}
       />
     </AppLayout>
   );

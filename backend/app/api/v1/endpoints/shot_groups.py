@@ -65,6 +65,7 @@ def _build_group_response(group, member_shots=None):
         "image_start_url": getattr(group, 'image_start_url', None),
         "prev_shot_group_id": getattr(group, 'prev_shot_group_id', None),
         "end_frame_description": getattr(group, 'end_frame_description', None),
+        "end_frame_image_url": getattr(group, 'end_frame_image_url', None),
         "created_at": group.created_at,
         "updated_at": group.updated_at,
         "shots": [
