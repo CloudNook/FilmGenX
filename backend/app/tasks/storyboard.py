@@ -14,6 +14,7 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Optional
 
+import httpx
 from pydantic import BaseModel, Field
 
 from app.tasks.celery_app import celery_app
@@ -384,8 +385,18 @@ def _build_storyboard_request(scene, shot_count: int, style_notes: str) -> Story
 
 @celery_app.task(
     name="app.tasks.storyboard.generate_storyboard_v2_task",
-    max_retries=2,
-    default_retry_delay=30,
+    max_retries=3,
+    default_retry_delay=60,
+    autoretry_for=(
+        httpx.RemoteProtocolError,
+        httpx.ConnectError,
+        httpx.ReadTimeout,
+        httpx.WriteTimeout,
+        httpx.PoolTimeout,
+        ConnectionError,
+        ConnectionResetError,
+        ConnectionRefusedError,
+    ),
     queue="default",
 )
 def generate_storyboard_v2_task(task_db_id: int) -> dict:
@@ -561,6 +572,20 @@ async def _run_storyboard_generation_v2(task_db_id: int) -> dict:
             return {"status": "success", "storyboard_id": storyboard.id}
 
         except Exception as exc:
+            # 瞬时网络错误：交给 Celery 自动重试
+            transient_errors = (
+                httpx.RemoteProtocolError,
+                httpx.ConnectError,
+                httpx.ReadTimeout,
+                httpx.WriteTimeout,
+                httpx.PoolTimeout,
+                ConnectionError,
+                ConnectionResetError,
+                ConnectionRefusedError,
+            )
+            if isinstance(exc, transient_errors):
+                logger.warning("v2 分镜生成瞬时失败（将自动重试）：task_id=%d error=%s", task_db_id, exc)
+                raise
             logger.exception("v2 分镜生成失败：task_id=%d error=%s", task_db_id, exc)
             await task_repo.update(gen_task, {
                 "status": "failed",
