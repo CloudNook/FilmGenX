@@ -487,6 +487,35 @@ async def _run_storyboard_generation_v2(task_db_id: int) -> dict:
 
             logger.info("v2 Phase 2 完成：%d/%d 组成功", success_count, len(groups))
 
+            # ── 建立组间 prev_shot_group_id 链接（按 sequence 顺序）────────────
+            # prev_shot_group_id 是代码根据 sequence 顺序计算出来的，不依赖 AI 输出
+            from sqlalchemy import select
+            from app.models.shot_group import ShotGroup
+            all_groups_result = await session.execute(
+                select(ShotGroup).where(
+                    ShotGroup.storyboard_id == storyboard.id
+                ).order_by(ShotGroup.sequence.asc())
+            )
+            all_groups = list(all_groups_result.scalars().all())
+            for i, group in enumerate(all_groups):
+                if i == 0:
+                    if group.prev_shot_group_id is not None:
+                        await session.execute(
+                            ShotGroup.__table__.update().where(
+                                ShotGroup.id == group.id
+                            ).values(prev_shot_group_id=None)
+                        )
+                else:
+                    prev_id = all_groups[i - 1].id
+                    if group.prev_shot_group_id != prev_id:
+                        await session.execute(
+                            ShotGroup.__table__.update().where(
+                                ShotGroup.id == group.id
+                            ).values(prev_shot_group_id=prev_id)
+                        )
+            await session.commit()
+            logger.info("组间 prev_shot_group_id 链接完成：%d 个组", len(all_groups))
+
             # ── Phase 3：导演 AI 全局微调 ──────────────────────────────────
             await sb_repo.update(storyboard, {"generation_phase": "phase3_directing"})
             await session.commit()
