@@ -328,6 +328,7 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
             shot_group_id = params.get("shot_group_id")
             quality = params.get("quality", "1080p")
             sound = params.get("sound", "on")
+            use_image_start = params.get("use_image_start", False)
 
             # 加载分镜组及成员
             group_repo = ShotGroupRepository(session)
@@ -352,7 +353,6 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
             await session.commit()
 
             # 构建多镜头提示词
-            from app.prompts import build_shot_image_ref_header
             shot_durations = [_normalize_kling_duration(shot.duration_sec) for shot in member_shots]
             multi_prompts = []
             # 收集所有 shot-level 参考图 URL（flatten 所有 shot 的 refs）
@@ -367,14 +367,10 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
                         if url and url not in all_shot_ref_urls:
                             all_shot_ref_urls.append(url)
                             shot_urls.append(url)
-                # 为该 shot 构建独立的参考图 header
-                shot_header = build_shot_image_ref_header(shot)
+                # 为该 shot 构建提示词
                 prompt_text = build_compact_video_prompt(shot)
-                if shot_header:
-                    prompt_text = shot_header + prompt_text
-                    # 确保不超过 512 字符
-                    if len(prompt_text) > 512:
-                        prompt_text = prompt_text[:512]
+                if len(prompt_text) > 512:
+                    prompt_text = prompt_text[:512]
                 multi_prompts.append(MultiShotPrompt(
                     index=i + 1,
                     prompt=prompt_text,
@@ -402,12 +398,13 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
 
             evolink_task_id = params.get("evolink_task_id")
 
-            # 优先用 group.image_start_url（Phase 1 首帧图方案生成）作为首帧
-            group_image_start: str | None = group.image_start_url or None
+            # 根据 use_image_start 参数决定是否使用首帧图
+            group_image_start: str | None = group.image_start_url if use_image_start else None
 
             # 收集参考图：优先用 group.image_references，次选 shot-level refs
+            # 组级参考图格式为 ImageRef[]：{url, label, name, char_version_id?, location_id?, location_version_id?}
             group_refs: list[dict] = group.image_references or []
-            all_ref_urls: list[str] = [url for ref in group_refs for url in (ref.get("urls") or [])]
+            all_ref_urls: list[str] = [ref.get("url") for ref in group_refs if ref.get("url")]
             # 如果组级参考图为空，降级到 shot-level 参考图
             if not all_ref_urls:
                 all_ref_urls = all_shot_ref_urls
@@ -418,16 +415,25 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
             else:
                 if has_ref_images or group_image_start:
                     # 图生视频模式：优先使用 group 首帧图 + 参考图
-                    # 使用 build_i2v_prompt 为每个镜头构建精简提示词
                     # 统一收集所有参考图 URL（来自 group_refs 或 shot-level refs），避免索引错位
                     from app.prompts import build_i2v_prompt, build_image_ref_header
-                    # 统一参考图列表：组级优先，shot 级补充去重。
-                    # 保证 ref_header 和每个 i2v_prompt 使用一致的索引序列。
+                    # 统一参考图列表：组级优先（ImageRef 格式：{url, name, label}），
+                    # shot 级补充（char_image_refs / location_image_refs 格式：{name, urls}）
+                    # 按 URL 去重：同一 URL 只保留首次出现的条目（避免角色/场景 Tab 选了同一张图时被覆盖）
+                    seen_urls: set[str] = set()
                     unified_refs: list[dict] = []
                     for ref in (group_refs or []):
-                        for url in (ref.get("urls") or []):
-                            unified_refs.append({"name": ref.get("label", "参考图"), "url": url})
-                    seen_urls = {r["url"] for r in unified_refs}
+                        url = ref.get("url")
+                        if url and url not in seen_urls:
+                            seen_urls.add(url)
+                            # 组级：name=角色/场景名称（如"萧炎"），label=图片描述（如"参考图 1"）
+                            unified_refs.append({
+                                "name": ref.get("name") or ref.get("label") or "参考图",
+                                "url": url,
+                                "char_version_id": ref.get("char_version_id"),
+                                "location_id": ref.get("location_id"),
+                                "location_version_id": ref.get("location_version_id"),
+                            })
                     for shot in member_shots:
                         char_refs_s: list[dict] = getattr(shot, "char_image_refs", None) or []
                         loc_refs_s: list[dict] = getattr(shot, "location_image_refs", None) or []
@@ -437,15 +443,19 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
                                     unified_refs.append({"name": ref.get("name", "参考图"), "url": url})
                                     seen_urls.add(url)
 
+                    # 构建参考图头部声明（<<<image_N>>> 标记告诉 Kling 哪张图对应哪个角色/场景）
                     ref_header = build_image_ref_header(unified_refs, None, None) if unified_refs else ""
 
                     i2v_multi_prompts = []
                     for i, (shot, normalized_duration) in enumerate(zip(member_shots, shot_durations, strict=False)):
-                        i2v_prompt_text = build_i2v_prompt(shot, unified_refs if unified_refs else None)
-                        if ref_header:
-                            i2v_prompt_text = ref_header + i2v_prompt_text
-                        if len(i2v_prompt_text) > 512:
-                            i2v_prompt_text = i2v_prompt_text[:512]
+                        content = build_i2v_prompt(shot, None)
+                        # 从末尾截断内容，保留头部标记完整，总长度 ≤ 512
+                        max_content = 512 - len(ref_header)
+                        if max_content < 50:
+                            max_content = 50  # 至少保留一点内容
+                        if len(content) > max_content:
+                            content = content[:max_content]
+                        i2v_prompt_text = f"{ref_header}{content}"
                         i2v_multi_prompts.append(MultiShotPrompt(
                             index=i + 1,
                             prompt=i2v_prompt_text,
@@ -458,6 +468,18 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
                         len(all_ref_urls),
                         "\n".join([f"  镜头 {mp.index} 提示词:\n{mp.prompt}" for mp in i2v_multi_prompts])
                     )
+                    evolink_payload = {
+                        "multi_shot_prompts": [
+                            {"index": mp.index, "prompt": mp.prompt, "duration": mp.duration}
+                            for mp in i2v_multi_prompts
+                        ],
+                        "image_start": group_image_start,
+                        "image_urls": all_ref_urls if all_ref_urls else None,
+                        "duration": total_duration,
+                        "quality": quality,
+                        "sound": sound,
+                    }
+                    logger.info("Evolink image_to_video 请求 payload:\n%s", evolink_payload)
                     video_task = await evolink_client.image_to_video(
                         multi_shot_prompts=i2v_multi_prompts,
                         image_start=group_image_start,
@@ -468,6 +490,16 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
                     )
                 else:
                     # Existing text-to-video path
+                    evolink_payload = {
+                        "multi_shot_prompts": [
+                            {"index": mp.index, "prompt": mp.prompt, "duration": mp.duration}
+                            for mp in multi_prompts
+                        ],
+                        "duration": total_duration,
+                        "quality": quality,
+                        "sound": sound,
+                    }
+                    logger.info("Evolink text_to_video 请求 payload:\n%s", evolink_payload)
                     video_task = await evolink_client.text_to_video(
                         multi_shot_prompts=multi_prompts,
                         duration=total_duration,

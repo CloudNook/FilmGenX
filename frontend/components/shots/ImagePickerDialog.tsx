@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   charactersApi,
   locationsApi,
@@ -56,6 +56,12 @@ export function ImagePickerDialog({
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<string>('characters');
 
+  // Keep a ref to the latest existingRefs so handleConfirm always uses fresh data
+  const existingRefsRef = useRef(existingRefs);
+  useEffect(() => {
+    existingRefsRef.current = existingRefs;
+  }, [existingRefs]);
+
   // All available images from API
   const [characterImages, setCharacterImages] = useState<
     { character: { id: number; name: string }; version: CharacterVersionResponse; images: ImageItem[] }[]
@@ -71,10 +77,9 @@ export function ImagePickerDialog({
     ...(item.charVersionId ? { char_version_id: item.charVersionId } : {}),
     ...(item.locationId ? { location_id: item.locationId } : {}),
     ...(item.locationVersionId ? { location_version_id: item.locationVersionId } : {}),
-    ...(item.name ? { name: item.name } : {}),
   }), []);
 
-  // Reset selection when dialog opens
+  // Reset selection when dialog opens; also sync if existingRefs changed while dialog was closed
   useEffect(() => {
     if (open) {
       setSelectedRefs([...existingRefs]);

@@ -43,6 +43,7 @@ class MultiShotVideoGenerationRequest(BaseModel):
     shot_group_id: int = Field(..., description="分镜组 ID")
     quality: str = Field("1080p", pattern="^(720p|1080p)$", description="分辨率")
     sound: str = Field("on", pattern="^(on|off)$", description="是否生成音效")
+    use_image_start: bool = Field(False, description="是否使用当前首帧图作为视频起始帧（关闭时不传首帧图）")
     callback_url: Optional[str] = Field(None, description="任务完成后的回调地址")
 
 

@@ -65,6 +65,7 @@ export function VideoGenerationDialog({
           shot_group_id: group.id,
           quality,
           sound: sound ? 'on' : 'off',
+          use_image_start: useImageStart,
         });
       } else if (mode === 'single-shot' && shotId) {
         await tasksApi.triggerVideo({

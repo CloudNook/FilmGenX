@@ -1210,7 +1210,7 @@ export const tasksApi = {
     });
   },
 
-  triggerMultiShotVideo(data: { shot_group_id: number; quality?: string; sound?: string; callback_url?: string }) {
+  triggerMultiShotVideo(data: { shot_group_id: number; quality?: string; sound?: string; use_image_start?: boolean; callback_url?: string }) {
     return request<TaskResponse>('/tasks/video/multi-shot', {
       method: 'POST',
       body: data,
