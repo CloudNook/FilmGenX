@@ -873,12 +873,21 @@ async def _phase3_director_adjust(
         all_groups = list(all_groups_result.scalars().all())
         code_to_group = {g.group_code: g for g in all_groups}
 
+        # 规范化 group_code：G1 → G001，G12 → G012，保持三位补零格式
+        def normalize_code(code: str) -> str:
+            import re
+            m = re.match(r'^(G)(\d+)$', code)
+            if m:
+                return f"{m.group(1)}{int(m.group(2)):03d}"
+            return code
+
         prev_group_id = None
         for gc_item in group_continuity:
             group_code = gc_item.get("group_code", "")
-            group = code_to_group.get(group_code)
+            normalized = normalize_code(group_code)
+            group = code_to_group.get(normalized)
             if not group:
-                logger.warning("Phase 3 continuity 跳过：group_code=%s 不存在", group_code)
+                logger.warning("Phase 3 continuity 跳过：group_code=%s（规范化=%s）不存在", group_code, normalized)
                 prev_group_id = None  # 断链：缺失的组无法作为前驱
                 continue
 
