@@ -456,12 +456,11 @@ async def confirm_conversation(
     })
 
     # 4. 追加 system_action 消息（操作记录）
-    shot_count = body.shot_count or outline.storyboard_shot_count
     await msg_repo.create_message(
         conversation_id=conversation_id,
         role="system",
         type="system_action",
-        content=f"✅ 分集已创建（scene_id={scene.id}），分镜生成任务已启动，计划生成 {shot_count} 个镜头。",
+        content=f"✅ 分集已创建（scene_id={scene.id}），分镜生成任务已启动。镜头数量由 Planner AI 自主决定。",
     )
 
     # 5. 创建 GenerationTask 并派发 Celery（v2 三阶段流水线）
@@ -474,7 +473,6 @@ async def confirm_conversation(
         status="pending",
         input_params={
             "scene_id": scene.id,
-            "shot_count": shot_count,
             "style_notes": outline.storyboard_style_notes,
             "novel_excerpt": outline.novel_excerpt,
             "llm_config": body.llm_config.model_dump(),

@@ -351,13 +351,13 @@ class StoryboardRequest(BaseModel):
             lines.append(f"章节范围：{self.novel_chapter_start} — {self.novel_chapter_end or '未知'}")
         if self.novel_excerpt:
             lines.append(f"\n原著摘录：\n{self.novel_excerpt}")
-        lines.append(f"\n请生成 {self.shot_count} 个镜头的分镜脚本。")
+        lines.append(f"\n请根据剧情内容自主决定分镜组数量和每个组的镜头数量，输出分组规划蓝图。")
         if self.style_notes:
             lines.append(f"风格要求：{self.style_notes}")
         return "\n".join(lines)
 
 
-def _build_storyboard_request(scene, shot_count: int, style_notes: str) -> StoryboardRequest:
+def _build_storyboard_request(scene, style_notes: str) -> StoryboardRequest:
     return StoryboardRequest(
         scene_code=scene.scene_code,
         title=scene.title,
@@ -374,7 +374,6 @@ def _build_storyboard_request(scene, shot_count: int, style_notes: str) -> Story
         novel_chapter_start=scene.novel_chapter_start,
         novel_chapter_end=scene.novel_chapter_end,
         novel_excerpt=scene.novel_excerpt,
-        shot_count=shot_count,
         style_notes=style_notes or None,
     )
 
@@ -437,7 +436,6 @@ async def _run_storyboard_generation_v2(task_db_id: int) -> dict:
         try:
             params = gen_task.input_params or {}
             scene_id = params.get("scene_id")
-            shot_count = params.get("shot_count", 6)
             style_notes = params.get("style_notes", "")
             llm_config = params.get("llm_config") or {"model": "gemini-2.0-flash"}
             system_prompt = params.get("system_prompt", "")
@@ -456,11 +454,10 @@ async def _run_storyboard_generation_v2(task_db_id: int) -> dict:
             await session.commit()
 
             # ── Phase 1：规划师 AI ──────────────────────────────────────────
-            logger.info("v2 Phase 1 开始：scene=%s shot_count=%d", scene.scene_code, shot_count)
+            logger.info("v2 Phase 1 开始：scene=%s", scene.scene_code)
             groups = await _phase1_plan_groups(
                 scene=scene,
                 storyboard=storyboard,
-                shot_count=shot_count,
                 style_notes=style_notes,
                 llm_config=llm_config,
                 system_prompt=system_prompt,
@@ -599,19 +596,24 @@ async def _run_storyboard_generation_v2(task_db_id: int) -> dict:
 async def _phase1_plan_groups(
     scene,
     storyboard,
-    shot_count: int,
     style_notes: str,
     llm_config: dict,
     system_prompt: str,
     session,
 ) -> list:
-    """Phase 1：规划师 AI 输出分组蓝图，返回 group_plan dict 列表。"""
+    """Phase 1：规划师 AI 输出分组蓝图，返回 group_plan dict 列表。
+
+    Planner AI 完全自主决定分镜组数量和每个组的镜头数量。
+    """
     from app.utils.llm_call import call_llm
     from app.repositories.storyboard import StoryboardRepository
     from app.prompts import STORYBOARD_PLANNER_PROMPT, ShotGroupPlanSchema
 
-    req = _build_storyboard_request(scene, shot_count, style_notes)
-    user_msg = req.to_prompt() + f"\n\n请将 {shot_count} 个镜头分成若干组，输出分组规划蓝图。"
+    req = _build_storyboard_request(scene, style_notes=style_notes)
+    user_msg = req.to_prompt() + (
+        "\n\n请根据以上剧情内容，自主决定分镜组数量和每个组的镜头数量，"
+        "输出分组规划蓝图。组数和镜头数由你根据剧情复杂度全权判断。"
+    )
     effective_system = system_prompt or STORYBOARD_PLANNER_PROMPT
 
     logger.info("=" * 60)
