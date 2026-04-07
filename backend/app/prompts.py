@@ -1230,6 +1230,8 @@ def build_compact_video_prompt(shot: "Shot") -> str:
     composition = shot.composition or {}
     environment = shot.environment or {}
     characters_config = shot.characters_config or []
+    if isinstance(characters_config, dict):
+        characters_config = [characters_config]
     dialogue_delivery = shot.dialogue_delivery or {}
     sound_design = shot.sound_design or {}
 
