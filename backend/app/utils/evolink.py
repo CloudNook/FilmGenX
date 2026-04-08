@@ -400,46 +400,35 @@ class EvolinkClient:
         self,
         task_id: str,
         poll_interval: float = 5.0,
-        timeout: float = 600.0,
         *,
         upload_to_oss: bool = False,
         oss_directory: Optional[str] = None,
         oss_filename: Optional[str] = None,
     ) -> VideoTask:
-        """轮询任务直到完成或超时。
+        """轮询任务直到完成或失败（无超时）。
 
         Args:
             task_id:       要等待的任务 ID。
             poll_interval: 每次轮询间隔（秒），默认 5 秒。
-            timeout:       最大等待时间（秒），默认 600 秒（10 分钟）。
             upload_to_oss: 是否自动下载视频并上传到 OSS（获取永久 URL）。
             oss_directory: OSS 目标目录，如 "videos/shots"。
             oss_filename: OSS 文件名，如 "shot_001.mp4"。
 
         Returns:
-            完成或失败的 VideoTask。如果 upload_to_oss=True，video_url 为永久 URL。
+            完成的 VideoTask。如果 upload_to_oss=True，video_url 为永久 URL。
 
         Raises:
-            TimeoutError: 超过 timeout 仍未完成。
             RuntimeError: 任务以 failed 状态结束。
         """
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-
-        while loop.time() < deadline:
+        while True:
             try:
                 task = await self.get_task(task_id)
             except ConnectionError as exc:
-                remaining = max(0.0, deadline - loop.time())
                 logger.warning(
-                    "Evolink 任务轮询异常，将继续重试：task_id=%s remaining=%.1fs error=%s",
-                    task_id,
-                    remaining,
-                    exc,
+                    "Evolink 任务轮询网络异常，继续重试：task_id=%s error=%s",
+                    task_id, exc,
                 )
-                if remaining <= 0:
-                    break
-                await asyncio.sleep(min(poll_interval, remaining))
+                await asyncio.sleep(poll_interval)
                 continue
 
             logger.debug(
@@ -447,7 +436,6 @@ class EvolinkClient:
                 task_id, task.status, task.progress,
             )
             if task.status == "completed":
-                # 下载并上传到 OSS
                 if upload_to_oss and task.video_url:
                     from app.utils.oss import oss_client
                     permanent_url = oss_client.download_and_upload(
@@ -456,7 +444,6 @@ class EvolinkClient:
                         filename=oss_filename,
                     )
                     logger.info("视频已上传到 OSS：%s", permanent_url)
-                    # 更新返回对象中的 URL
                     task = VideoTask(
                         id=task.id,
                         status=task.status,
@@ -471,12 +458,7 @@ class EvolinkClient:
                 return task
             if task.status == "failed":
                 raise RuntimeError(f"Evolink 任务 {task_id} 失败")
-            remaining = max(0.0, deadline - loop.time())
-            if remaining <= 0:
-                break
-            await asyncio.sleep(min(poll_interval, remaining))
-
-        raise TimeoutError(f"Evolink 任务 {task_id} 超时（{timeout}s）")
+            await asyncio.sleep(poll_interval)
 
 
 # 全局单例，直接 import 使用

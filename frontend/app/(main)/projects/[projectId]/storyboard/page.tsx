@@ -246,15 +246,15 @@ export default function StoryboardPage({
   useEffect(() => {
     if (selectedShot) {
       const relatedGroup = getGroupForShot(selectedShot);
-      setSelectedGroup((prev) => (prev?.id === relatedGroup?.id ? prev : relatedGroup));
+      setSelectedGroup(relatedGroup);
       return;
     }
 
     if (selectedGroup) {
       const refreshedGroup = shotGroups.find((group) => group.id === selectedGroup.id) || null;
-      setSelectedGroup((prev) => (prev?.id === refreshedGroup?.id ? prev : refreshedGroup));
+      setSelectedGroup(refreshedGroup);
     }
-  }, [selectedShot, selectedGroup, shotGroups, getGroupForShot]);
+  }, [selectedShot, shotGroups, getGroupForShot]);
 
   // Load shot groups when storyboard loads
   useEffect(() => {

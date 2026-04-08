@@ -269,6 +269,7 @@ class FramePlanResponse(BaseModel):
     key_elements: list[str] = []
     camera_notes: Optional[str] = None
     lighting_notes: Optional[str] = None
+    image_start_url: Optional[str] = None
 
 
 @router.get(
@@ -313,6 +314,7 @@ async def get_group_frame_plan(
         key_elements=inner.get("key_elements", []),
         camera_notes=inner.get("camera_for_frame"),
         lighting_notes=inner.get("lighting_for_frame"),
+        image_start_url=group.image_start_url,
     )
 
 

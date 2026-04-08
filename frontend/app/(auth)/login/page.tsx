@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Film, Eye, EyeOff, Mail, Lock, ArrowRight } from 'lucide-react';
+import { Film, Eye, EyeOff, Mail, Lock, ArrowRight, KeyRound } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -18,6 +18,7 @@ export default function LoginPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [inviteCode, setInviteCode] = useState('');
   const [rememberMe, setRememberMe] = useState(false);
   const [error, setError] = useState('');
 
@@ -146,7 +147,7 @@ export default function LoginPage() {
     setIsLoading(true);
 
     try {
-      await login(email, password);
+      await login(email, password, inviteCode);
       // Animate out before navigation
       gsap.to(containerRef.current, {
         x: -100,
@@ -301,9 +302,7 @@ export default function LoginPage() {
                 ref={(el) => { if (el) inputsRef.current[1] = el; }}
                 className="space-y-2"
               >
-                <div className="flex items-center justify-between">
-                  <Label htmlFor="password" className="text-foreground">密码</Label>
-                </div>
+                <Label htmlFor="password" className="text-foreground">密码</Label>
                 <div className="relative group">
                   <Lock className="absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-muted-foreground transition-colors group-focus-within:text-primary" />
                   <Input
@@ -325,10 +324,29 @@ export default function LoginPage() {
                   </button>
                 </div>
               </div>
+
+              <div
+                ref={(el) => { if (el) inputsRef.current[2] = el; }}
+                className="space-y-2"
+              >
+                <Label htmlFor="invite-code" className="text-foreground">邀请码</Label>
+                <div className="relative group">
+                  <KeyRound className="absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-muted-foreground transition-colors group-focus-within:text-primary" />
+                  <Input
+                    id="invite-code"
+                    type="text"
+                    placeholder="输入邀请码"
+                    value={inviteCode}
+                    onChange={(e) => setInviteCode(e.target.value)}
+                    className="pl-10 h-12 bg-card border-border transition-all duration-300 group-focus-within:border-primary group-focus-within:shadow-lg group-focus-within:shadow-primary/10"
+                    disabled={isLoading}
+                  />
+                </div>
+              </div>
             </div>
 
             <div
-              ref={(el) => { if (el) inputsRef.current[2] = el; }}
+              ref={(el) => { if (el) inputsRef.current[3] = el; }}
               className="flex items-center gap-2"
             >
               <Checkbox
@@ -364,23 +382,8 @@ export default function LoginPage() {
             </Button>
           </form>
 
-          {/* Divider */}
-          <div className="relative">
-            <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-border" />
-            </div>
-            <div className="relative flex justify-center text-xs uppercase">
-              <span className="bg-background px-2 text-muted-foreground">或者</span>
-            </div>
-          </div>
-
-          {/* Sign Up Link */}
-          <p className="text-center text-sm text-muted-foreground">
-            还没有账户？{' '}
-            <Link href="/register" className="text-primary hover:text-primary/80 font-medium transition-colors relative group">
-              立即注册
-              <span className="absolute -bottom-0.5 left-0 w-0 h-0.5 bg-primary transition-all duration-300 group-hover:w-full" />
-            </Link>
+          <p className="text-center text-xs text-muted-foreground">
+            仅限受邀用户访问
           </p>
         </div>
       </div>

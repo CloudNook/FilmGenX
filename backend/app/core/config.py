@@ -34,5 +34,8 @@ class Settings(BaseSettings):
     OSS_BASE_DIR: str = "filmgenx"
     OSS_CDN_DOMAIN: str = ""
 
+    # 邀请码（为空时不校验）
+    INVITE_CODE: str = ""
+
 
 settings = Settings()

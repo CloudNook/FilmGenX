@@ -21,6 +21,7 @@ class LoginRequest(BaseModel):
     """登录请求体。"""
     email: str = Field(..., description="邮箱地址")
     password: str = Field(..., description="密码")
+    invite_code: Optional[str] = Field(None, description="邀请码")
 
 
 class TokenResponse(BaseModel):

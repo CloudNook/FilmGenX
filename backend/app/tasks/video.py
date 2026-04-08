@@ -61,8 +61,7 @@ class VideoGenerationTask(Task):
     bind=True,
     base=VideoGenerationTask,
     name="app.tasks.video.generate_video_task",
-    max_retries=3,
-    default_retry_delay=60,   # 失败后 60 秒重试
+    max_retries=0,
     queue="video",
 )
 def generate_video_task(self, task_db_id: int) -> dict:
@@ -208,11 +207,10 @@ async def _run_video_generation(task: VideoGenerationTask, task_db_id: int) -> d
                 await session.commit()
                 logger.info("Evolink 任务已提交：%s，开始轮询…", evolink_task_id)
 
-            # 轮询直到完成（最多 10 分钟），自动下载并上传到 OSS
+            # 轮询直到完成，自动下载并上传到 OSS
             result = await evolink_client.wait_for_completion(
                 evolink_task_id,
                 poll_interval=8.0,
-                timeout=600.0,
                 upload_to_oss=True,
                 oss_directory=f"videos/{shot.shot_code}",
                 oss_filename=f"{shot.shot_code}.mp4",
@@ -253,11 +251,6 @@ async def _run_video_generation(task: VideoGenerationTask, task_db_id: int) -> d
                     await ShotRepository(session).update(shot, {"status": "draft"})
             await session.commit()
 
-            # 可重试的异常（网络问题、限流）自动重试
-            retryable = (RuntimeError, TimeoutError, ConnectionError)
-            if isinstance(exc, retryable) and task.request.retries < task.max_retries:
-                raise task.retry(exc=exc)
-
             return {"status": "failed", "error": str(exc)}
 
 
@@ -269,8 +262,7 @@ async def _run_video_generation(task: VideoGenerationTask, task_db_id: int) -> d
     bind=True,
     base=VideoGenerationTask,
     name="app.tasks.video.generate_multi_shot_video_task",
-    max_retries=3,
-    default_retry_delay=60,
+    max_retries=0,
     queue="video",
 )
 def generate_multi_shot_video_task(self, task_db_id: int) -> dict:
@@ -347,21 +339,8 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
             await group_repo.update(group, {"status": "generating"})
             await session.commit()
 
-            # 构建多镜头提示词
+            group_code = group.group_code
             shot_durations = [_normalize_kling_duration(shot.duration_sec) for shot in member_shots]
-            multi_prompts = []
-            all_shot_ref_urls: list[str] = []
-            for i, (shot, normalized_duration) in enumerate(zip(member_shots, shot_durations, strict=False)):
-                # 为该 shot 构建提示词
-                prompt_text = build_compact_video_prompt(shot)
-                if len(prompt_text) > 512:
-                    prompt_text = prompt_text[:512]
-                multi_prompts.append(MultiShotPrompt(
-                    index=i + 1,
-                    prompt=prompt_text,
-                    duration=str(normalized_duration),
-                ))
-
             total_duration = sum(shot_durations)
             if total_duration < 3 or total_duration > 15:
                 raise ValueError(
@@ -369,30 +348,14 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
                     f"当前各镜头时长={shot_durations}，总时长={total_duration}s"
                 )
 
-            group_code = group.group_code
-
-            logger.info(
-                "开始多镜头视频生成：group=%s shots=%d total_duration=%ds",
-                group_code, len(member_shots), total_duration,
-            )
-            logger.info("=" * 60)
-            logger.info("Kling Multi-Shot 提示词明细：group=%s", group_code)
-            for mp in multi_prompts:
-                logger.info("  镜头 %d (%ss) 提示词:\n%s", mp.index, mp.duration, mp.prompt)
-            logger.info("=" * 60)
-
             evolink_task_id = params.get("evolink_task_id")
 
             # 根据 use_image_start 参数决定是否使用首帧图
             group_image_start: str | None = group.image_start_url if use_image_start else None
 
-            # 收集参考图：优先用 group.image_references，次选 shot-level refs
-            # 组级参考图格式为 ImageRef[]：{url, label, name, char_version_id?, location_id?, location_version_id?}
+            # 收集参考图
             group_refs: list[dict] = group.image_references or []
             all_ref_urls: list[str] = [ref.get("url") for ref in group_refs if ref.get("url")]
-            # 如果组级参考图为空，降级到 shot-level 参考图
-            if not all_ref_urls:
-                all_ref_urls = all_shot_ref_urls
             has_ref_images = len(all_ref_urls) > 0
 
             if evolink_task_id:
@@ -483,7 +446,6 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
             result = await evolink_client.wait_for_completion(
                 evolink_task_id,
                 poll_interval=8.0,
-                timeout=600.0,
                 upload_to_oss=True,
                 oss_directory=f"videos/{group_code}",
                 oss_filename=f"{group_code}.mp4",
@@ -540,9 +502,5 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
             except Exception:
                 pass
             await session.commit()
-
-            retryable = (RuntimeError, TimeoutError, ConnectionError)
-            if isinstance(exc, retryable) and task.request.retries < task.max_retries:
-                raise task.retry(exc=exc)
 
             return {"status": "failed", "error": str(exc)}

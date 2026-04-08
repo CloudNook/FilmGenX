@@ -146,10 +146,10 @@ export const authApi = {
     });
   },
 
-  login(email: string, password: string) {
+  login(email: string, password: string, inviteCode?: string) {
     return request<TokenResponse>('/auth/login', {
       method: 'POST',
-      body: { email, password },
+      body: { email, password, invite_code: inviteCode || undefined },
       noAuth: true,
     });
   },
@@ -931,6 +931,7 @@ export interface FramePlanResponse {
   key_elements: string[];
   camera_notes?: string;
   lighting_notes?: string;
+  image_start_url?: string | null;
 }
 
 export interface ShotGroupResponse {

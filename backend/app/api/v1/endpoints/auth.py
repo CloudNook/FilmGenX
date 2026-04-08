@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user_id, get_db
+from app.core.config import settings
 from app.models.user import User
 from app.repositories.user import UserRepository
 from app.schemas.auth import (
@@ -69,6 +70,13 @@ async def login(
 ):
     """邮箱密码登录，返回 JWT token。"""
     repo = UserRepository(db)
+
+    # 邀请码校验（配置了才校验）
+    if settings.INVITE_CODE and body.invite_code != settings.INVITE_CODE:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="邀请码错误",
+        )
 
     user = await repo.get_by_email(body.email)
     if not user or not verify_password(body.password, user.hashed_password):
