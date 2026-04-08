@@ -43,10 +43,6 @@ class Shot(Base):
     )
 
     # 角色（支持多角色）
-    char_version_ids: Mapped[list] = mapped_column(
-        JSON, nullable=False, default=list,
-        comment="角色版本ID列表，如 [1, 3, 5]"
-    )
     characters_config: Mapped[Optional[list]] = mapped_column(
         JSON, nullable=True,
         comment="多角色配置：[{char_version_id, action, expression, emotion_intensity, sfx}]"
@@ -90,16 +86,6 @@ class Shot(Base):
 
     # 生成的视频 URL
     video_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="生成的视频 URL")
-
-    # 镜头内关联的角色/场景参考图（存 name + urls，生成提示词时直接用）
-    char_image_refs: Mapped[list] = mapped_column(
-        JSON, nullable=False, default=list,
-        comment="角色参考图：[{char_version_id, name, urls}]"
-    )
-    location_image_refs: Mapped[list] = mapped_column(
-        JSON, nullable=False, default=list,
-        comment="场景参考图：[{location_version_id, location_id, name, urls}]"
-    )
 
     # 镜头级参考图（用于图生图）和生成图
     reference_images: Mapped[list] = mapped_column(

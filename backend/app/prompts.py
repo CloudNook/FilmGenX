@@ -990,10 +990,6 @@ def build_video_prompt(
             lines.append(ref_header.rstrip("\n"))
 
     # ── 角色 & 场景（图片无法告知模型） ──
-    if char_version_lookup and shot.char_version_ids:
-        char_names = [char_version_lookup.get(vid, f"角色{vid}") for vid in shot.char_version_ids]
-        _append_line(lines, "角色", "、".join(char_names))
-
     loc_ver_id = environment.get("location_version_id") or environment.get("location_id")
     if location_version_lookup and loc_ver_id:
         loc_name = location_version_lookup.get(loc_ver_id, f"场景{loc_ver_id}")
@@ -1171,21 +1167,6 @@ def build_i2v_prompt(
     result = "，".join(parts)
     return result if len(result) <= 512 else result[:512]
 
-
-def build_shot_image_ref_header(shot: "Shot") -> str:
-    """从 Shot 对象的 char_image_refs 和 location_image_refs 构建参考图声明头。
-
-    直接使用存储的 name，无需 DB 查询。
-
-    示例输出：
-        角色萧炎: <<<image_1>>>
-        角色纳兰嫣然: <<<image_2>>>
-        场景云岚宗·夜: <<<image_3>>>
-    """
-    char_refs: list[dict] = getattr(shot, "char_image_refs", None) or []
-    loc_refs: list[dict] = getattr(shot, "location_image_refs", None) or []
-    all_refs = char_refs + loc_refs
-    return build_image_ref_header(all_refs, None, None)
 
 
 def inject_image_refs_into_prompts(

@@ -122,11 +122,6 @@ async def _run_video_generation(task: VideoGenerationTask, task_db_id: int) -> d
             if not shot:
                 raise ValueError(f"Shot {gen_task.shot_id} 不存在")
 
-            # 从 shot 直接读取关联的角色/场景参考图（已含 name，无需 DB 查询）
-            shot_char_refs: list[dict] = getattr(shot, "char_image_refs", None) or []
-            shot_loc_refs: list[dict] = getattr(shot, "location_image_refs", None) or []
-            shot_image_refs = shot_char_refs + shot_loc_refs
-
             # 更新镜头状态为生成中
             await shot_repo.update(shot, {"status": "generating"})
             await session.commit()
@@ -164,10 +159,10 @@ async def _run_video_generation(task: VideoGenerationTask, task_db_id: int) -> d
             # 根据是否有首帧图决定提示词构建策略
             if image_start:
                 # 有首帧图 → 用精简的 build_i2v_prompt（只聚焦动态信息）
-                prompt = build_i2v_prompt(shot, group_refs or shot_image_refs)
+                prompt = build_i2v_prompt(shot, group_refs)
             else:
                 # 无首帧图 → 用完整的 build_video_prompt（包含外观描述）
-                prompt = build_video_prompt(shot, None, None, shot_image_refs)
+                prompt = build_video_prompt(shot, None, None, [])
 
             logger.info("开始生成视频：shot=%s quality=%s sound=%s has_image_start=%s",
                         shot.shot_code, quality, sound, bool(image_start))
@@ -355,18 +350,8 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
             # 构建多镜头提示词
             shot_durations = [_normalize_kling_duration(shot.duration_sec) for shot in member_shots]
             multi_prompts = []
-            # 收集所有 shot-level 参考图 URL（flatten 所有 shot 的 refs）
             all_shot_ref_urls: list[str] = []
             for i, (shot, normalized_duration) in enumerate(zip(member_shots, shot_durations, strict=False)):
-                # 收集该 shot 的参考图 URL
-                char_refs: list[dict] = getattr(shot, "char_image_refs", None) or []
-                loc_refs: list[dict] = getattr(shot, "location_image_refs", None) or []
-                shot_urls = []
-                for ref in char_refs + loc_refs:
-                    for url in ref.get("urls", []):
-                        if url and url not in all_shot_ref_urls:
-                            all_shot_ref_urls.append(url)
-                            shot_urls.append(url)
                 # 为该 shot 构建提示词
                 prompt_text = build_compact_video_prompt(shot)
                 if len(prompt_text) > 512:
@@ -433,15 +418,6 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
                                 "location_id": ref.get("location_id"),
                                 "location_version_id": ref.get("location_version_id"),
                             })
-                    for shot in member_shots:
-                        char_refs_s: list[dict] = getattr(shot, "char_image_refs", None) or []
-                        loc_refs_s: list[dict] = getattr(shot, "location_image_refs", None) or []
-                        for ref in char_refs_s + loc_refs_s:
-                            for url in (ref.get("urls") or []):
-                                if url not in seen_urls:
-                                    unified_refs.append({"name": ref.get("name", "参考图"), "url": url})
-                                    seen_urls.add(url)
-
                     i2v_multi_prompts = []
                     for i, (shot, normalized_duration) in enumerate(zip(member_shots, shot_durations, strict=False)):
                         content = build_compact_video_prompt(shot)

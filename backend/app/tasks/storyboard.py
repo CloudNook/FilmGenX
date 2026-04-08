@@ -241,9 +241,6 @@ async def _run_storyboard_generation(task_db_id: int) -> dict:
                     k: v for k, v in shot_data.items()
                     if v is not None and k in _shot_columns
                 }
-                # 确保 char_version_ids 有默认值
-                if "char_version_ids" not in safe:
-                    safe["char_version_ids"] = []
                 shot = await shot_repo.create(storyboard_id=storyboard.id, **safe)
                 created_shots[shot_data["sequence"]] = shot
 
@@ -773,8 +770,6 @@ async def _phase2_create_shots_for_group(
                 k: v for k, v in shot_data.items()
                 if v is not None and k in _shot_columns
             }
-            if "char_version_ids" not in safe:
-                safe["char_version_ids"] = []
             safe["shot_group_id"] = group.id
             # 移除 group_code（Shot 表没有该列，通过 shot_group_id 关联）
             safe.pop("group_code", None)

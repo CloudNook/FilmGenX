@@ -833,7 +833,6 @@ export interface ShotResponse {
   duration_sec: number;
   camera: Record<string, unknown> | null;
   composition: Record<string, unknown> | null;
-  char_version_ids: number[];
   characters_config: Record<string, unknown>[] | null;
   environment: Record<string, unknown> | null;
   dialogue_character: string | null;
@@ -854,10 +853,6 @@ export interface ShotResponse {
   qc_score: number | null;
   status: string;
   video_url: string | null;
-  /** 镜头关联的角色参考图：[{char_version_id, name, urls}] */
-  char_image_refs: CharImageRef[];
-  /** 镜头关联的场景参考图：[{location_version_id, location_id, name, urls}] */
-  location_image_refs: LocationImageRef[];
   /** 用户选择的参考图（用于图生图） */
   reference_images: ImageRef[];
   /** AI生成的图片 */
@@ -925,20 +920,6 @@ export interface ImageRef {
   label: string;
 }
 
-/** 镜头关联的角色参考图（存储格式） */
-export interface CharImageRef {
-  char_version_id: number;
-  name: string;
-  urls: string[];
-}
-
-/** 镜头关联的场景参考图（存储格式） */
-export interface LocationImageRef {
-  location_version_id?: number | null;
-  location_id?: number | null;
-  name: string;
-  urls: string[];
-}
 
 export interface FramePlanResponse {
   group_code: string;

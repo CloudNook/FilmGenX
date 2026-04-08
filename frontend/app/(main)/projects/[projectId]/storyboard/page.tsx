@@ -896,6 +896,12 @@ export default function StoryboardPage({
                       className="max-w-full max-h-full object-contain"
                       playsInline
                     />
+                  ) : activeGroup?.image_start_url ? (
+                    <img
+                      src={activeGroup.image_start_url}
+                      alt="首帧图"
+                      className="max-w-full max-h-full object-contain"
+                    />
                   ) : (
                     <div className="flex flex-col items-center justify-center text-white/60">
                       <Camera className="h-16 w-16 mb-4" />
@@ -1202,7 +1208,6 @@ function ShotDetailPanel({
     composition: s.composition ? { ...s.composition } : {},
     environment: s.environment ? { ...s.environment } : {},
     characters_config: s.characters_config ? [...s.characters_config] : [],
-    char_version_ids: s.char_version_ids ? [...s.char_version_ids] : [],
     sound_design: s.sound_design ? { ...s.sound_design } : {},
     transition_in: s.transition_in || 'cut',
     transition_out: s.transition_out || 'cut',
@@ -1337,7 +1342,6 @@ function ShotDetailPanel({
   const composition = (form.composition as Record<string, string>) || {};
   const environment = (form.environment as Record<string, string>) || {};
   const charactersConfig = (form.characters_config as Array<Record<string, string>>) || [];
-  const charVersionIds = (form.char_version_ids as number[]) || [];
   const soundDesign = (form.sound_design as Record<string, string | string[]>) || {};
   const dialogueDelivery = (form.dialogue_delivery as Record<string, string>) || {};
   // Group-level reference images (from shot_groups.image_references)
@@ -1633,23 +1637,6 @@ function ShotDetailPanel({
             角色信息由分镜结果和参考图自动带出，这里无需手动关联角色。
           </p>
 
-          {charVersionIds.length > 0 && (
-            <div className="flex flex-wrap gap-1.5">
-              {charVersionIds.map((versionId) => {
-                const info = charVersionMap[versionId];
-                return (
-                  <Badge
-                    key={versionId}
-                    variant="outline"
-                    className="px-2 py-0.5 text-xs"
-                  >
-                    {info ? `${info.charName} — ${info.versionLabel}` : `版本 #${versionId}`}
-                  </Badge>
-                );
-              })}
-            </div>
-          )}
-
           <div className="space-y-2">
             {charactersConfig.length > 0 ? (
               charactersConfig.map((char, idx) => {
@@ -1687,10 +1674,6 @@ function ShotDetailPanel({
                   </div>
                 );
               })
-            ) : charVersionIds.length > 0 ? (
-              <p className="text-xs text-muted-foreground">
-                当前镜头已识别到角色，可在下方参考图区域查看每个角色的参考素材。
-              </p>
             ) : (
               <p className="text-xs text-muted-foreground">当前镜头暂无角色信息。</p>
             )}

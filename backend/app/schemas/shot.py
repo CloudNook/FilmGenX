@@ -46,21 +46,6 @@ class EnvironmentConfig(BaseModel):
     atmosphere: Optional[str] = Field(None, description="氛围描述")
 
 
-class CharImageRef(BaseModel):
-    """镜头中关联的角色参考图。"""
-    char_version_id: int = Field(..., description="角色版本ID")
-    name: str = Field(..., description="角色名称")
-    urls: List[str] = Field(default_factory=list, description="该角色的所有参考图URL")
-
-
-class LocationImageRef(BaseModel):
-    """镜头中关联的场景参考图。"""
-    location_version_id: Optional[int] = Field(None, description="场景版本ID")
-    location_id: Optional[int] = Field(None, description="场景ID（fallback）")
-    name: str = Field(..., description="场景名称，含版本")
-    urls: List[str] = Field(default_factory=list, description="该场景的所有参考图URL")
-
-
 class ShotCreate(BaseModel):
     """创建单镜头请求体。"""
     shot_code: str = Field(..., max_length=30, description="业务ID，如 DQCK_001_S003")
@@ -72,7 +57,6 @@ class ShotCreate(BaseModel):
     composition: Optional[CompositionConfig] = None
 
     # 角色（支持多角色）
-    char_version_ids: List[int] = Field(default_factory=list, description="角色版本ID列表")
     characters_config: Optional[List[CharacterInShot]] = Field(None, description="多角色详细配置")
 
     # 环境
@@ -99,15 +83,6 @@ class ShotCreate(BaseModel):
     negative_prompt: Optional[str] = None
     style_preset: Optional[str] = Field(None, max_length=100)
 
-    # 镜头内关联的角色/场景参考图（存 name + urls，无需查库）
-    char_image_refs: Optional[List[CharImageRef]] = Field(
-        None,
-        description="镜头关联的角色参考图列表，含角色名和所有图片URL",
-    )
-    location_image_refs: Optional[List[LocationImageRef]] = Field(
-        None,
-        description="镜头关联的场景参考图列表，含场景名和所有图片URL",
-    )
     reference_images: Optional[List[Dict[str, Any]]] = Field(
         None,
         description="用户选择的参考图列表",
@@ -124,7 +99,6 @@ class ShotUpdate(BaseModel):
     duration_sec: Optional[float] = Field(None, gt=0, le=30)
     camera: Optional[CameraConfig] = None
     composition: Optional[CompositionConfig] = None
-    char_version_ids: Optional[List[int]] = None
     characters_config: Optional[List[CharacterInShot]] = None
     environment: Optional[EnvironmentConfig] = None
     dialogue_character: Optional[str] = Field(None, max_length=50)
@@ -149,15 +123,6 @@ class ShotUpdate(BaseModel):
         pattern="^(draft|generating|review|approved|rejected)$",
         description="状态：draft / generating / review / approved / rejected",
     )
-    # 镜头内关联的角色/场景参考图
-    char_image_refs: Optional[List[Dict[str, Any]]] = Field(
-        None,
-        description="镜头关联的角色参考图列表",
-    )
-    location_image_refs: Optional[List[Dict[str, Any]]] = Field(
-        None,
-        description="镜头关联的场景参考图列表",
-    )
     reference_images: Optional[List[Dict[str, Any]]] = Field(
         None,
         description="用户选择的参考图列表",
@@ -177,7 +142,6 @@ class ShotResponse(BaseResponse):
     duration_sec: float
     camera: Optional[dict]
     composition: Optional[dict]
-    char_version_ids: list
     characters_config: Optional[list]
     environment: Optional[dict]
     dialogue_character: Optional[str]
@@ -198,8 +162,6 @@ class ShotResponse(BaseResponse):
     qc_score: Optional[int]
     status: str
     video_url: Optional[str] = None
-    char_image_refs: list = Field(default_factory=list, description="镜头关联的角色参考图")
-    location_image_refs: list = Field(default_factory=list, description="镜头关联的场景参考图")
     reference_images: list = Field(default_factory=list, description="用户选择的参考图")
     generated_images: list = Field(default_factory=list, description="AI生成的图片")
 
