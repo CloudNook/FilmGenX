@@ -1,14 +1,14 @@
 """
-场景地点（Location / LocationVersion）Repository。
+场景地点（Location）Repository。
 """
 
 from typing import List, Optional
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
-from app.models.location import Location, LocationVersion
+from app.models.location import Location
+from app.models.asset import Asset
 from app.repositories.base import BaseRepository
 
 
@@ -48,8 +48,8 @@ class LocationRepository(BaseRepository[Location]):
         )
         return list(result.scalars().all())
 
-    async def get_dashboard_stats(self, project_id: int) -> tuple[int, int, int]:
-        """获取场景总览统计。"""
+    async def get_dashboard_stats(self, project_id: int) -> tuple[int, int]:
+        """获取场景总览统计：场景总数、图片总数（来自素材库）。"""
         total_locations = (
             await self.session.execute(
                 select(func.count(Location.id)).where(
@@ -59,44 +59,17 @@ class LocationRepository(BaseRepository[Location]):
             )
         ).scalar_one()
 
-        total_versions = (
+        total_images = (
             await self.session.execute(
-                select(func.count(LocationVersion.id))
-                .select_from(LocationVersion)
-                .join(Location, Location.id == LocationVersion.location_id)
-                .where(
-                    Location.project_id == project_id,
-                    Location.is_deleted.is_(False),
-                    LocationVersion.is_deleted.is_(False),
+                select(func.count(Asset.id)).where(
+                    Asset.project_id == project_id,
+                    Asset.location_id.isnot(None),
+                    Asset.is_current == True,
                 )
             )
         ).scalar_one()
 
-        base_image_rows = (
-            await self.session.execute(
-                select(Location.reference_image_urls).where(
-                    Location.project_id == project_id,
-                    Location.is_deleted.is_(False),
-                )
-            )
-        ).all()
-        version_image_rows = (
-            await self.session.execute(
-                select(LocationVersion.reference_image_urls)
-                .select_from(LocationVersion)
-                .join(Location, Location.id == LocationVersion.location_id)
-                .where(
-                    Location.project_id == project_id,
-                    Location.is_deleted.is_(False),
-                    LocationVersion.is_deleted.is_(False),
-                )
-            )
-        ).all()
-
-        total_images = sum(len(row[0] or []) for row in base_image_rows)
-        total_images += sum(len(row[0] or []) for row in version_image_rows)
-
-        return total_locations, total_versions, total_images
+        return total_locations, total_images
 
     async def get_by_code(self, loc_code: str, *, include_deleted: bool = False) -> Optional[Location]:
         """按业务ID查询。"""
@@ -115,18 +88,6 @@ class LocationRepository(BaseRepository[Location]):
             select(func.count()).select_from(Location).where(*filters)
         )
         return result.scalar_one()
-
-    async def get_with_versions(self, location_id: int) -> Optional[Location]:
-        """获取场景及其所有版本。"""
-        result = await self.session.execute(
-            select(Location)
-            .options(selectinload(Location.versions))
-            .where(
-                Location.id == location_id,
-                Location.is_deleted.is_(False),
-            )
-        )
-        return result.scalar_one_or_none()
 
     async def get_by_id_and_project(self, id: int, project_id: int) -> Optional[Location]:
         """按 ID + 项目ID 查询。"""
@@ -149,60 +110,3 @@ class LocationRepository(BaseRepository[Location]):
             ).order_by(Location.name.asc())
         )
         return list(result.scalars().all())
-
-
-class LocationVersionRepository(BaseRepository[LocationVersion]):
-    def __init__(self, session: AsyncSession) -> None:
-        super().__init__(LocationVersion, session)
-
-    async def clear_default_for_location(
-        self,
-        location_id: int,
-        *,
-        exclude_id: Optional[int] = None,
-    ) -> None:
-        """确保同一场景只有一个默认版本。"""
-        cond = [
-            LocationVersion.location_id == location_id,
-            LocationVersion.is_deleted.is_(False),
-        ]
-        if exclude_id is not None:
-            cond.append(LocationVersion.id != exclude_id)
-
-        await self.session.execute(
-            update(LocationVersion)
-            .where(*cond)
-            .values(is_default=False)
-        )
-
-    async def get_by_location(self, location_id: int) -> List[LocationVersion]:
-        """获取场景所有版本，按 ID 排序。"""
-        result = await self.session.execute(
-            select(LocationVersion).where(
-                LocationVersion.location_id == location_id,
-                LocationVersion.is_deleted.is_(False),
-            ).order_by(LocationVersion.id.asc())
-        )
-        return list(result.scalars().all())
-
-    async def get_by_id_and_location(self, id: int, location_id: int) -> Optional[LocationVersion]:
-        """按 ID + 场景ID 查询。"""
-        result = await self.session.execute(
-            select(LocationVersion).where(
-                LocationVersion.id == id,
-                LocationVersion.location_id == location_id,
-                LocationVersion.is_deleted.is_(False),
-            )
-        )
-        return result.scalar_one_or_none()
-
-    async def get_default_version(self, location_id: int) -> Optional[LocationVersion]:
-        """获取场景的默认版本。"""
-        result = await self.session.execute(
-            select(LocationVersion).where(
-                LocationVersion.location_id == location_id,
-                LocationVersion.is_default == True,
-                LocationVersion.is_deleted.is_(False),
-            )
-        )
-        return result.scalar_one_or_none()

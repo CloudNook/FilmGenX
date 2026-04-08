@@ -161,7 +161,7 @@ async def _run_video_generation(task: VideoGenerationTask, task_db_id: int) -> d
                 prompt = build_i2v_prompt(shot, group_refs)
             else:
                 # 无首帧图 → 用完整的 build_video_prompt（包含外观描述）
-                prompt = build_video_prompt(shot, None, None, [])
+                prompt = build_video_prompt(shot, [])
 
             logger.info("开始生成视频：shot=%s quality=%s sound=%s has_image_start=%s",
                         shot.shot_code, quality, sound, bool(image_start))

@@ -67,7 +67,7 @@ async def _run_view_generation(task: CharacterImageTask, task_db_id: int) -> dic
     import httpx
 
     from app.core.config import settings
-    from app.repositories.character import CharacterVersionRepository
+    from app.repositories.character import CharacterRepository
     from app.repositories.task import TaskRepository
     from app.utils.image_gen import image_gen_client
     from app.utils.oss import oss_client
@@ -92,16 +92,16 @@ async def _run_view_generation(task: CharacterImageTask, task_db_id: int) -> dic
 
             try:
                 params = gen_task.input_params or {}
-                version_id = params.get("version_id")
+                character_id = params.get("character_id")
                 view_type = params.get("view_type", "front")
                 prompt_override = params.get("prompt_override")
                 base_prompt = params.get("base_prompt", "")
                 reference_images = params.get("reference_images", [])
 
-                version_repo = CharacterVersionRepository(session)
-                version = await version_repo.get(version_id)
-                if not version:
-                    raise RuntimeError(f"CharacterVersion {version_id} does not exist")
+                char_repo = CharacterRepository(session)
+                character = await char_repo.get(character_id)
+                if not character:
+                    raise RuntimeError(f"Character {character_id} does not exist")
 
                 view_prompts = {
                     "front": "front view, facing camera, full body character design",
@@ -114,8 +114,8 @@ async def _run_view_generation(task: CharacterImageTask, task_db_id: int) -> dic
                     full_prompt = f"{prompt_override}, {view_prompt}"
 
                 logger.info(
-                    "Generate character view image: version_id=%s view_type=%s prompt=%s...",
-                    version_id,
+                    "Generate character view image: character_id=%s view_type=%s prompt=%s...",
+                    character_id,
                     view_type,
                     full_prompt[:50],
                 )
@@ -155,15 +155,15 @@ async def _run_view_generation(task: CharacterImageTask, task_db_id: int) -> dic
                     raise RuntimeError(result.error_message or "图像生成失败")
 
                 timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-                filename = f"char_v{version_id}_view_{view_type}_{timestamp}.png"
+                filename = f"char_{character_id}_view_{view_type}_{timestamp}.png"
                 image_url = oss_client.upload_bytes(
                     result.image_data,
                     filename,
                     directory="characters/views",
                 )
 
-                field_map = {"front": "view_front_url", "side": "view_side_url", "back": "view_back_url"}
-                await version_repo.update(version, {field_map[view_type]: image_url})
+                # 更新角色图片
+                await char_repo.update(character, {"pic_url": image_url})
 
                 await task_repo.update(
                     gen_task,
@@ -201,7 +201,7 @@ async def _run_state_generation(task: CharacterImageTask, task_db_id: int) -> di
     import httpx
 
     from app.core.config import settings
-    from app.repositories.character import CharacterVersionRepository
+    from app.repositories.character import CharacterRepository
     from app.repositories.task import TaskRepository
     from app.utils.image_gen import image_gen_client
     from app.utils.oss import oss_client
@@ -226,7 +226,7 @@ async def _run_state_generation(task: CharacterImageTask, task_db_id: int) -> di
 
             try:
                 params = gen_task.input_params or {}
-                version_id = params.get("version_id")
+                character_id = params.get("character_id")
                 state_type = params.get("state_type", "neutral")
                 state_description = params.get("state_description", "")
                 prompt_override = params.get("prompt_override")
@@ -234,10 +234,10 @@ async def _run_state_generation(task: CharacterImageTask, task_db_id: int) -> di
                 reference_images = params.get("reference_images", [])
                 view_front_url = params.get("view_front_url")
 
-                version_repo = CharacterVersionRepository(session)
-                version = await version_repo.get(version_id)
-                if not version:
-                    raise RuntimeError(f"CharacterVersion {version_id} does not exist")
+                char_repo = CharacterRepository(session)
+                character = await char_repo.get(character_id)
+                if not character:
+                    raise RuntimeError(f"Character {character_id} does not exist")
 
                 state_prompts = {
                     "anger": "angry expression, fierce eyes, aggressive stance, dynamic pose",
@@ -299,16 +299,15 @@ async def _run_state_generation(task: CharacterImageTask, task_db_id: int) -> di
                     raise RuntimeError(result.error_message or "图像生成失败")
 
                 timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-                filename = f"char_v{version_id}_state_{state_type}_{timestamp}.png"
+                filename = f"char_{character_id}_state_{state_type}_{timestamp}.png"
                 image_url = oss_client.upload_bytes(
                     result.image_data,
                     filename,
                     directory="characters/states",
                 )
 
-                state_images = dict(version.state_images or {})
-                state_images[state_type] = image_url
-                await version_repo.update(version, {"state_images": state_images})
+                # 更新角色图片
+                await char_repo.update(character, {"pic_url": image_url})
 
                 await task_repo.update(
                     gen_task,

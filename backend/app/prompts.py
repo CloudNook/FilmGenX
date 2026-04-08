@@ -947,8 +947,6 @@ def _append_line(
 
 def build_video_prompt(
     shot: "Shot",
-    char_version_lookup: dict[int, str] | None = None,
-    location_version_lookup: dict[int, str] | None = None,
     image_refs: list[dict] | None = None,
 ) -> str:
     """
@@ -971,8 +969,6 @@ def build_video_prompt(
 
     Args:
         shot: 镜头对象
-        char_version_lookup: 可选，角色版本ID→角色名称的映射
-        location_version_lookup: 可选，场景版本ID→"场景名·版本名"的映射
         image_refs: 可选，image_references 列表（来自 ShotGroup），用于注入角色/场景参考图标记
     """
     lines = []
@@ -985,15 +981,13 @@ def build_video_prompt(
 
     # ── 参考图标记 ──
     if image_refs:
-        ref_header = build_image_ref_header(image_refs, char_version_lookup, location_version_lookup)
+        ref_header = build_image_ref_header(image_refs)
         if ref_header:
             lines.append(ref_header.rstrip("\n"))
 
     # ── 角色 & 场景（图片无法告知模型） ──
-    loc_ver_id = environment.get("location_version_id") or environment.get("location_id")
-    if location_version_lookup and loc_ver_id:
-        loc_name = location_version_lookup.get(loc_ver_id, f"场景{loc_ver_id}")
-        _append_line(lines, "场景", loc_name)
+    if environment.get("location_id"):
+        _append_line(lines, "场景", f"场景{environment.get('location_id')}")
 
     # ── 画面（唯一的详细视觉描述） ──
     _append_line(lines, "画面", shot.image_prompt or "anime style, high quality, dynamic lighting")
@@ -1054,8 +1048,6 @@ def build_negative_prompt(shot: "Shot") -> str:
 
 def build_image_ref_header(
     image_refs: list[dict],
-    char_version_lookup: dict[int, str] | None = None,
-    location_version_lookup: dict[int, str] | None = None,
 ) -> str:
     """根据 image_references 构建参考图声明头。
 
@@ -1072,8 +1064,6 @@ def build_image_ref_header(
 def build_i2v_prompt(
     shot: "Shot",
     image_refs: list[dict] | None = None,
-    char_version_lookup: dict[int, str] | None = None,
-    location_version_lookup: dict[int, str] | None = None,
 ) -> str:
     """
     构建图生视频提示词（≤512 字符）。
@@ -1097,8 +1087,6 @@ def build_i2v_prompt(
     Args:
         shot: 镜头对象
         image_refs: 可选，参考图列表，用于注入 <<<image_N>>> 标记
-        char_version_lookup: 可选，角色版本ID→角色名称映射
-        location_version_lookup: 可选，场景版本ID→场景名称映射
     """
     camera = shot.camera or {}
     characters_config = shot.characters_config or []
@@ -1112,7 +1100,7 @@ def build_i2v_prompt(
 
     # ── 参考图标记（Kling 图生视频时需要） ──
     if image_refs:
-        ref_header = build_image_ref_header(image_refs, char_version_lookup, location_version_lookup)
+        ref_header = build_image_ref_header(image_refs)
         if ref_header.strip():
             parts.append(ref_header.rstrip("\n"))
 
@@ -1172,25 +1160,21 @@ def build_i2v_prompt(
 def inject_image_refs_into_prompts(
     multi_prompts: list,
     image_refs: list[dict],
-    char_version_lookup: dict[int, str] | None = None,
-    location_version_lookup: dict[int, str] | None = None,
 ) -> list:
     """将 image_references 注入到多镜头提示词中。
 
     对每个提示词的 prompt 文本，在开头追加参考图声明，
     使 Kling API 知道哪些参考图对应哪些角色/场景。
 
-    image_refs 格式：[{char_version_id, location_version_id, location_id, url, label}, ...]
+    image_refs 格式：[{character_id, location_id, url, label}, ...]
 
     示例输出片段：
-        角色萧炎: <<<image_1>>>
-        角色纳兰嫣然: <<<image_2>>>
-        场景云岚宗·夜: <<<image_3>>>
+        <<<image_1>>>
     """
     if not image_refs:
         return multi_prompts
 
-    header = build_image_ref_header(image_refs, char_version_lookup, location_version_lookup)
+    header = build_image_ref_header(image_refs)
     if not header:
         return multi_prompts
 

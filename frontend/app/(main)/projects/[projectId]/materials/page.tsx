@@ -61,13 +61,10 @@ export default function MaterialsPage({
         projectsApi.get(projectIdNum).catch(() => null),
         charactersApi.dashboard(projectIdNum).catch(() => ({
           total_characters: 0,
-          total_versions: 0,
-          total_images: 0,
           recent_characters: [] as CharacterResponse[],
         })),
         locationsApi.dashboard(projectIdNum).catch(() => ({
           total_locations: 0,
-          total_versions: 0,
           total_images: 0,
           recent_locations: [] as LocationResponse[],
         })),
@@ -112,22 +109,18 @@ export default function MaterialsPage({
     {
       icon: Users,
       title: '角色管理',
-      description: '管理项目中的角色档案、版本和特征设定',
+      description: '管理项目中的角色档案和特征设定',
       href: `/projects/${projectId}/materials/characters`,
       count: characterDashboard?.total_characters ?? 0,
-      versionCount: characterDashboard?.total_versions ?? 0,
-      imageCount: characterDashboard?.total_images ?? 0,
       color: 'text-primary',
       bgColor: 'bg-primary/10',
     },
     {
       icon: MapPin,
       title: '场景管理',
-      description: '管理项目中的场景地点、环境设定和变体',
+      description: '管理项目中的场景地点和环境设定',
       href: `/projects/${projectId}/materials/locations`,
       count: locationDashboard?.total_locations ?? 0,
-      versionCount: locationDashboard?.total_versions ?? 0,
-      imageCount: locationDashboard?.total_images ?? 0,
       color: 'text-info',
       bgColor: 'bg-info/10',
     },
@@ -209,18 +202,6 @@ export default function MaterialsPage({
                 </CardHeader>
                 <CardContent>
                   <p className="text-sm text-muted-foreground">{category.description}</p>
-                  {'versionCount' in category && (
-                    <div className="flex gap-4 mt-3 text-sm">
-                      <div className="flex items-center gap-1 text-muted-foreground">
-                        <Layers className="h-3.5 w-3.5" />
-                        <span>{category.versionCount} 版本</span>
-                      </div>
-                      <div className="flex items-center gap-1 text-muted-foreground">
-                        <Image className="h-3.5 w-3.5" />
-                        <span>{category.imageCount} 图片</span>
-                      </div>
-                    </div>
-                  )}
                   <div className="flex items-center text-primary text-sm mt-4">
                     <span>进入管理</span>
                     <ArrowRight className="h-4 w-4 ml-1" />
@@ -242,19 +223,9 @@ export default function MaterialsPage({
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="grid grid-cols-3 gap-4">
-                <div className="text-center">
-                  <p className="text-3xl font-bold text-foreground">{characterDashboard?.total_characters ?? 0}</p>
-                  <p className="text-xs text-muted-foreground mt-1">角色</p>
-                </div>
-                <div className="text-center border-x border-primary/20">
-                  <p className="text-3xl font-bold text-foreground">{characterDashboard?.total_versions ?? 0}</p>
-                  <p className="text-xs text-muted-foreground mt-1">版本</p>
-                </div>
-                <div className="text-center">
-                  <p className="text-3xl font-bold text-foreground">{characterDashboard?.total_images ?? 0}</p>
-                  <p className="text-xs text-muted-foreground mt-1">图片</p>
-                </div>
+              <div className="text-center">
+                <p className="text-3xl font-bold text-foreground">{characterDashboard?.total_characters ?? 0}</p>
+                <p className="text-xs text-muted-foreground mt-1">角色</p>
               </div>
             </CardContent>
           </Card>
@@ -268,14 +239,10 @@ export default function MaterialsPage({
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="grid grid-cols-3 gap-4">
+              <div className="grid grid-cols-2 gap-4">
                 <div className="text-center">
                   <p className="text-3xl font-bold text-foreground">{locationDashboard?.total_locations ?? 0}</p>
                   <p className="text-xs text-muted-foreground mt-1">场景</p>
-                </div>
-                <div className="text-center border-x border-info/20">
-                  <p className="text-3xl font-bold text-foreground">{locationDashboard?.total_versions ?? 0}</p>
-                  <p className="text-xs text-muted-foreground mt-1">版本</p>
                 </div>
                 <div className="text-center">
                   <p className="text-3xl font-bold text-foreground">{locationDashboard?.total_images ?? 0}</p>
@@ -345,7 +312,7 @@ export default function MaterialsPage({
                       <div className="flex-1 min-w-0">
                         <p className="text-sm font-medium text-foreground truncate">{char.name}</p>
                         <p className="text-xs text-muted-foreground truncate">
-                          {char.role_description || char.char_code}
+                          {char.char_code}
                         </p>
                       </div>
                     </Link>

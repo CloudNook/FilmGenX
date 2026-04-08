@@ -8,7 +8,7 @@ from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
     auth, projects, scenes, storyboards, shots, shot_groups, characters, character_images,
-    assets, tasks, conversations, locations, dashboard
+    assets, tasks, conversations, locations, location_images, dashboard
 )
 
 api_router = APIRouter()
@@ -24,9 +24,14 @@ api_router.include_router(shot_groups.router,    prefix="/storyboards/{storyboar
 api_router.include_router(characters.router,     prefix="/projects/{project_id}/characters",            tags=["角色"])
 api_router.include_router(
     character_images.router,
-    prefix="/projects/{project_id}/characters/{character_id}/versions/{version_id}/images",
+    prefix="/projects/{project_id}/characters/{character_id}/images",
     tags=["角色图片"]
 )
 api_router.include_router(locations.router,      prefix="/projects/{project_id}/locations",             tags=["场景"])
+api_router.include_router(
+    location_images.router,
+    prefix="/projects/{project_id}/locations/{location_id}/images",
+    tags=["场景图片"]
+)
 api_router.include_router(assets.router,         prefix="/projects/{project_id}/assets",                tags=["素材"])
 api_router.include_router(tasks.router,          prefix="/tasks",                                       tags=["生成任务"])

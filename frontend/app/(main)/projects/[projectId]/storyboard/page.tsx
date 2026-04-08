@@ -1185,13 +1185,9 @@ function ShotDetailPanel({
 
   // Character & location data for pickers
   const [locations, setLocations] = useState<LocationResponse[]>([]);
+  const [charactersMap, setCharactersMap] = useState<Record<number, string>>({});
   const [loadingChars, setLoadingChars] = useState(false);
   const [loadingLocs, setLoadingLocs] = useState(false);
-  const [locationVersionMap, setLocationVersionMap] = useState<Record<number, { locationId: number; locationName: string; versionLabel: string }>>({});
-
-  // Map: charVersionId → { charId, charName, versionLabel }
-  type CharVersionInfo = { charId: number; charName: string; versionLabel: string };
-  const [charVersionMap, setCharVersionMap] = useState<Record<number, CharVersionInfo>>({});
 
   const initForm = (s: ShotResponse) => ({
     shot_code: s.shot_code,
@@ -1241,23 +1237,10 @@ function ShotDetailPanel({
   useEffect(() => {
     if (!projectId) return;
     setLoadingChars(true);
-    charactersApi.list(projectId, 1, 100).then(async (page) => {
-      // Fetch details for each character to get versions
-      const versionMap: Record<number, CharVersionInfo> = {};
-      await Promise.allSettled(
-        page.items.map((char) =>
-          charactersApi.get(projectId, char.id).then((detail) => {
-            detail.versions.forEach((v) => {
-              versionMap[v.id] = {
-                charId: char.id,
-                charName: char.name,
-                versionLabel: v.label || v.version_code,
-              };
-            });
-          }),
-        ),
-      );
-      setCharVersionMap(versionMap);
+    charactersApi.list(projectId, 1, 100).then((page) => {
+      const map: Record<number, string> = {};
+      page.items.forEach((char) => { map[char.id] = char.name; });
+      setCharactersMap(map);
     }).catch(() => {
       // ignore errors silently
     }).finally(() => setLoadingChars(false));
@@ -1275,45 +1258,9 @@ function ShotDetailPanel({
   }, [projectId]);
 
   // Change location
-  const handleLocationChange = async (locationId: number | null) => {
+  const handleLocationChange = (locationId: number | null) => {
     const env = (form.environment as Record<string, unknown>) || {};
-
-    if (locationId == null) {
-      updateField('environment', { ...env, location_id: null, location_version_id: null });
-      return;
-    }
-
-    // Fetch location details to get versions
-    try {
-      const detail = await locationsApi.get(projectId, locationId);
-      const newMap = { ...locationVersionMap };
-
-      // Build version map for this location
-      const defaultVersionId = detail.default_version?.id ?? detail.versions?.[0]?.id ?? null;
-      for (const v of detail.versions || []) {
-        newMap[v.id] = {
-          locationId: detail.id,
-          locationName: detail.name,
-          versionLabel: v.label || v.version_code,
-        };
-      }
-      setLocationVersionMap(newMap);
-
-      updateField('environment', {
-        ...env,
-        location_id: locationId,
-        // Auto-select default version
-        location_version_id: defaultVersionId,
-      });
-    } catch {
-      updateField('environment', { ...env, location_id: locationId, location_version_id: null });
-    }
-  };
-
-  // Change location version
-  const handleLocationVersionChange = (versionId: number | null) => {
-    const env = (form.environment as Record<string, unknown>) || {};
-    updateField('environment', { ...env, location_version_id: versionId });
+    updateField('environment', { ...env, location_id: locationId });
   };
 
   const updateField = (key: string, value: unknown) => {
@@ -1324,14 +1271,7 @@ function ShotDetailPanel({
   const handleSave = async () => {
     setSaving(true);
     try {
-      // Filter out characters_config entries missing required char_version_id
-      const data = { ...form };
-      if (Array.isArray(data.characters_config)) {
-        data.characters_config = data.characters_config.filter(
-          (c: Record<string, unknown>) => c.char_version_id != null
-        );
-      }
-      await onSave(shot.id, data);
+      await onSave(shot.id, form);
       setDirty(false);
     } finally {
       setSaving(false);
@@ -1640,11 +1580,11 @@ function ShotDetailPanel({
           <div className="space-y-2">
             {charactersConfig.length > 0 ? (
               charactersConfig.map((char, idx) => {
-                const info = charVersionMap[char.char_version_id as unknown as number];
+                const charName = charactersMap[char.character_id as unknown as number];
                 return (
                   <div key={idx} className="p-2 bg-secondary/50 rounded-lg space-y-2">
                     <span className="text-xs font-medium text-foreground block">
-                      {info ? `${info.charName} — ${info.versionLabel}` : `角色版本 #${char.char_version_id}`}
+                      {charName || `角色 #${char.character_id}`}
                     </span>
                     <div>
                       <label className="text-xs text-muted-foreground">动作</label>
@@ -1733,51 +1673,6 @@ function ShotDetailPanel({
               </Select>
             </div>
 
-            {/* Location version picker — shown when a location is selected */}
-            {environment.location_id && (
-              <div>
-                <label className="text-xs text-muted-foreground">场景版本</label>
-                <Select
-                  value={String(environment.location_version_id || '')}
-                  onValueChange={(val) => handleLocationVersionChange(val ? Number(val) : null)}
-                >
-                  <SelectTrigger className="mt-1 bg-secondary border-border text-xs h-8">
-                    <SelectValue placeholder="选择场景版本（可选）" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {/* Dynamically show versions for selected location */}
-                    {(() => {
-                      const selectedLocId = environment.location_id as unknown as number;
-                      const relevantVersions = Object.entries(locationVersionMap)
-                        .filter(([, info]) => info.locationId === selectedLocId)
-                        .map(([vid, info]) => ({ id: Number(vid), ...info }));
-
-                      if (relevantVersions.length === 0) {
-                        return <SelectItem value="__none__" disabled>加载中...</SelectItem>;
-                      }
-                      return (
-                        <>
-                          <SelectItem value="__none__">（无）</SelectItem>
-                          {relevantVersions.map((v) => (
-                            <SelectItem key={v.id} value={String(v.id)}>
-                              {v.versionLabel}
-                            </SelectItem>
-                          ))}
-                        </>
-                      );
-                    })()}
-                  </SelectContent>
-                </Select>
-                {environment.location_version_id && (() => {
-                  const info = locationVersionMap[environment.location_version_id as unknown as number];
-                  return info ? (
-                    <p className="text-[10px] text-muted-foreground mt-0.5">
-                      已关联：{info.locationName} · {info.versionLabel}
-                    </p>
-                  ) : null;
-                })()}
-              </div>
-            )}
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className="text-xs text-muted-foreground">时间</label>

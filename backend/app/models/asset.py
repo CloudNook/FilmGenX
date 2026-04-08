@@ -7,7 +7,7 @@ from app.db.base import Base
 
 if TYPE_CHECKING:
     from app.models.character import Character
-    from app.models.location import Location, LocationVersion
+    from app.models.location import Location
     from app.models.project import Project
     from app.models.shot import Shot
 
@@ -34,12 +34,6 @@ class Asset(Base):
         nullable=True,
         index=True,
         comment="Related location ID",
-    )
-    location_version_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("location_versions.id", ondelete="SET NULL"),
-        nullable=True,
-        index=True,
-        comment="Related location version ID",
     )
     character_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("characters.id", ondelete="SET NULL"),
@@ -111,8 +105,4 @@ class Asset(Base):
     project: Mapped["Project"] = relationship("Project", back_populates="assets")
     shot: Mapped[Optional["Shot"]] = relationship("Shot", back_populates="assets")
     location: Mapped[Optional["Location"]] = relationship("Location", back_populates="assets")
-    location_version: Mapped[Optional["LocationVersion"]] = relationship(
-        "LocationVersion",
-        back_populates="assets",
-    )
     character: Mapped[Optional["Character"]] = relationship("Character", back_populates="assets")

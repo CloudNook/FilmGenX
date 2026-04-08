@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user_id, get_db
 from app.repositories.asset import AssetRepository
-from app.repositories.location import LocationRepository, LocationVersionRepository
+from app.repositories.location import LocationRepository
 from app.repositories.project import ProjectRepository
 from app.schemas.asset import AssetCreate, AssetResponse
 from app.schemas.base import PageResponse
@@ -31,25 +31,13 @@ async def _resolve_location_scope(
     project_id: int,
     *,
     location_id: Optional[int],
-    location_version_id: Optional[int],
-) -> tuple[Optional[int], Optional[int]]:
-    """Validate location scope and infer location_id from location_version_id when needed."""
-    if location_version_id is not None:
-        version_repo = LocationVersionRepository(db)
-        if location_id is not None:
-            version = await version_repo.get_by_id_and_location(location_version_id, location_id)
-        else:
-            version = await version_repo.get(location_version_id)
-        if not version:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="场景版本不存在")
-        location_id = location_id or version.location_id
-
+) -> Optional[int]:
+    """Validate location scope."""
     if location_id is not None:
         location = await LocationRepository(db).get_by_id_and_project(location_id, project_id)
         if not location:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="场景不存在")
-
-    return location_id, location_version_id
+    return location_id
 
 
 @router.get("", response_model=PageResponse[AssetResponse], summary="获取素材列表")
@@ -60,7 +48,6 @@ async def list_assets(
     asset_type: Optional[str] = Query(None, description="按类型过滤"),
     shot_id: Optional[int] = Query(None, description="按镜头过滤"),
     location_id: Optional[int] = Query(None, description="按场景过滤"),
-    location_version_id: Optional[int] = Query(None, description="按场景版本过滤"),
     source: Optional[str] = Query(None, description="按来源过滤"),
     is_current: Optional[bool] = Query(None, description="是否仅返回当前版本"),
     db: AsyncSession = Depends(get_db),
@@ -73,7 +60,6 @@ async def list_assets(
         asset_type=asset_type,
         shot_id=shot_id,
         location_id=location_id,
-        location_version_id=location_version_id,
         source=source,
         is_current=is_current,
         page=page,
@@ -111,16 +97,14 @@ async def create_asset(
     user_id: int = Depends(get_current_user_id),
 ):
     await _require_project(project_id, user_id, db)
-    location_id, location_version_id = await _resolve_location_scope(
+    location_id = await _resolve_location_scope(
         db,
         project_id,
         location_id=body.location_id,
-        location_version_id=body.location_version_id,
     )
 
     payload = body.model_dump()
     payload["location_id"] = location_id
-    payload["location_version_id"] = location_version_id
 
     asset = await AssetRepository(db).create(project_id=project_id, **payload)
     await db.commit()
@@ -159,19 +143,6 @@ async def delete_asset(
     except Exception:
         pass
 
-    if asset.location_version_id is not None:
-        version_repo = LocationVersionRepository(db)
-        version = await version_repo.get(asset.location_version_id)
-        if version and asset.file_url in (version.reference_image_urls or []):
-            urls = [url for url in (version.reference_image_urls or []) if url != asset.file_url]
-            await version_repo.update(version, {"reference_image_urls": urls})
-    elif asset.location_id is not None:
-        location_repo = LocationRepository(db)
-        location = await location_repo.get(asset.location_id)
-        if location and asset.file_url in (location.reference_image_urls or []):
-            urls = [url for url in (location.reference_image_urls or []) if url != asset.file_url]
-            await location_repo.update(location, {"reference_image_urls": urls})
-
     await repo.soft_delete(asset)
     await db.commit()
 
@@ -196,17 +167,15 @@ async def upload_asset(
     file: UploadFile = File(..., description="要上传的文件"),
     shot_id: Optional[int] = Form(None, description="关联镜头 ID"),
     location_id: Optional[int] = Form(None, description="关联场景 ID"),
-    location_version_id: Optional[int] = Form(None, description="关联场景版本 ID"),
     db: AsyncSession = Depends(get_db),
     user_id: int = Depends(get_current_user_id),
 ):
     await _require_project(project_id, user_id, db)
 
-    location_id, location_version_id = await _resolve_location_scope(
+    location_id = await _resolve_location_scope(
         db,
         project_id,
         location_id=location_id,
-        location_version_id=location_version_id,
     )
 
     content_type = file.content_type or "application/octet-stream"
@@ -239,8 +208,6 @@ async def upload_asset(
     directory = "uploads"
     if shot_id:
         directory = f"shots/{shot_id}"
-    elif location_version_id:
-        directory = f"locations/{location_id}/versions/{location_version_id}"
     elif location_id:
         directory = f"locations/{location_id}"
 
@@ -250,7 +217,6 @@ async def upload_asset(
         project_id=project_id,
         shot_id=shot_id,
         location_id=location_id,
-        location_version_id=location_version_id,
         asset_code=asset_code,
         asset_type=asset_type,
         file_url=file_url,

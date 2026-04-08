@@ -4,8 +4,8 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   charactersApi,
   locationsApi,
-  type CharacterVersionResponse,
-  type LocationVersionResponse,
+  type CharacterResponse,
+  type LocationResponse,
 } from '@/lib/api';
 import type { ImageRef } from '@/lib/api';
 import {
@@ -34,11 +34,10 @@ interface ImagePickerDialogProps {
 interface ImageItem {
   url: string;
   label: string;
-  /** 来源角色版本ID（角色图时设置） */
-  charVersionId?: number;
-  /** 来源场景ID（场景图时设置） */
+  /** 来源角色ID */
+  characterId?: number;
+  /** 来源场景ID */
   locationId?: number;
-  locationVersionId?: number;
   /** 角色或场景的显示名称 */
   name?: string;
 }
@@ -56,31 +55,27 @@ export function ImagePickerDialog({
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<string>('characters');
 
-  // Keep a ref to the latest existingRefs so handleConfirm always uses fresh data
   const existingRefsRef = useRef(existingRefs);
-  useEffect(() => {
-    existingRefsRef.current = existingRefs;
-  }, [existingRefs]);
+  useEffect(() => { existingRefsRef.current = existingRefs; }, [existingRefs]);
 
   // All available images from API
   const [characterImages, setCharacterImages] = useState<
-    { character: { id: number; name: string }; version: CharacterVersionResponse; images: ImageItem[] }[]
+    { character: { id: number; name: string }; images: ImageItem[] }[]
   >([]);
   const [locationImages, setLocationImages] = useState<
-    { location: { id: number; name: string }; version: LocationVersionResponse; images: ImageItem[] }[]
+    { location: { id: number; name: string }; images: ImageItem[] }[]
   >([]);
 
-  // Build URL → ImageRef map for quick lookup
+  // Build URL → ImageRef map
   const urlToRef = useCallback((url: string, item: ImageItem): ImageRef => ({
     url,
-    label: `${item.charVersionId ? '角色' : '场景'} - ${item.label}`,
+    label: `${item.characterId ? '角色' : '场景'} - ${item.label}`,
     name: item.name,
-    ...(item.charVersionId ? { char_version_id: item.charVersionId } : {}),
+    ...(item.characterId ? { character_id: item.characterId } : {}),
     ...(item.locationId ? { location_id: item.locationId } : {}),
-    ...(item.locationVersionId ? { location_version_id: item.locationVersionId } : {}),
   }), []);
 
-  // Reset selection when dialog opens; also sync if existingRefs changed while dialog was closed
+  // Reset selection when dialog opens
   useEffect(() => {
     if (open) {
       setSelectedRefs([...existingRefs]);
@@ -128,7 +123,6 @@ export function ImagePickerDialog({
     (item: ImageItem) => {
       const ref = urlToRef(item.url, item);
       setImageStartUrl((prev) => (prev === item.url ? null : item.url));
-      // Also ensure it's selected
       setSelectedRefs((prev) => {
         if (prev.some((r) => r.url === item.url)) return prev;
         return [...prev, ref];
@@ -196,14 +190,11 @@ export function ImagePickerDialog({
                   <div className="space-y-4">
                     {characterImages.map((item) =>
                       item.images.length > 0 ? (
-                        <div key={`char-${item.character.id}-${item.version.id}`}>
+                        <div key={`char-${item.character.id}`}>
                           <div className="flex items-center gap-2 mb-2">
                             <span className="text-sm font-medium text-foreground">
                               {item.character.name}
                             </span>
-                            <Badge variant="outline" className="text-[10px] h-4 px-1">
-                              {item.version.label}
-                            </Badge>
                           </div>
                           <div className="grid grid-cols-4 gap-2">
                             {item.images.map((img) => (
@@ -234,14 +225,11 @@ export function ImagePickerDialog({
                   <div className="space-y-4">
                     {locationImages.map((item) =>
                       item.images.length > 0 ? (
-                        <div key={`loc-${item.location.id}-${item.version.id}`}>
+                        <div key={`loc-${item.location.id}`}>
                           <div className="flex items-center gap-2 mb-2">
                             <span className="text-sm font-medium text-foreground">
                               {item.location.name}
                             </span>
-                            <Badge variant="outline" className="text-[10px] h-4 px-1">
-                              {item.version.version_code}
-                            </Badge>
                           </div>
                           <div className="grid grid-cols-4 gap-2">
                             {item.images.map((img) => (
@@ -309,27 +297,18 @@ function ImageCard({
       onClick={onToggle}
     >
       <div className="aspect-square bg-muted/60">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src={url}
-          alt={label}
-          className="w-full h-full object-cover"
-          loading="lazy"
-        />
+        <img src={url} alt={label} className="w-full h-full object-cover" loading="lazy" />
       </div>
-
       {selected && (
         <div className="absolute top-1 right-1 bg-primary rounded-full w-5 h-5 flex items-center justify-center">
           <Check className="h-3 w-3 text-primary-foreground" />
         </div>
       )}
-
       {isStart && (
         <div className="absolute top-1 left-1 bg-amber-500 rounded-full w-5 h-5 flex items-center justify-center">
           <Star className="h-3 w-3 text-white" />
         </div>
       )}
-
       <div className="px-1.5 py-1 bg-secondary/80">
         <p className="text-[10px] text-muted-foreground truncate">{label}</p>
       </div>
@@ -343,52 +322,22 @@ function ImageCard({
 
 async function fetchCharacterImages(
   projectId: number,
-): Promise<{ character: { id: number; name: string }; version: CharacterVersionResponse; images: ImageItem[] }[]> {
+): Promise<{ character: { id: number; name: string }; images: ImageItem[] }[]> {
   try {
     const page = await charactersApi.list(projectId, 1, 100);
-    const details = await Promise.all(
-      page.items.map((c) => charactersApi.get(projectId, c.id)),
-    );
-
-    const result: { character: { id: number; name: string }; version: CharacterVersionResponse; images: ImageItem[] }[] = [];
-    for (const detail of details) {
-      for (const version of detail.versions) {
-        const images: ImageItem[] = [];
-
-        for (let i = 0; i < (version.reference_image_urls?.length || 0); i++) {
-          images.push({
-            url: version.reference_image_urls[i],
-            label: `参考图 ${i + 1}`,
-            charVersionId: version.id,
-            name: detail.name,
-          });
-        }
-
-        if (version.three_view_url) {
-          images.push({
-            url: version.three_view_url,
-            label: '三视图',
-            charVersionId: version.id,
-            name: detail.name,
-          });
-        }
-
-        if (version.state_images) {
-          for (const [stateKey, stateUrl] of Object.entries(version.state_images)) {
-            if (stateUrl) {
-              images.push({
-                url: stateUrl,
-                label: `状态: ${stateKey}`,
-                charVersionId: version.id,
-                name: detail.name,
-              });
-            }
-          }
-        }
-
-        if (images.length > 0) {
-          result.push({ character: { id: detail.id, name: detail.name }, version, images });
-        }
+    const result: { character: { id: number; name: string }; images: ImageItem[] }[] = [];
+    for (const char of page.items) {
+      const images: ImageItem[] = [];
+      if (char.pic_url) {
+        images.push({
+          url: char.pic_url,
+          label: '角色图',
+          characterId: char.id,
+          name: char.name,
+        });
+      }
+      if (images.length > 0) {
+        result.push({ character: { id: char.id, name: char.name }, images });
       }
     }
     return result;
@@ -399,50 +348,25 @@ async function fetchCharacterImages(
 
 async function fetchLocationImages(
   projectId: number,
-): Promise<{ location: { id: number; name: string }; version: LocationVersionResponse; images: ImageItem[] }[]> {
+): Promise<{ location: { id: number; name: string }; images: ImageItem[] }[]> {
   try {
     const page = await locationsApi.list(projectId, 1, 100);
     const details = await Promise.all(
       page.items.map((l) => locationsApi.get(projectId, l.id)),
     );
-
-    const result: { location: { id: number; name: string }; version: LocationVersionResponse; images: ImageItem[] }[] = [];
+    const result: { location: { id: number; name: string }; images: ImageItem[] }[] = [];
     for (const detail of details) {
-      const versions = detail.versions?.length > 0 ? detail.versions : [{
-        id: -1,
-        location_id: detail.id,
-        version_code: 'default',
-        label: '默认',
-        description: null,
-        atmosphere_override: null,
-        time_of_day: null,
-        weather: null,
-        additional_elements: [],
-        removed_elements: [],
-        prompt_suffix: null,
-        full_prompt: null,
-        reference_image_urls: detail.reference_image_urls || [],
-        applicable_scene_codes: [],
-        is_default: true,
-        created_at: '',
-        updated_at: '',
-      } as LocationVersionResponse];
-
-      for (const version of versions) {
-        const images: ImageItem[] = [];
-        const locationName = `${detail.name}·${version.label || version.version_code || '默认'}`;
-        for (let i = 0; i < (version.reference_image_urls?.length || 0); i++) {
-          images.push({
-            url: version.reference_image_urls[i],
-            label: `参考图 ${i + 1}`,
-            locationId: detail.id,
-            locationVersionId: version.id,
-            name: locationName,
-          });
-        }
-        if (images.length > 0) {
-          result.push({ location: { id: detail.id, name: detail.name }, version, images });
-        }
+      const images: ImageItem[] = [];
+      if (detail.pic_url) {
+        images.push({
+          url: detail.pic_url,
+          label: '场景封面图',
+          locationId: detail.id,
+          name: detail.name,
+        });
+      }
+      if (images.length > 0) {
+        result.push({ location: { id: detail.id, name: detail.name }, images });
       }
     }
     return result;

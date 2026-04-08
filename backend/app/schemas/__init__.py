@@ -4,15 +4,12 @@ from app.schemas.scene import SceneCreate, SceneUpdate, SceneResponse
 from app.schemas.storyboard import StoryboardCreate, StoryboardUpdate, StoryboardResponse
 from app.schemas.shot import ShotCreate, ShotUpdate, ShotResponse
 from app.schemas.character import (
-    CharacterCreate, CharacterUpdate, CharacterResponse, CharacterDetailResponse,
-    CharacterVersionCreate, CharacterVersionUpdate, CharacterVersionResponse,
+    CharacterCreate, CharacterUpdate, CharacterResponse,
     CharacterDashboardResponse,
 )
 from app.schemas.location import (
     LocationCreate, LocationUpdate, LocationResponse, LocationBrief,
-    LocationVersionCreate, LocationVersionUpdate, LocationVersionResponse, LocationVersionBrief,
-    LocationDetailResponse, LocationWithVersionsResponse,
-    AtmosphereConfig, LocationDashboardResponse,
+    LocationDashboardResponse,
 )
 from app.schemas.asset import AssetCreate, AssetResponse, AssetDashboardResponse
 from app.schemas.task import TaskResponse, VideoGenerationRequest, StoryboardGenerationRequest
@@ -29,12 +26,9 @@ __all__ = [
     "SceneCreate", "SceneUpdate", "SceneResponse",
     "StoryboardCreate", "StoryboardUpdate", "StoryboardResponse",
     "ShotCreate", "ShotUpdate", "ShotResponse",
-    "CharacterCreate", "CharacterUpdate", "CharacterResponse", "CharacterDetailResponse",
-    "CharacterVersionCreate", "CharacterVersionUpdate", "CharacterVersionResponse",
+    "CharacterCreate", "CharacterUpdate", "CharacterResponse",
     "CharacterDashboardResponse",
     "LocationCreate", "LocationUpdate", "LocationResponse", "LocationBrief",
-    "LocationVersionCreate", "LocationVersionUpdate", "LocationVersionResponse", "LocationVersionBrief",
-    "LocationDetailResponse", "LocationWithVersionsResponse", "AtmosphereConfig",
     "LocationDashboardResponse",
     "AssetCreate", "AssetResponse", "AssetDashboardResponse",
     "TaskResponse", "VideoGenerationRequest", "StoryboardGenerationRequest",
