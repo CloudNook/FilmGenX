@@ -322,6 +322,18 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
                     if shot_group:
                         await shot_group_repo.update(shot_group, {"image_start_url": image_url})
 
+                # 将生成的图片追加到 Shot.generated_images
+                if shot_id:
+                    shot = await shot_repo.get(shot_id)
+                    if shot:
+                        existing = list(shot.generated_images or [])
+                        existing.append({
+                            "url": image_url,
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                            "task_id": task_db_id,
+                        })
+                        await shot_repo.update(shot, {"generated_images": existing})
+
                 await task_repo.update(
                     gen_task,
                     {

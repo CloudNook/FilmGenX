@@ -858,6 +858,10 @@ export interface ShotResponse {
   char_image_refs: CharImageRef[];
   /** 镜头关联的场景参考图：[{location_version_id, location_id, name, urls}] */
   location_image_refs: LocationImageRef[];
+  /** 用户选择的参考图（用于图生图） */
+  reference_images: ImageRef[];
+  /** AI生成的图片 */
+  generated_images: { url: string; created_at?: string; task_id?: number }[];
   created_at: string;
   updated_at: string;
 }

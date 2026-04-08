@@ -140,7 +140,7 @@ class EvolinkClient:
                     "Content-Type": "application/json",
                 },
                 timeout=60.0,
-                trust_env=settings.HTTP_TRUST_ENV,
+                trust_env=False,
             )
             self._client_loop = current_loop
         return self._client

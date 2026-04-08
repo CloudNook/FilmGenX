@@ -74,6 +74,7 @@ export function ImagePickerDialog({
   const urlToRef = useCallback((url: string, item: ImageItem): ImageRef => ({
     url,
     label: `${item.charVersionId ? '角色' : '场景'} - ${item.label}`,
+    name: item.name,
     ...(item.charVersionId ? { char_version_id: item.charVersionId } : {}),
     ...(item.locationId ? { location_id: item.locationId } : {}),
     ...(item.locationVersionId ? { location_version_id: item.locationVersionId } : {}),
@@ -269,9 +270,9 @@ export function ImagePickerDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             取消
           </Button>
-          <Button onClick={handleConfirm} disabled={selectedCount === 0}>
+          <Button onClick={handleConfirm}>
             <Check className="h-4 w-4 mr-1" />
-            确认选择 ({selectedCount} 张)
+            {selectedCount === 0 ? '清除选择' : `确认选择 (${selectedCount} 张)`}
           </Button>
         </DialogFooter>
       </DialogContent>

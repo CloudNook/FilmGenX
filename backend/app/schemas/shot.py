@@ -108,6 +108,14 @@ class ShotCreate(BaseModel):
         None,
         description="镜头关联的场景参考图列表，含场景名和所有图片URL",
     )
+    reference_images: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description="用户选择的参考图列表",
+    )
+    generated_images: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description="AI生成的图片列表",
+    )
 
 
 class ShotUpdate(BaseModel):
@@ -150,6 +158,14 @@ class ShotUpdate(BaseModel):
         None,
         description="镜头关联的场景参考图列表",
     )
+    reference_images: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description="用户选择的参考图列表",
+    )
+    generated_images: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description="AI生成的图片列表",
+    )
 
 
 class ShotResponse(BaseResponse):
@@ -184,16 +200,23 @@ class ShotResponse(BaseResponse):
     video_url: Optional[str] = None
     char_image_refs: list = Field(default_factory=list, description="镜头关联的角色参考图")
     location_image_refs: list = Field(default_factory=list, description="镜头关联的场景参考图")
+    reference_images: list = Field(default_factory=list, description="用户选择的参考图")
+    generated_images: list = Field(default_factory=list, description="AI生成的图片")
 
     @model_validator(mode="before")
     @classmethod
     def _normalize_characters_config(cls, data):
-        """Normalize characters_config: wrap single dicts in a list (fixes legacy DB entries)."""
+        """Normalize characters_config:
+        - wrap single dicts in a list (legacy DB entries)
+        - coerce strings to null (AI may return a description string for non-character shots)
+        """
         if hasattr(data, "__dict__"):
-            # SQLAlchemy model instance — convert to dict
             data = {k: v for k, v in data.__dict__.items() if not k.startswith("_")}
         if isinstance(data, dict):
             cc = data.get("characters_config")
-            if cc is not None and isinstance(cc, dict):
+            if isinstance(cc, str):
+                # AI returned a description string instead of a list — treat as null
+                data["characters_config"] = None
+            elif cc is not None and isinstance(cc, dict):
                 data["characters_config"] = [cc]
         return data

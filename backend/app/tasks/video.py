@@ -416,7 +416,6 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
                 if has_ref_images or group_image_start:
                     # 图生视频模式：优先使用 group 首帧图 + 参考图
                     # 统一收集所有参考图 URL（来自 group_refs 或 shot-level refs），避免索引错位
-                    from app.prompts import build_i2v_prompt, build_image_ref_header
                     # 统一参考图列表：组级优先（ImageRef 格式：{url, name, label}），
                     # shot 级补充（char_image_refs / location_image_refs 格式：{name, urls}）
                     # 按 URL 去重：同一 URL 只保留首次出现的条目（避免角色/场景 Tab 选了同一张图时被覆盖）
@@ -443,22 +442,14 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
                                     unified_refs.append({"name": ref.get("name", "参考图"), "url": url})
                                     seen_urls.add(url)
 
-                    # 构建参考图头部声明（<<<image_N>>> 标记告诉 Kling 哪张图对应哪个角色/场景）
-                    ref_header = build_image_ref_header(unified_refs, None, None) if unified_refs else ""
-
                     i2v_multi_prompts = []
                     for i, (shot, normalized_duration) in enumerate(zip(member_shots, shot_durations, strict=False)):
-                        content = build_i2v_prompt(shot, None)
-                        # 从末尾截断内容，保留头部标记完整，总长度 ≤ 512
-                        max_content = 512 - len(ref_header)
-                        if max_content < 50:
-                            max_content = 50  # 至少保留一点内容
-                        if len(content) > max_content:
-                            content = content[:max_content]
-                        i2v_prompt_text = f"{ref_header}{content}"
+                        content = build_compact_video_prompt(shot)
+                        if len(content) > 512:
+                            content = content[:512]
                         i2v_multi_prompts.append(MultiShotPrompt(
                             index=i + 1,
-                            prompt=i2v_prompt_text,
+                            prompt=content,
                             duration=str(normalized_duration),
                         ))
 

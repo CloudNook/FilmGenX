@@ -19,8 +19,6 @@ import {
   type ShotGroupResponse,
   type LocationResponse,
   type ImageRef,
-  type CharImageRef,
-  type LocationImageRef,
 } from '@/lib/api';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -44,10 +42,6 @@ import {
 } from '@/components/ui/resizable';
 import {
   Plus,
-  Play,
-  Pause,
-  SkipBack,
-  SkipForward,
   Maximize2,
   ZoomIn,
   ZoomOut,
@@ -58,16 +52,11 @@ import {
   Wand2,
   RefreshCw,
   Download,
-  Upload,
   Trash2,
-  Copy,
   Clock,
   Volume2,
   Eye,
-  Edit,
   Check,
-  ChevronLeft,
-  ChevronRight,
   GripVertical,
   Film,
   Loader2,
@@ -76,6 +65,7 @@ import {
 import { ImagePickerDialog } from '@/components/shots/ImagePickerDialog';
 import { FrameGenerationDialog } from '@/components/shots/FrameGenerationDialog';
 import { VideoGenerationDialog } from '@/components/shots/VideoGenerationDialog';
+import { ShotImageGenerationDialog } from '@/components/shots/ShotImageGenerationDialog';
 
 const shotStatusColors: Record<string, string> = {
   draft: 'bg-muted text-muted-foreground',
@@ -105,6 +95,7 @@ export default function StoryboardPage({
   const [selectedGroup, setSelectedGroup] = useState<ShotGroupResponse | null>(null);
   const [generatingGroupVideo, setGeneratingGroupVideo] = useState(false);
   const [imagePickerOpen, setImagePickerOpen] = useState(false);
+  const [shotImageGenOpen, setShotImageGenOpen] = useState(false);
   const [frameGenOpen, setFrameGenOpen] = useState(false);
   // 视频生成弹窗
   const [videoDialogOpen, setVideoDialogOpen] = useState(false);
@@ -121,12 +112,8 @@ export default function StoryboardPage({
   const [selectedScene, setSelectedScene] = useState<string>('');
   const [selectedShot, setSelectedShot] = useState<ShotResponse | null>(null);
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
-  const [isPlaying, setIsPlaying] = useState(false);
-
   // Video generation state
   const [generatingVideo, setGeneratingVideo] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [zoom, setZoom] = useState(100);
   const resolvedUrlShotKeyRef = useRef<string | null>(null);
   const selectedShotRequestIdRef = useRef(0);
 
@@ -463,12 +450,6 @@ export default function StoryboardPage({
   }, [storyboard, shots, selectedShotIds, shotGroups.length]);
 
   // Generate video for a shot group
-  const handleGenerateGroupVideo = useCallback(async () => {
-    if (!selectedGroup || !storyboard) return;
-    setVideoDialogMode('multi-shot');
-    setVideoDialogOpen(true);
-  }, [selectedGroup, storyboard]);
-
   // Delete a shot group
   const handleDeleteGroup = useCallback(async (groupId: number) => {
     if (!storyboard) return;
@@ -537,65 +518,22 @@ export default function StoryboardPage({
   const selectedShotGroup = selectedShot ? getGroupForShot(selectedShot) : null;
   const activeGroup = selectedGroup || selectedShotGroup;
 
-  // Save image picker selections to the current shot's char_image_refs / location_image_refs
+  // Save image picker selections to the active group's image_references
   const handleImagePickerConfirm = useCallback(
     async (refs: ImageRef[], _imgStartUrl: string | null) => {
-      if (!storyboard || !selectedShot) return;
+      if (!storyboard || !activeGroup) return;
       try {
-        // Group refs by char_version_id
-        const charMap = new Map<number, { name: string; urls: Set<string> }>();
-        const locMap = new Map<number, { name: string; urls: Set<string> }>();
-
-        for (const ref of refs) {
-          if (ref.char_version_id) {
-            if (!charMap.has(ref.char_version_id)) {
-              charMap.set(ref.char_version_id, { name: ref.name ?? '', urls: new Set() });
-            }
-            charMap.get(ref.char_version_id)!.urls.add(ref.url);
-            if (ref.name) {
-              charMap.get(ref.char_version_id)!.name = ref.name;
-            }
-          } else if (ref.location_version_id || ref.location_id) {
-            const key = ref.location_version_id ?? ref.location_id!;
-            if (!locMap.has(key)) {
-              locMap.set(key, { name: ref.name ?? '', urls: new Set() });
-            }
-            locMap.get(key)!.urls.add(ref.url);
-            if (ref.name) {
-              locMap.get(key)!.name = ref.name;
-            }
-          }
-        }
-
-        const char_image_refs: CharImageRef[] = Array.from(charMap.entries()).map(
-          ([char_version_id, { name, urls }]) => ({
-            char_version_id,
-            name,
-            urls: Array.from(urls),
-          }),
-        );
-
-        const location_image_refs: LocationImageRef[] = Array.from(locMap.entries()).map(
-          ([key, { name, urls }]) => ({
-            location_version_id: key,
-            name,
-            urls: Array.from(urls),
-          }),
-        );
-
-        const updatedShot = await shotsApi.update(storyboard.id, selectedShot.id, {
-          char_image_refs,
-          location_image_refs,
+        const updatedGroup = await shotGroupsApi.update(storyboard.id, activeGroup.id, {
+          image_references: refs,
         });
-
-        setShots((prev) => prev.map((s) => (s.id === updatedShot.id ? updatedShot : s)));
-        setSelectedShot(updatedShot);
+        setShotGroups((prev) => prev.map((g) => (g.id === updatedGroup.id ? updatedGroup : g)));
+        setSelectedGroup((prev) => (prev?.id === updatedGroup.id ? updatedGroup : prev));
         setImagePickerOpen(false);
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : '保存图片关联失败');
       }
     },
-    [storyboard, selectedShot?.id],
+    [storyboard, activeGroup],
   );
 
   // Derive generating state from API status (not simulated)
@@ -727,7 +665,7 @@ export default function StoryboardPage({
       )}
       <ResizablePanelGroup direction="horizontal" className="h-[calc(100vh-4rem)]">
         {/* Left Panel - Shot List */}
-        <ResizablePanel defaultSize={25} minSize={20} maxSize={35}>
+        <ResizablePanel defaultSize={20} minSize={15} maxSize={35}>
           <div className="h-full flex flex-col bg-card border-r border-border">
             {/* Header */}
             <div className="p-4 border-b border-border space-y-3">
@@ -915,9 +853,9 @@ export default function StoryboardPage({
                         </div>
                       )}
                     </div>
-                    );
-                  })}
-                </div>
+                  );
+                })}
+              </div>
               )}
             </div>
 
@@ -934,7 +872,7 @@ export default function StoryboardPage({
         <ResizableHandle withHandle />
 
         {/* Center Panel - Preview & Timeline */}
-        <ResizablePanel defaultSize={50}>
+        <ResizablePanel defaultSize={60}>
           <div className="h-full flex flex-col bg-background">
             {/* Preview Area */}
             <div className="flex-1 relative bg-black flex items-center justify-center">
@@ -946,6 +884,7 @@ export default function StoryboardPage({
                       src={selectedShot.video_url}
                       controls
                       className="max-w-full max-h-full object-contain"
+                      playsInline
                     />
                   ) : (
                     <div className="flex flex-col items-center justify-center text-white/60">
@@ -954,45 +893,19 @@ export default function StoryboardPage({
                     </div>
                   )}
 
-                  {/* Overlay Controls */}
-                  <div className="absolute top-4 right-4 flex items-center gap-2">
-                    <Button
-                      variant="secondary"
-                      size="icon"
-                      className="h-8 w-8 bg-black/60 hover:bg-black/80"
-                      onClick={() => setZoom(Math.max(50, zoom - 10))}
-                    >
-                      <ZoomOut className="h-4 w-4" />
-                    </Button>
-                    <span className="text-xs text-white bg-black/60 px-2 py-1 rounded">{zoom}%</span>
-                    <Button
-                      variant="secondary"
-                      size="icon"
-                      className="h-8 w-8 bg-black/60 hover:bg-black/80"
-                      onClick={() => setZoom(Math.min(200, zoom + 10))}
-                    >
-                      <ZoomIn className="h-4 w-4" />
-                    </Button>
-                    <Button variant="secondary" size="icon" className="h-8 w-8 bg-black/60 hover:bg-black/80">
-                      <Maximize2 className="h-4 w-4" />
-                    </Button>
-                  </div>
-
                   {/* Shot Info Overlay */}
-                  <div className="absolute bottom-4 left-4 right-4">
-                    <div className="bg-black/80 rounded-lg p-3 backdrop-blur-sm">
-                      <div className="flex items-center justify-between mb-2">
-                        <div className="flex items-center gap-2">
-                          <Badge className="bg-primary text-primary-foreground">
-                            镜头 {selectedShot.shot_code}
-                          </Badge>
-                          <Badge variant="outline" className="border-white/30 text-white">
-                            序列 {selectedShot.sequence}
-                          </Badge>
-                        </div>
+                  <div className="absolute top-4 left-4">
+                    <div className="bg-black/70 rounded-lg px-3 py-2 backdrop-blur-sm">
+                      <div className="flex items-center gap-2">
+                        <Badge className="bg-primary text-primary-foreground">
+                          {selectedShot.shot_code}
+                        </Badge>
+                        <Badge variant="outline" className="border-white/30 text-white">
+                          序列 {selectedShot.sequence}
+                        </Badge>
                         <span className="text-xs text-white/80">{selectedShot.duration_sec}s</span>
                       </div>
-                      <p className="text-sm text-white/80">{getShotDescription(selectedShot)}</p>
+                      <p className="text-xs text-white/70 mt-1 max-w-xs truncate">{getShotDescription(selectedShot)}</p>
                     </div>
                   </div>
                 </>
@@ -1006,33 +919,8 @@ export default function StoryboardPage({
 
             {/* Timeline */}
             <div className="h-32 border-t border-border bg-card">
-              {/* Playback Controls */}
-              <div className="flex items-center justify-between px-4 py-2 border-b border-border">
-                <div className="flex items-center gap-2">
-                  <Button variant="ghost" size="icon" className="h-8 w-8">
-                    <SkipBack className="h-4 w-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-10 w-10"
-                    onClick={() => setIsPlaying(!isPlaying)}
-                  >
-                    {isPlaying ? (
-                      <Pause className="h-5 w-5" />
-                    ) : (
-                      <Play className="h-5 w-5" />
-                    )}
-                  </Button>
-                  <Button variant="ghost" size="icon" className="h-8 w-8">
-                    <SkipForward className="h-4 w-4" />
-                  </Button>
-                  <Separator orientation="vertical" className="h-6 mx-2" />
-                  <span className="text-sm text-muted-foreground font-mono">
-                    {formatTime(currentTime)} / {formatTime(totalDuration)}
-                  </span>
-                </div>
-
+              {/* Controls */}
+              <div className="flex items-center justify-end px-4 py-2 border-b border-border">
                 <div className="flex items-center gap-2">
                   {activeGroup && (
                     <>
@@ -1057,55 +945,25 @@ export default function StoryboardPage({
                         <Wand2 className="h-3.5 w-3.5 mr-1" />
                         首帧图
                       </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="h-7 border-primary/50 text-primary hover:bg-primary/10"
-                        onClick={handleGenerateGroupVideo}
-                        disabled={isAnyGenerating}
-                      >
-                        {isGroupGenerating ? (
-                          <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
-                        ) : (
-                          <Group className="h-3.5 w-3.5 mr-1" />
-                        )}
-                        {isGroupGenerating
-                          ? '生成中...'
-                          : activeGroup.status === 'review'
-                            ? `重新生成 (${activeGroup.shots?.length || 0}镜头)`
-                            : `Kling Multi-Shot (${activeGroup.shots?.length || 0}镜头)`}
-                      </Button>
                     </>
                   )}
                   <Button
                     variant="outline"
                     size="sm"
-                    className="h-7 border-border"
+                    className="h-7 border-primary/50 text-primary hover:bg-primary/10"
                     onClick={handleGenerateVideo}
                     disabled={!selectedShot || isAnyGenerating}
                   >
-                    {isShotGenerating ? (
+                    {isAnyGenerating ? (
                       <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
                     ) : (
-                      <>
-                        {selectedShotGroup ? (
-                          <Group className="h-3.5 w-3.5 mr-1" />
-                        ) : (
-                          <Sparkles className="h-3.5 w-3.5 mr-1" />
-                        )}
-                      </>
+                      <Sparkles className="h-3.5 w-3.5 mr-1" />
                     )}
-                    {selectedShotGroup
-                      ? isGroupGenerating
-                        ? '组生成中...'
-                        : selectedShotGroup.status === 'review'
-                          ? `重新生成 ${selectedShotGroup.group_code}`
-                          : `按组生成 ${selectedShotGroup.group_code}`
-                      : isShotGenerating
-                        ? '生成中...'
-                        : selectedShot?.status === 'review'
-                          ? '重新生成'
-                          : 'AI 生成'}
+                    {isAnyGenerating
+                      ? '生成中...'
+                      : selectedShot?.status === 'review'
+                        ? '重新生成'
+                        : 'AI 生成'}
                   </Button>
                   <Button variant="outline" size="sm" className="h-7 border-border">
                     <Download className="h-3.5 w-3.5 mr-1" />
@@ -1171,7 +1029,7 @@ export default function StoryboardPage({
         <ResizableHandle withHandle />
 
         {/* Right Panel - Properties */}
-        <ResizablePanel defaultSize={25} minSize={20} maxSize={35}>
+        <ResizablePanel defaultSize={20} minSize={15} maxSize={35}>
           <div className="h-full flex flex-col bg-card border-l border-border">
             <div className="p-4 border-b border-border">
               <h2 className="font-semibold text-foreground">属性面板</h2>
@@ -1183,7 +1041,9 @@ export default function StoryboardPage({
                 shot={selectedShot}
                 projectId={projectIdNum}
                 storyboardId={storyboard?.id}
+                group={activeGroup}
                 onOpenImagePicker={() => setImagePickerOpen(true)}
+                onOpenShotImageGen={() => setShotImageGenOpen(true)}
                 onSave={handleUpdateShot}
                 onDelete={handleDeleteShot}
               />
@@ -1223,37 +1083,30 @@ export default function StoryboardPage({
         />
       )}
 
-      {/* Image Picker Dialog for Shot */}
+      {/* Image Picker Dialog for Group */}
       <ImagePickerDialog
         open={imagePickerOpen}
         onOpenChange={setImagePickerOpen}
         projectId={projectIdNum}
-        existingRefs={
-          selectedShot
-            ? [
-                ...(selectedShot.char_image_refs ?? []).flatMap((r) =>
-                  r.urls.map((url) => ({
-                    char_version_id: r.char_version_id,
-                    name: r.name,
-                    url,
-                    label: r.name,
-                  })),
-                ),
-                ...(selectedShot.location_image_refs ?? []).flatMap((r) =>
-                  r.urls.map((url) => ({
-                    location_version_id: r.location_version_id,
-                    location_id: r.location_id,
-                    name: r.name,
-                    url,
-                    label: r.name,
-                  })),
-                ),
-              ]
-            : []
-        }
-        existingImageStartUrl={null}
+        existingRefs={activeGroup?.image_references ?? []}
+        existingImageStartUrl={activeGroup?.image_start_url ?? null}
         onConfirm={handleImagePickerConfirm}
       />
+
+      {/* Shot Image Generation Dialog */}
+      {selectedShot && storyboard && (
+        <ShotImageGenerationDialog
+          open={shotImageGenOpen}
+          onOpenChange={setShotImageGenOpen}
+          shot={selectedShot}
+          storyboardId={storyboard.id}
+          projectId={projectIdNum}
+          onShotUpdated={(refreshedShot) => {
+            setSelectedShot(refreshedShot);
+            setShots((prev) => prev.map((s) => (s.id === refreshedShot.id ? refreshedShot : s)));
+          }}
+        />
+      )}
 
       {/* Video Generation Dialog */}
       <VideoGenerationDialog
@@ -1293,14 +1146,18 @@ function ShotDetailPanel({
   shot,
   projectId,
   storyboardId,
+  group,
   onOpenImagePicker,
+  onOpenShotImageGen,
   onSave,
   onDelete,
 }: {
   shot: ShotResponse;
   projectId: number;
   storyboardId?: number;
+  group?: ShotGroupResponse | null;
   onOpenImagePicker?: () => void;
+  onOpenShotImageGen?: () => void;
   onSave: (shotId: number, data: Record<string, unknown>) => Promise<void>;
   onDelete: (shotId: number) => Promise<void>;
 }) {
@@ -1342,19 +1199,24 @@ function ShotDetailPanel({
     dependencies: s.dependencies ? [...s.dependencies] : [],
   });
 
-  // Sync from prop when shot changes
+  // Sync from prop when shot id changes (new shot selected)
+  const prevShotIdRef = useRef(shot.id);
   useEffect(() => {
-    setForm(initForm(shot));
-    setDirty(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (prevShotIdRef.current !== shot.id) {
+      prevShotIdRef.current = shot.id;
+      setForm(initForm(shot));
+      setDirty(false);
+    }
   }, [shot]);
 
-  // Fetch full detail on mount
+  // Fetch full detail on mount (only if user hasn't started editing)
   useEffect(() => {
     if (!storyboardId || !shot.id) return;
     shotsApi.get(storyboardId, shot.id).then((detail) => {
-      setForm(initForm(detail));
-      setDirty(false);
+      // Don't overwrite if user has already started editing
+      if (!dirty) {
+        setForm(initForm(detail));
+      }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storyboardId, shot.id]);
@@ -1446,7 +1308,14 @@ function ShotDetailPanel({
   const handleSave = async () => {
     setSaving(true);
     try {
-      await onSave(shot.id, form);
+      // Filter out characters_config entries missing required char_version_id
+      const data = { ...form };
+      if (Array.isArray(data.characters_config)) {
+        data.characters_config = data.characters_config.filter(
+          (c: Record<string, unknown>) => c.char_version_id != null
+        );
+      }
+      await onSave(shot.id, data);
       setDirty(false);
     } finally {
       setSaving(false);
@@ -1460,12 +1329,11 @@ function ShotDetailPanel({
   const charVersionIds = (form.char_version_ids as number[]) || [];
   const soundDesign = (form.sound_design as Record<string, string | string[]>) || {};
   const dialogueDelivery = (form.dialogue_delivery as Record<string, string>) || {};
-  const shotCharImageRefs = (shot.char_image_refs || []).map((ref) => ({
-    ...ref,
-    name: ref.name || charVersionMap[ref.char_version_id]?.charName || `角色版本 #${ref.char_version_id}`,
-  }));
-  const shotLocationImageRefs = shot.location_image_refs || [];
+  // Group-level reference images (from shot_groups.image_references)
+  const groupImageRefs = group?.image_references ?? [];
 
+  // Lightbox state
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
   return (
     <ScrollArea className="flex-1 min-h-0">
       <div className="p-4 space-y-6">
@@ -1523,7 +1391,7 @@ function ShotDetailPanel({
 
         <Separator />
 
-        {/* Image Prompts */}
+        {/* Image Prompts + 参考图/生成图 */}
         <div className="space-y-3">
           <h3 className="text-sm font-medium text-foreground">图像提示词</h3>
           <div className="space-y-2">
@@ -1545,7 +1413,134 @@ function ShotDetailPanel({
               />
             </div>
           </div>
+
+          {/* 参考图展示 */}
+          {shot.reference_images && shot.reference_images.length > 0 && (
+            <div>
+              <label className="text-xs text-muted-foreground">参考图 ({shot.reference_images.length})</label>
+              <div className="grid grid-cols-3 gap-2 mt-1">
+                {shot.reference_images.map((ref, i) => (
+                  <div
+                    key={`ref-${ref.url}-${i}`}
+                    className="overflow-hidden rounded-md border border-border bg-muted/40 cursor-pointer hover:ring-2 hover:ring-primary/50 transition-all"
+                    onClick={() => setLightboxUrl(ref.url)}
+                  >
+                    <div className="aspect-square">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={ref.url}
+                        alt={ref.label || ref.name || `参考图 ${i + 1}`}
+                        className="h-full w-full object-cover"
+                        loading="lazy"
+                      />
+                    </div>
+                    {(ref.label || ref.name) && (
+                      <div className="px-1.5 py-1 bg-secondary/80">
+                        <p className="text-[10px] text-muted-foreground truncate">{ref.label || ref.name}</p>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* 生成图展示 */}
+          {shot.generated_images && shot.generated_images.length > 0 && (
+            <div>
+              <label className="text-xs text-muted-foreground">生成图 ({shot.generated_images.length})</label>
+              <div className="grid grid-cols-3 gap-2 mt-1">
+                {shot.generated_images.map((img, i) => (
+                  <div
+                    key={`gen-${img.url}-${i}`}
+                    className="overflow-hidden rounded-md border border-primary/30 bg-muted/40 cursor-pointer hover:ring-2 hover:ring-primary/50 transition-all"
+                    onClick={() => setLightboxUrl(img.url)}
+                  >
+                    <div className="aspect-square relative">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={img.url}
+                        alt={`生成图 ${i + 1}`}
+                        className="h-full w-full object-cover"
+                        loading="lazy"
+                      />
+                      <span className="absolute bottom-1 left-1 bg-black/60 text-white text-[10px] px-1 rounded">
+                        AI
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* AI 生成图像按钮 */}
+          {onOpenShotImageGen && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full h-7 border-primary/30 text-primary hover:bg-primary/10"
+              onClick={onOpenShotImageGen}
+            >
+              <Wand2 className="h-3.5 w-3.5 mr-1" />
+              {shot.generated_images?.length > 0 ? '继续生成' : 'AI 生成图像'}
+            </Button>
+          )}
         </div>
+
+        <Separator />
+
+        {/* Group 参考图 (from shot_groups.image_references) */}
+        {onOpenImagePicker && (
+          <div className="space-y-3">
+            <h3 className="text-sm font-medium text-foreground">参考图</h3>
+            <div className="space-y-2">
+              {groupImageRefs.length === 0 ? (
+                <div className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-xs text-muted-foreground">
+                  {group ? '当前镜头组还没有参考图。' : '当前镜头未加入任何组，请先创建组。'}
+                </div>
+              ) : (
+                <div className="grid grid-cols-3 gap-2">
+                  {groupImageRefs.map((ref, index) => (
+                    <div
+                      key={`${ref.url}-${index}`}
+                      className="overflow-hidden rounded-md border border-border bg-muted/40 cursor-pointer hover:ring-2 hover:ring-primary/50 transition-all"
+                      onClick={() => setLightboxUrl(ref.url)}
+                    >
+                      <div className="aspect-square">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={ref.url}
+                          alt={ref.label || ref.name || `参考图 ${index + 1}`}
+                          className="h-full w-full object-cover"
+                          loading="lazy"
+                        />
+                      </div>
+                      {(ref.label || ref.name) && (
+                        <div className="px-1.5 py-1 bg-secondary/80">
+                          <p className="text-[10px] text-muted-foreground truncate">
+                            {ref.label || ref.name}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full h-7 border-border"
+                onClick={onOpenImagePicker}
+                disabled={!group}
+              >
+                <Camera className="h-3.5 w-3.5 mr-1" />
+                {groupImageRefs.length > 0 ? '修改参考图' : '选择参考图'}
+              </Button>
+            </div>
+          </div>
+        )}
 
         <Separator />
 
@@ -1693,53 +1688,19 @@ function ShotDetailPanel({
 
         <Separator />
 
-        {/* Reference Images (for image-to-video) */}
-        {onOpenImagePicker && (
-          <div className="space-y-3">
-            <h3 className="text-sm font-medium text-foreground">参考图</h3>
-            <div className="space-y-2">
-              <p className="text-xs text-muted-foreground">
-                上传或选择参考图后，会按角色和场景自动分组展示，无需手动做角色关联。
-              </p>
-
-              {shotCharImageRefs.length === 0 && shotLocationImageRefs.length === 0 ? (
-                <div className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-xs text-muted-foreground">
-                  当前镜头还没有参考图。
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {shotCharImageRefs.map((ref) => (
-                    <ReferenceImageGroup
-                      key={`char-${ref.char_version_id}`}
-                      title={ref.name}
-                      badge="角色"
-                      urls={ref.urls}
-                    />
-                  ))}
-
-                  {shotLocationImageRefs.map((ref, index) => (
-                    <ReferenceImageGroup
-                      key={`location-${ref.location_version_id ?? ref.location_id ?? index}`}
-                      title={ref.name}
-                      badge="场景"
-                      urls={ref.urls}
-                    />
-                  ))}
-                </div>
-              )}
-
-              <Button
-                variant="outline"
-                size="sm"
-                className="w-full h-7 border-border"
-                onClick={onOpenImagePicker}
-              >
-                <Camera className="h-3.5 w-3.5 mr-1" />
-                {shotCharImageRefs.length > 0 || shotLocationImageRefs.length > 0
-                  ? '修改参考图'
-                  : '选择参考图'}
-              </Button>
-            </div>
+        {/* Lightbox overlay */}
+        {lightboxUrl && (
+          <div
+            className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center"
+            onClick={() => setLightboxUrl(null)}
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={lightboxUrl}
+              alt="参考图大图"
+              className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg"
+              onClick={(e) => e.stopPropagation()}
+            />
           </div>
         )}
 
@@ -2084,46 +2045,5 @@ function ShotDetailPanel({
         </div>
       </div>
     </ScrollArea>
-  );
-}
-
-function ReferenceImageGroup({
-  title,
-  badge,
-  urls,
-}: {
-  title: string;
-  badge: string;
-  urls: string[];
-}) {
-  if (!urls.length) return null;
-
-  return (
-    <div className="rounded-lg border border-border bg-secondary/30 p-2 space-y-2">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-xs font-medium text-foreground truncate">{title}</span>
-        <Badge variant="outline" className="h-5 shrink-0 px-1.5 text-[10px]">
-          {badge} {urls.length}
-        </Badge>
-      </div>
-      <div className="grid grid-cols-3 gap-2">
-        {urls.map((url, index) => (
-          <div
-            key={`${url}-${index}`}
-            className="overflow-hidden rounded-md border border-border bg-muted/40"
-          >
-            <div className="aspect-square">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={url}
-                alt={`${title}-${index + 1}`}
-                className="h-full w-full object-cover"
-                loading="lazy"
-              />
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
   );
 }

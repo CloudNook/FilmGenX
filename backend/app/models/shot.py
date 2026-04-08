@@ -101,6 +101,16 @@ class Shot(Base):
         comment="场景参考图：[{location_version_id, location_id, name, urls}]"
     )
 
+    # 镜头级参考图（用于图生图）和生成图
+    reference_images: Mapped[list] = mapped_column(
+        JSON, nullable=False, default=list,
+        comment="用户选择的参考图：[{url, label, name, char_version_id?, location_id?}]"
+    )
+    generated_images: Mapped[list] = mapped_column(
+        JSON, nullable=False, default=list,
+        comment="AI生成的图片：[{url, created_at, task_id}]"
+    )
+
     # 质量审核
     qc_character_consistency: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     qc_lighting_match: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
