@@ -122,8 +122,8 @@ class ShotSchema(BaseModel):
     dependencies: Optional[List[DependencySchema]] = Field(None, description="与其他镜头的依赖关系")
 
     # 生成提示词
-    image_prompt: str = Field(description="英文图像生成提示词，包含 anime style, high quality, dynamic lighting")
-    negative_prompt: Optional[str] = Field(None, description="英文负面提示词")
+    image_prompt: str = Field(description="图像生成提示词，包含 anime style, high quality, dynamic lighting")
+    negative_prompt: Optional[str] = Field(None, description="负面提示词")
     style_preset: Optional[str] = Field(None, description="风格预设，如 cinematic/dramatic/ethereal/intense")
 
     # 分镜组

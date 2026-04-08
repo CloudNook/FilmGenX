@@ -7,6 +7,7 @@ API Key 从环境变量 settings.GOOGLE_API_KEY 读取，前端无需传递。
 
 import json
 import logging
+import os
 import re
 from typing import AsyncGenerator, List, Optional
 
@@ -90,6 +91,18 @@ def _inline_schema(schema: dict) -> dict:
         if "$ref" in s:
             ref_name = s["$ref"].split("/")[-1]
             return _inline(copy.deepcopy(defs.get(ref_name, {})))
+        # 处理 anyOf（常见于 Optional[List[...]]）
+        if "anyOf" in s:
+            alternatives = [_inline(alt) for alt in s["anyOf"]]
+            # 若任一分支是 array，则保留 array + items（取第一个 array 分支）
+            for alt in alternatives:
+                if alt.get("type") == "array":
+                    return {"type": "array", "items": alt.get("items", {})}
+            # 否则取第一个非 null 分支
+            for alt in alternatives:
+                if alt.get("type") != "null":
+                    return alt
+            return {"type": "null"}
         result = {}
         for k, v in s.items():
             if k in _UNSUPPORTED_SCHEMA_KEYS:
@@ -195,7 +208,6 @@ async def call_llm_stream(
 
     temperature = llm_config.get("temperature")
 
-    # 初始化客户端
     client = genai.Client(api_key=api_key)
 
     # 转换消息格式（Gemini 格式）

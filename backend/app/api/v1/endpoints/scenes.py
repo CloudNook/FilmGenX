@@ -5,10 +5,12 @@
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user_id, get_db
 from app.repositories.project import ProjectRepository
+from app.models.storyboard import Storyboard
 from app.repositories.scene import SceneRepository
 from app.schemas.base import PageResponse
 from app.schemas.scene import SceneCreate, SceneResponse, SceneUpdate
@@ -98,7 +100,7 @@ async def update_scene(
     return scene
 
 
-@router.delete("/{scene_id}", status_code=status.HTTP_204_NO_CONTENT, summary="删除高光片段")
+@router.delete("/{scene_id}", status_code=status.HTTP_204_NO_CONTENT, summary="删除场景")
 async def delete_scene(
     project_id: int,
     scene_id: int,
@@ -110,5 +112,15 @@ async def delete_scene(
     scene = await repo.get_by_id_and_project(scene_id, project_id)
     if not scene:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="片段不存在")
+
+    # 硬删除关联的 storyboard（ORM cascade 会自动删除 shots、shot_groups、assets）
+    sb_result = await db.execute(
+        select(Storyboard).where(Storyboard.scene_id == scene.id)
+    )
+    storyboard = sb_result.scalar_one_or_none()
+    if storyboard:
+        await db.delete(storyboard)
+        await db.flush()
+
     await repo.soft_delete(scene)
     await db.commit()

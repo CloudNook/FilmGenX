@@ -65,6 +65,7 @@ export default function ChatPage({
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState('');
   const [isSummarizing, setIsSummarizing] = useState(false);
+  const [summarizeStreamingText, setSummarizeStreamingText] = useState('');
   const [loading, setLoading] = useState(true);
 
   const [llmConfig, setLlmConfig] = useState<LLMConfig>({
@@ -111,7 +112,7 @@ export default function ChatPage({
   // Scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, streamingText]);
+  }, [messages, streamingText, summarizeStreamingText]);
 
   // Helper: reload selected conversation
   const reloadConv = useCallback(async () => {
@@ -220,6 +221,7 @@ export default function ChatPage({
     if (!selectedConvId || isSummarizing) return;
 
     setIsSummarizing(true);
+    setSummarizeStreamingText('');
     try {
       const response = await conversationsApi.summarize(
         projectIdNum,
@@ -229,10 +231,17 @@ export default function ChatPage({
 
       if (!response.ok) throw new Error(`Summarize failed: ${response.status}`);
 
-      // Read the stream (we don't show it inline, just wait for completion)
-      await readSSEStream(response, () => {});
-
-      await reloadConv();
+      // Read the stream with real-time rendering
+      await readSSEStream(
+        response,
+        (chunk) => {
+          setSummarizeStreamingText((prev) => prev + chunk);
+        },
+        () => {
+          // onDone: reload conversation after stream ends
+          reloadConv();
+        },
+      );
     } catch (err) {
       console.error('Summarize error:', err);
       setMessages((prev) => [
@@ -251,6 +260,7 @@ export default function ChatPage({
       ]);
     } finally {
       setIsSummarizing(false);
+      setSummarizeStreamingText('');
     }
   }, [selectedConvId, isSummarizing, projectIdNum, llmConfig, reloadConv]);
 
@@ -606,21 +616,30 @@ export default function ChatPage({
                 </div>
               )}
 
-              {/* Summarizing indicator */}
+              {/* Summarizing with streaming text */}
               {isSummarizing && (
                 <div className="flex gap-4">
                   <Avatar className="h-8 w-8 shrink-0">
-                    <AvatarFallback className="bg-primary/10 text-primary">
-                      <Sparkles className="h-4 w-4" />
+                    <AvatarFallback className="bg-warning/10 text-warning">
+                      <FileText className="h-4 w-4" />
                     </AvatarFallback>
                   </Avatar>
-                  <div className="inline-block rounded-2xl px-4 py-3 bg-warning/10 border border-warning/30 rounded-tl-sm">
-                    <div className="flex items-center gap-2">
-                      <FileText className="h-4 w-4 text-warning" />
-                      <span className="text-sm text-foreground">正在生成剧本大纲...</span>
-                      <Loader2 className="h-3 w-3 animate-spin text-warning" />
+                  {summarizeStreamingText ? (
+                    <div className="inline-block rounded-2xl px-4 py-3 bg-card border border-warning/30 rounded-tl-sm max-w-[80%]">
+                      <div className="prose prose-custom prose-sm dark:prose-invert max-w-none break-words">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {summarizeStreamingText + ' ▍'}
+                        </ReactMarkdown>
+                      </div>
                     </div>
-                  </div>
+                  ) : (
+                    <div className="inline-block rounded-2xl px-4 py-3 bg-warning/10 border border-warning/30 rounded-tl-sm">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm text-foreground">正在生成剧本大纲...</span>
+                        <Loader2 className="h-3 w-3 animate-spin text-warning" />
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 

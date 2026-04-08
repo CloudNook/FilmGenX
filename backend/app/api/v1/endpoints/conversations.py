@@ -413,8 +413,8 @@ async def confirm_conversation(
     scene_repo = SceneRepository(db)
     next_num = await scene_repo.count_by_project(project_id) + 1
     scene_code = f"P{project_id}_EP{next_num:03d}"
-    # 极端情况下防重（并发创建时序号可能碰撞）
-    while await scene_repo.get_by_code(scene_code):
+    # 防重：含软删除记录，避免与已占用的唯一索引冲突
+    while await scene_repo.code_exists(scene_code):
         next_num += 1
         scene_code = f"P{project_id}_EP{next_num:03d}"
 

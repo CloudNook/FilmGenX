@@ -89,6 +89,7 @@ export default function EpisodesPage({
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [deleting, setDeleting] = useState<number | null>(null);
 
   useEffect(() => {
     if (isNaN(projectIdNum)) return;
@@ -122,6 +123,19 @@ export default function EpisodesPage({
       </AppLayout>
     );
   }
+
+  const handleDelete = async (sceneId: number) => {
+    if (!confirm('确认删除此分集？将同时删除关联的分镜、镜头和镜头组，此操作不可撤销。')) return;
+    setDeleting(sceneId);
+    try {
+      await scenesApi.delete(projectIdNum, sceneId);
+      setScenes((prev) => prev.filter((s) => s.id !== sceneId));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '删除失败');
+    } finally {
+      setDeleting(null);
+    }
+  };
 
   const filteredScenes = scenes.filter((scene) => {
     const query = searchQuery.trim().toLowerCase();
@@ -197,6 +211,8 @@ export default function EpisodesPage({
               scene={scene}
               projectId={projectId}
               formatDuration={formatDuration}
+              deleting={deleting === scene.id}
+              onDelete={() => handleDelete(scene.id)}
             />
           ))}
         </div>
@@ -234,10 +250,14 @@ function SceneCard({
   scene,
   projectId,
   formatDuration,
+  deleting,
+  onDelete,
 }: {
   scene: SceneResponse;
   projectId: string;
   formatDuration: (seconds: number | null) => string;
+  deleting?: boolean;
+  onDelete?: () => void;
 }) {
   const priorityColors: Record<string, string> = {
     S: 'bg-destructive/20 text-destructive',
@@ -312,9 +332,9 @@ function SceneCard({
                 复制
               </DropdownMenuItem>
               <DropdownMenuSeparator />
-              <DropdownMenuItem className="text-destructive">
-                <Trash2 className="h-4 w-4 mr-2" />
-                删除
+              <DropdownMenuItem className="text-destructive" onClick={onDelete} disabled={deleting}>
+                {deleting ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Trash2 className="h-4 w-4 mr-2" />}
+                {deleting ? '删除中...' : '删除'}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>

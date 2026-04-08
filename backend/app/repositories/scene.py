@@ -39,10 +39,17 @@ class SceneRepository(BaseRepository[Scene]):
         )
         return result.scalar_one_or_none()
 
-    async def count_by_project(self, project_id: int) -> int:
-        """返回项目下未删除的 Scene 数量，用于生成下一个序号。"""
+    async def code_exists(self, scene_code: str) -> bool:
+        """检查 scene_code 是否已被占用（含软删除记录），用于生成不冲突的唯一编号。"""
         result = await self.session.execute(
-            select(func.count()).where(Scene.project_id == project_id, Scene.is_deleted.is_(False))
+            select(func.count()).where(Scene.scene_code == scene_code)
+        )
+        return result.scalar_one() > 0
+
+    async def count_by_project(self, project_id: int) -> int:
+        """返回项目下所有 Scene 数量（含软删除），用于生成下一个序号。"""
+        result = await self.session.execute(
+            select(func.count()).where(Scene.project_id == project_id)
         )
         return result.scalar_one()
 

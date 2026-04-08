@@ -116,6 +116,7 @@ export default function StoryboardPage({
   const [generatingVideo, setGeneratingVideo] = useState(false);
   const resolvedUrlShotKeyRef = useRef<string | null>(null);
   const selectedShotRequestIdRef = useRef(0);
+  const timelineRef = useRef<HTMLDivElement>(null);
 
   const getGroupForShot = useCallback(
     (shot: Pick<ShotResponse, 'id' | 'shot_group_id'> | null) => {
@@ -540,6 +541,15 @@ export default function StoryboardPage({
   const isShotGenerating = selectedShot?.status === 'generating';
   const isGroupGenerating = activeGroup?.status === 'generating';
   const isAnyGenerating = isShotGenerating || isGroupGenerating;
+
+  // Auto-scroll timeline to center the selected shot
+  useEffect(() => {
+    if (!selectedShot || !timelineRef.current) return;
+    const el = timelineRef.current.querySelector(`[data-shot-id="${selectedShot.id}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+    }
+  }, [selectedShot?.id]);
 
   // Poll group detail while status is 'generating'
   useEffect(() => {
@@ -973,7 +983,7 @@ export default function StoryboardPage({
               </div>
 
               {/* Timeline Track */}
-              <div className="flex-1 px-4 py-2 overflow-x-auto">
+              <div className="flex-1 px-4 py-2 overflow-x-auto" ref={timelineRef}>
                 <div className="flex items-center gap-1 min-w-max">
                   {shots.map((shot) => {
                     const width = Math.max(80, (shot.duration_sec || 3) * 20);
@@ -981,6 +991,7 @@ export default function StoryboardPage({
                     return (
                       <div
                         key={shot.id}
+                        data-shot-id={shot.id}
                         onClick={() => {
                           selectShotWithDetail(shot);
                         }}
