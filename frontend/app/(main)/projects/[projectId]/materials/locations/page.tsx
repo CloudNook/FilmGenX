@@ -1,30 +1,24 @@
 'use client';
 
-import { use, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { use, useCallback, useEffect, useRef, useState } from 'react';
 import { AppLayout } from '@/components/layout';
 import {
   assetsApi,
   locationsApi,
   projectsApi,
-  tasksApi,
   type AssetResponse,
-  type LocationDetailResponse,
   type LocationResponse,
-  type LocationVersionResponse,
   type ProjectResponse,
 } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -42,31 +36,23 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Separator } from '@/components/ui/separator';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import {
   Building,
-  Cloud,
-  CloudRain,
-  ArrowRight,
+  Camera,
   Eye,
-  ImagePlus,
-  Layers,
+  Image as ImageIcon,
   Loader2,
   MapPin,
-  Moon,
   Plus,
   Search,
-  Sparkles,
-  Sun,
   Trash2,
   Trees,
   Upload,
-  Wand2,
   X,
+  Layers,
 } from 'lucide-react';
 
 const locationTypeLabels: Record<string, string> = {
@@ -79,41 +65,9 @@ const locationTypeLabels: Record<string, string> = {
 const locationTypeIcons: Record<string, typeof Building> = {
   indoor: Building,
   outdoor: Trees,
-  fantasy: Sparkles,
+  fantasy: Layers,
   mixed: Layers,
 };
-
-const timeOfDayLabels: Record<string, string> = {
-  dawn: '黎明',
-  day: '白天',
-  dusk: '黄昏',
-  night: '夜晚',
-};
-
-const weatherLabels: Record<string, string> = {
-  clear: '晴朗',
-  cloudy: '多云',
-  rain: '下雨',
-  snow: '下雪',
-  fog: '大雾',
-  storm: '暴风雨',
-};
-
-const aspectRatios = [
-  { value: '16:9', label: '16:9 横屏' },
-  { value: '9:16', label: '9:16 竖屏' },
-  { value: '1:1', label: '1:1 方图' },
-  { value: '4:3', label: '4:3' },
-  { value: '3:4', label: '3:4' },
-  { value: '21:9', label: '21:9 超宽' },
-];
-
-const resolutions = [
-  { value: '512', label: '512' },
-  { value: '1K', label: '1K' },
-  { value: '2K', label: '2K' },
-  { value: '4K', label: '4K' },
-];
 
 interface PendingImageFile {
   id: string;
@@ -121,20 +75,10 @@ interface PendingImageFile {
   preview: string;
 }
 
-interface SceneImageItem {
-  url: string;
-  assetId: number | null;
-  source: 'uploaded' | 'generated' | 'reference';
-  createdAt?: string;
-  isReferenced: boolean;
-}
-
 function createPendingImageFiles(files: FileList | null, limit: number): PendingImageFile[] {
   if (!files || files.length === 0) return [];
-
   const validTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
   const nextFiles: PendingImageFile[] = [];
-
   Array.from(files).slice(0, limit).forEach((file) => {
     if (!validTypes.includes(file.type)) {
       toast.error(`${file.name} 不是支持的图片格式`);
@@ -144,47 +88,9 @@ function createPendingImageFiles(files: FileList | null, limit: number): Pending
       toast.error(`${file.name} 超过 10MB 限制`);
       return;
     }
-    nextFiles.push({
-      id: `${Date.now()}-${Math.random()}`,
-      file,
-      preview: URL.createObjectURL(file),
-    });
+    nextFiles.push({ id: `${Date.now()}-${Math.random()}`, file, preview: URL.createObjectURL(file) });
   });
-
   return nextFiles;
-}
-
-function splitMultilineValue(value: string): string[] {
-  return value
-    .split(/[\n,]/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-function buildSceneImageItems(referenceUrls: string[], assets: AssetResponse[]): SceneImageItem[] {
-  const assetMap = new Map<string, AssetResponse>();
-  assets.forEach((asset) => {
-    if (!assetMap.has(asset.file_url)) {
-      assetMap.set(asset.file_url, asset);
-    }
-  });
-
-  const referencedSet = new Set(referenceUrls);
-  const orderedUrls = [
-    ...referenceUrls,
-    ...assets.map((asset) => asset.file_url).filter((url) => !referencedSet.has(url)),
-  ];
-
-  return Array.from(new Set(orderedUrls)).map((url) => {
-    const asset = assetMap.get(url);
-    return {
-      url,
-      assetId: asset?.id ?? null,
-      source: asset ? (asset.source as 'uploaded' | 'generated') : 'reference',
-      createdAt: asset?.created_at,
-      isReferenced: referencedSet.has(url),
-    };
-  });
 }
 
 function EmptyState({ title, description }: { title: string; description: string }) {
@@ -211,58 +117,24 @@ function FileDropZone({
   description: string;
 }) {
   const [dragging, setDragging] = useState(false);
-
   return (
     <label
       className={`block rounded-xl border-2 border-dashed p-6 transition ${disabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer hover:border-primary/50 hover:bg-secondary/30'} ${dragging ? 'border-primary bg-secondary/40' : ''}`}
-      onDragOver={(event) => {
-        if (disabled) return;
-        event.preventDefault();
-        setDragging(true);
-      }}
+      onDragOver={(event) => { if (disabled) return; event.preventDefault(); setDragging(true); }}
       onDragLeave={() => setDragging(false)}
-      onDrop={(event) => {
-        if (disabled) return;
-        event.preventDefault();
-        setDragging(false);
-        onSelect(event.dataTransfer.files);
-      }}
+      onDrop={(event) => { if (disabled) return; event.preventDefault(); setDragging(false); onSelect(event.dataTransfer.files); }}
     >
-      <input
-        className="hidden"
-        type="file"
-        accept="image/*"
-        multiple
-        disabled={disabled}
-        onChange={(event) => {
-          onSelect(event.target.files);
-          event.target.value = '';
-        }}
-      />
+      <input className="hidden" type="file" accept="image/*" multiple disabled={disabled} onChange={(event) => { onSelect(event.target.files); event.target.value = ''; }} />
       <div className="flex flex-col items-center justify-center gap-3 text-center">
-        <div className="rounded-full bg-secondary p-3 text-muted-foreground">
-          <Upload className="h-6 w-6" />
-        </div>
-        <div>
-          <p className="font-medium text-foreground">{title}</p>
-          <p className="text-sm text-muted-foreground">{description}</p>
-        </div>
+        <div className="rounded-full bg-secondary p-3 text-muted-foreground"><Upload className="h-6 w-6" /></div>
+        <div><p className="font-medium text-foreground">{title}</p><p className="text-sm text-muted-foreground">{description}</p></div>
       </div>
     </label>
   );
 }
 
-function FullscreenPreview({
-  url,
-  open,
-  onOpenChange,
-}: {
-  url: string | null;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-}) {
+function FullscreenPreview({ url, open, onOpenChange }: { url: string | null; open: boolean; onOpenChange: (open: boolean) => void }) {
   if (!url) return null;
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-5xl overflow-hidden p-0">
@@ -273,19 +145,11 @@ function FullscreenPreview({
 }
 
 function AssetLibraryPickerDialog({
-  open,
-  onOpenChange,
-  projectId,
-  excludedUrls,
-  onSelect,
-  title,
-  description,
-  selectLabel,
+  open, onOpenChange, projectId, onSelect, title, description, selectLabel,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   projectId: number;
-  excludedUrls: string[];
   onSelect: (url: string) => Promise<void>;
   title: string;
   description: string;
@@ -298,143 +162,58 @@ function AssetLibraryPickerDialog({
   const [loading, setLoading] = useState(false);
   const [submittingUrl, setSubmittingUrl] = useState<string | null>(null);
 
-  const excludedUrlSet = useMemo(() => new Set(excludedUrls), [excludedUrls]);
+  useEffect(() => {
+    if (!open) return;
+    setLoading(true);
+    setPage(1);
+    assetsApi.list(projectId, 1, pageSize, { assetType: 'image', isCurrent: true })
+      .then((response) => { setAssets(response.items); setTotal(response.total); })
+      .catch(() => { setAssets([]); setTotal(0); })
+      .finally(() => setLoading(false));
+  }, [open, projectId]);
+
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
-  const loadAssets = useCallback(async (nextPage: number) => {
+  const loadPage = useCallback((p: number) => {
     setLoading(true);
-    try {
-      const response = await assetsApi.list(projectId, nextPage, pageSize, {
-        assetType: 'image',
-        isCurrent: true,
-      });
-      setAssets(response.items.filter((asset) => Boolean(asset.file_url)));
-      setTotal(response.total);
-    } catch {
-      setAssets([]);
-      setTotal(0);
-      toast.error('加载素材库图片失败');
-    } finally {
-      setLoading(false);
-    }
+    assetsApi.list(projectId, p, pageSize, { assetType: 'image', isCurrent: true })
+      .then((response) => { setAssets(response.items); setTotal(response.total); setPage(p); })
+      .catch(() => { setAssets([]); })
+      .finally(() => setLoading(false));
   }, [projectId]);
-
-  useEffect(() => {
-    if (!open) {
-      setAssets([]);
-      setPage(1);
-      setTotal(0);
-      setSubmittingUrl(null);
-      return;
-    }
-    loadAssets(page).catch(() => undefined);
-  }, [loadAssets, open, page]);
 
   const handleSelect = useCallback(async (url: string) => {
     setSubmittingUrl(url);
-    try {
-      await onSelect(url);
-      onOpenChange(false);
-    } finally {
-      setSubmittingUrl(null);
-    }
-  }, [onOpenChange, onSelect]);
-
-  const startIndex = total === 0 ? 0 : (page - 1) * pageSize + 1;
-  const endIndex = total === 0 ? 0 : Math.min(page * pageSize, total);
+    try { await onSelect(url); } finally { setSubmittingUrl(null); }
+  }, [onSelect]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-6xl gap-0 overflow-hidden p-0">
-        <DialogHeader className="border-b bg-gradient-to-r from-secondary/70 via-background to-background px-6 py-5 text-left">
-          <DialogTitle className="text-xl">{title}</DialogTitle>
-          <DialogDescription className="max-w-3xl text-sm leading-6">
-            {description}
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="space-y-5 px-6 py-5">
-          <div className="flex flex-col gap-3 rounded-2xl border bg-muted/30 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge variant="secondary" className="rounded-full px-3 py-1 text-xs font-medium">
-                {total > 0 ? `第 ${startIndex}-${endIndex} 张` : '当前无可选图片'}
-              </Badge>
-              <Badge variant="outline" className="rounded-full px-3 py-1 text-xs font-medium">
-                {`共 ${total} 张`}
-              </Badge>
-            </div>
-            <div className="text-xs font-medium tracking-wide text-muted-foreground">
-              {`每页 ${pageSize} 张`}
-            </div>
-          </div>
-
-          <ScrollArea className="max-h-[62vh] pr-2">
+      <DialogContent className="max-w-4xl">
+        <DialogHeader><DialogTitle>{title}</DialogTitle></DialogHeader>
+        <p className="text-sm text-muted-foreground">{description}</p>
+        <div className="max-h-[60vh] overflow-hidden flex flex-col">
+          <ScrollArea className="flex-1">
             {loading ? (
-              <div className="flex min-h-[360px] items-center justify-center rounded-2xl border border-dashed bg-muted/20">
-                <Loader2 className="h-8 w-8 animate-spin text-primary" />
-              </div>
+              <div className="flex items-center justify-center py-12"><Loader2 className="h-8 w-8 animate-spin text-muted-foreground" /></div>
             ) : assets.length === 0 ? (
-              <div className="rounded-2xl border border-dashed bg-muted/20 py-20 text-center text-sm text-muted-foreground">
-                当前素材库中还没有图片
-              </div>
+              <div className="py-12 text-center text-muted-foreground">素材库中暂无图片</div>
             ) : (
-              <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-4">
+              <div className="grid grid-cols-2 gap-4 p-1 sm:grid-cols-3">
                 {assets.map((asset) => {
-                  const isIncluded = excludedUrlSet.has(asset.file_url);
+                  const assetLabel = asset.description || asset.tags.join(', ') || `素材 #${asset.id}`;
                   const isSubmitting = submittingUrl === asset.file_url;
-                  const assetLabel = asset.asset_code || `素材图 #${asset.id}`;
-
                   return (
-                    <div
-                      key={asset.id}
-                      className={cn(
-                        'group overflow-hidden rounded-2xl border bg-card shadow-sm transition-all duration-200',
-                        isIncluded
-                          ? 'border-border/70 bg-muted/20'
-                          : 'border-border/60 hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-lg',
-                      )}
-                    >
-                      <div className="relative overflow-hidden bg-muted">
-                        <img
-                          src={asset.file_url}
-                          alt={assetLabel}
-                          className="aspect-[4/3] w-full object-cover transition duration-300 group-hover:scale-[1.02]"
-                        />
-                        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-black/45 via-black/10 to-transparent" />
-                        <div className="absolute left-3 top-3">
-                          <Badge
-                            variant={isIncluded ? 'secondary' : 'outline'}
-                            className={cn(
-                              'rounded-full border px-2.5 py-1 text-[11px] font-medium backdrop-blur',
-                              isIncluded
-                                ? 'bg-background/90 text-foreground'
-                                : 'border-white/40 bg-black/35 text-white',
-                            )}
-                          >
-                            {isIncluded ? '已在当前图库' : '素材库图片'}
-                          </Badge>
-                        </div>
+                    <div key={asset.id} className="group overflow-hidden rounded-xl border bg-card transition hover:shadow-md">
+                      <div className="relative aspect-[4/3] overflow-hidden">
+                        <img src={asset.file_url} alt={assetLabel} className="aspect-[4/3] w-full object-cover transition duration-300 group-hover:scale-[1.02]" />
                       </div>
-
                       <div className="space-y-3 p-4">
-                        <div className="space-y-1">
-                          <div className="line-clamp-1 text-sm font-semibold text-foreground" title={assetLabel}>
-                            {assetLabel}
-                          </div>
-                          <div className="text-xs text-muted-foreground">
-                            {`素材 #${asset.id}`}
-                          </div>
-                        </div>
-
-                        <Button
-                          className="w-full"
-                          size="sm"
-                          variant={isIncluded ? 'secondary' : 'outline'}
-                          disabled={isIncluded || Boolean(submittingUrl)}
-                          onClick={() => handleSelect(asset.file_url)}
-                        >
+                        <div className="line-clamp-1 text-sm font-semibold text-foreground" title={assetLabel}>{assetLabel}</div>
+                        <div className="text-xs text-muted-foreground">{`素材 #${asset.id}`}</div>
+                        <Button className="w-full" size="sm" variant="outline" disabled={Boolean(submittingUrl)} onClick={() => handleSelect(asset.file_url)}>
                           {isSubmitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                          {isIncluded ? '已加入当前图库' : selectLabel}
+                          {selectLabel}
                         </Button>
                       </div>
                     </div>
@@ -443,36 +222,13 @@ function AssetLibraryPickerDialog({
               </div>
             )}
           </ScrollArea>
-
           {totalPages > 1 ? (
             <div className="border-t pt-4">
               <Pagination>
                 <PaginationContent>
-                  <PaginationItem>
-                    <PaginationPrevious
-                      href="#"
-                      onClick={(event) => {
-                        event.preventDefault();
-                        if (page > 1 && !loading) setPage((current) => current - 1);
-                      }}
-                      className={page <= 1 || loading ? 'pointer-events-none opacity-50' : ''}
-                    />
-                  </PaginationItem>
-                  <PaginationItem>
-                    <span className="px-3 text-sm font-medium text-muted-foreground">
-                      {`第 ${page} / ${totalPages} 页`}
-                    </span>
-                  </PaginationItem>
-                  <PaginationItem>
-                    <PaginationNext
-                      href="#"
-                      onClick={(event) => {
-                        event.preventDefault();
-                        if (page < totalPages && !loading) setPage((current) => current + 1);
-                      }}
-                      className={page >= totalPages || loading ? 'pointer-events-none opacity-50' : ''}
-                    />
-                  </PaginationItem>
+                  <PaginationItem><PaginationPrevious href="#" onClick={(event) => { event.preventDefault(); if (page > 1 && !loading) loadPage(page - 1); }} className={page <= 1 || loading ? 'pointer-events-none opacity-50' : ''} /></PaginationItem>
+                  <PaginationItem><span className="px-3 text-sm font-medium text-muted-foreground">{`第 ${page} / ${totalPages} 页`}</span></PaginationItem>
+                  <PaginationItem><PaginationNext href="#" onClick={(event) => { event.preventDefault(); if (page < totalPages && !loading) loadPage(page + 1); }} className={page >= totalPages || loading ? 'pointer-events-none opacity-50' : ''} /></PaginationItem>
                 </PaginationContent>
               </Pagination>
             </div>
@@ -483,20 +239,14 @@ function AssetLibraryPickerDialog({
   );
 }
 
-export default function LocationsPage({
-  params,
-}: {
-  params: Promise<{ projectId: string }>;
-}) {
+export default function LocationsPage({ params }: { params: Promise<{ projectId: string }> }) {
   const { projectId } = use(params);
-  const router = useRouter();
-  const searchParams = useSearchParams();
   const projectIdNum = Number(projectId);
 
   const [project, setProject] = useState<ProjectResponse | null>(null);
   const [locations, setLocations] = useState<LocationResponse[]>([]);
   const [selectedLocId, setSelectedLocId] = useState<number | null>(null);
-  const [locDetail, setLocDetail] = useState<LocationDetailResponse | null>(null);
+  const [locDetail, setLocDetail] = useState<LocationResponse | null>(null);
   const [locationAssets, setLocationAssets] = useState<AssetResponse[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
@@ -505,43 +255,14 @@ export default function LocationsPage({
   const [creating, setCreating] = useState(false);
   const [newLocName, setNewLocName] = useState('');
   const [newLocType, setNewLocType] = useState('outdoor');
-  const [newLocDomain, setNewLocDomain] = useState('');
-  const [newLocDesc, setNewLocDesc] = useState('');
-  const [versionDialogOpen, setVersionDialogOpen] = useState(false);
-  const [editingVersion, setEditingVersion] = useState<LocationVersionResponse | null>(null);
-  const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<'studio' | 'versions' | 'details'>('studio');
-  const [selectedStudioVersionId, setSelectedStudioVersionId] = useState<number | null | undefined>(undefined);
-  const [studioVersionAssets, setStudioVersionAssets] = useState<AssetResponse[]>([]);
-  const [selectedSourceLocationId, setSelectedSourceLocationId] = useState<number | null>(null);
-  const [selectedSourceVersionId, setSelectedSourceVersionId] = useState<number | null>(null);
-  const [sourceLocationDetail, setSourceLocationDetail] = useState<LocationDetailResponse | null>(null);
-  const [sourceLocationAssets, setSourceLocationAssets] = useState<AssetResponse[]>([]);
-  const [sourceVersionAssets, setSourceVersionAssets] = useState<AssetResponse[]>([]);
-  const [loadingSourceLibrary, setLoadingSourceLibrary] = useState(false);
-
-  const [textPrompt, setTextPrompt] = useState('');
-  const [textNegativePrompt, setTextNegativePrompt] = useState('');
-  const [textStylePreset, setTextStylePreset] = useState('');
-  const [textAspectRatio, setTextAspectRatio] = useState('16:9');
-  const [textResolution, setTextResolution] = useState('1K');
-  const [textGenerating, setTextGenerating] = useState(false);
 
   const [uploadFiles, setUploadFiles] = useState<PendingImageFile[]>([]);
   const [uploadingSceneImage, setUploadingSceneImage] = useState(false);
-
-  const [imgPrompt, setImgPrompt] = useState('');
-  const [imgNegativePrompt, setImgNegativePrompt] = useState('');
-  const [imgStylePreset, setImgStylePreset] = useState('');
-  const [imgAspectRatio, setImgAspectRatio] = useState('16:9');
-  const [imgResolution, setImgResolution] = useState('1K');
-  const [img2imgFiles, setImg2imgFiles] = useState<PendingImageFile[]>([]);
-  const [selectedReferenceUrls, setSelectedReferenceUrls] = useState<string[]>([]);
-  const [imgGenerating, setImgGenerating] = useState(false);
-  const [isStudioAssetPickerOpen, setIsStudioAssetPickerOpen] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const lastAppliedRouteSelectionRef = useRef<string | null>(null);
+  const [uploadingPic, setUploadingPic] = useState(false);
+  const [deletingPic, setDeletingPic] = useState(false);
+  const picFileInputRef = useRef<HTMLInputElement>(null);
   const uploadFilesRef = useRef<PendingImageFile[]>([]);
-  const img2imgFilesRef = useRef<PendingImageFile[]>([]);
 
   const resetPreviewFiles = useCallback((files: PendingImageFile[]) => {
     files.forEach((item) => URL.revokeObjectURL(item.preview));
@@ -559,676 +280,134 @@ export default function LocationsPage({
       locationId,
       isCurrent: true,
     }).then((response) => response.items);
-    setLocationAssets(items.filter((asset) => asset.location_version_id == null));
-    return items;
-  }, [projectIdNum]);
-
-  const loadStudioVersionAssets = useCallback(async (locationId: number, versionId: number) => {
-    const items = await assetsApi.list(projectIdNum, 1, 100, {
-      assetType: 'image',
-      locationId,
-      locationVersionId: versionId,
-      isCurrent: true,
-    }).then((response) => response.items);
-    setStudioVersionAssets(items);
+    setLocationAssets(items);
     return items;
   }, [projectIdNum]);
 
   const loadLocationDetail = useCallback(async (locationId: number) => {
     const detail = await locationsApi.get(projectIdNum, locationId);
     setLocDetail(detail);
-    await loadLocationAssets(locationId);
     return detail;
-  }, [loadLocationAssets, projectIdNum]);
-
-  const activeStudioVersion = useMemo(
-    () => locDetail?.versions.find((version) => version.id === selectedStudioVersionId) ?? null,
-    [locDetail?.versions, selectedStudioVersionId],
-  );
-
-  const routeTargetLocationId = Number(searchParams.get('locationId') || '');
-  const routeTargetVersionId = Number(searchParams.get('versionId') || '');
-  const routeTargetTab = searchParams.get('tab');
-  const routeSelectionKey = `${searchParams.get('locationId') || ''}|${searchParams.get('versionId') || ''}|${routeTargetTab || ''}`;
-
-  const studioReferenceUrls = activeStudioVersion?.reference_image_urls || locDetail?.reference_image_urls || [];
-
-  const sourceLocationOptions = useMemo(() => {
-    if (!locDetail) return locations;
-    const currentLocation = locations.find((location) => location.id === locDetail.id);
-    const otherLocations = locations.filter((location) => location.id !== locDetail.id);
-    return currentLocation ? [currentLocation, ...otherLocations] : locations;
-  }, [locDetail, locations]);
+  }, [projectIdNum]);
 
   useEffect(() => {
-    if (Number.isNaN(projectIdNum)) return;
-
+    if (isNaN(projectIdNum)) return;
     Promise.all([
       projectsApi.get(projectIdNum).catch(() => null),
-      loadLocations().catch(() => []),
-    ]).then(([projectResponse, locationItems]) => {
-      setProject(projectResponse);
-      if (locationItems.length > 0) {
-        setSelectedLocId((current) => current ?? locationItems[0].id);
-      }
+      loadLocations(),
+    ]).then(([projectRes, locs]) => {
+      setProject(projectRes);
+      if (locs.length > 0) setSelectedLocId(locs[0].id);
       setLoading(false);
-    });
-  }, [loadLocations, projectIdNum]);
+    }).catch(() => setLoading(false));
+  }, [projectIdNum, loadLocations]);
 
   useEffect(() => {
-    if (!selectedLocId || Number.isNaN(projectIdNum)) return;
-    loadLocationDetail(selectedLocId).catch(() => setLocDetail(null));
-  }, [loadLocationDetail, projectIdNum, selectedLocId]);
-
-  useEffect(() => {
-    if (!locDetail) {
-      setSelectedStudioVersionId(undefined);
-      setStudioVersionAssets([]);
-      return;
-    }
-
-    if (selectedStudioVersionId === null) {
-      return;
-    }
-
-    if (selectedStudioVersionId !== undefined && locDetail.versions.some((version) => version.id === selectedStudioVersionId)) {
-      return;
-    }
-
-    setSelectedStudioVersionId(locDetail.default_version?.id ?? locDetail.versions[0]?.id ?? null);
-  }, [locDetail, selectedStudioVersionId]);
-
-  useEffect(() => {
-    if (!locDetail || sourceLocationOptions.length === 0) {
-      setSelectedSourceLocationId(null);
-      setSelectedSourceVersionId(null);
-      setSourceLocationDetail(null);
-      setSourceLocationAssets([]);
-      setSourceVersionAssets([]);
-      return;
-    }
-
-    setSelectedSourceLocationId((current) => {
-      if (current && sourceLocationOptions.some((location) => location.id === current)) {
-        return current;
-      }
-      return locDetail.id;
-    });
-  }, [locDetail, sourceLocationOptions]);
-
-  useEffect(() => {
-    if (!locDetail) return;
-
-    const nextReferenceUrls = activeStudioVersion?.reference_image_urls || locDetail.reference_image_urls || [];
-    setSelectedReferenceUrls((prev) => {
-      return prev.filter((url) => nextReferenceUrls.includes(url));
-    });
-
-    if (activeStudioVersion) {
-      loadStudioVersionAssets(locDetail.id, activeStudioVersion.id).catch(() => setStudioVersionAssets([]));
-    } else {
-      setStudioVersionAssets([]);
-    }
-  }, [activeStudioVersion, loadStudioVersionAssets, locDetail]);
-
-  useEffect(() => {
-    if ((!searchParams.get('locationId') && !searchParams.get('versionId') && !routeTargetTab) || routeSelectionKey === lastAppliedRouteSelectionRef.current) {
-      return;
-    }
-
-    if (routeTargetTab === 'studio' || routeTargetTab === 'versions' || routeTargetTab === 'details') {
-      setActiveWorkspaceTab(routeTargetTab);
-    }
-
-    if (!Number.isNaN(routeTargetLocationId) && locations.some((location) => location.id === routeTargetLocationId)) {
-      if (selectedLocId !== routeTargetLocationId) {
-        setSelectedLocId(routeTargetLocationId);
-      }
-    }
-
-    const canApplyVersion = !Number.isNaN(routeTargetVersionId)
-      && locDetail
-      && (!Number.isNaN(routeTargetLocationId) ? locDetail.id === routeTargetLocationId : true)
-      && locDetail.versions.some((version) => version.id === routeTargetVersionId);
-
-    if (canApplyVersion) {
-      setSelectedStudioVersionId(routeTargetVersionId);
-      lastAppliedRouteSelectionRef.current = routeSelectionKey;
-      return;
-    }
-
-    if (searchParams.get('versionId') && !locDetail) {
-      return;
-    }
-
-    if (!searchParams.get('versionId')) {
-      lastAppliedRouteSelectionRef.current = routeSelectionKey;
-    }
-  }, [
-    locDetail,
-    locations,
-    routeSelectionKey,
-    routeTargetLocationId,
-    routeTargetTab,
-    routeTargetVersionId,
-    searchParams,
-    selectedLocId,
-  ]);
-
-  useEffect(() => {
-    if (!selectedSourceLocationId || Number.isNaN(projectIdNum)) {
-      setSourceLocationDetail(null);
-      setSourceLocationAssets([]);
-      setSourceVersionAssets([]);
-      setLoadingSourceLibrary(false);
-      return;
-    }
-
-    let cancelled = false;
-    setLoadingSourceLibrary(true);
-
-    Promise.all([
-      locationsApi.get(projectIdNum, selectedSourceLocationId),
-      assetsApi.list(projectIdNum, 1, 100, {
-        assetType: 'image',
-        locationId: selectedSourceLocationId,
-        isCurrent: true,
-      }).then((response) => response.items),
-    ]).then(([detail, items]) => {
-      if (cancelled) return;
-      setSourceLocationDetail(detail);
-      setSourceLocationAssets(items.filter((asset) => asset.location_version_id == null));
-      setSelectedSourceVersionId((current) => (
-        current && detail.versions.some((version) => version.id === current) ? current : null
-      ));
-    }).catch(() => {
-      if (cancelled) return;
-      setSourceLocationDetail(null);
-      setSourceLocationAssets([]);
-      setSourceVersionAssets([]);
-    }).finally(() => {
-      if (!cancelled) {
-        setLoadingSourceLibrary(false);
-      }
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [projectIdNum, selectedSourceLocationId]);
-
-  useEffect(() => {
-    if (!selectedSourceLocationId || !selectedSourceVersionId || Number.isNaN(projectIdNum)) {
-      setSourceVersionAssets([]);
-      return;
-    }
-
-    let cancelled = false;
-
-    assetsApi.list(projectIdNum, 1, 100, {
-      assetType: 'image',
-      locationId: selectedSourceLocationId,
-      locationVersionId: selectedSourceVersionId,
-      isCurrent: true,
-    }).then((response) => {
-      if (cancelled) return;
-      setSourceVersionAssets(response.items);
-    }).catch(() => {
-      if (cancelled) return;
-      setSourceVersionAssets([]);
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [projectIdNum, selectedSourceLocationId, selectedSourceVersionId]);
-
-  useEffect(() => {
-    uploadFilesRef.current = uploadFiles;
-  }, [uploadFiles]);
-
-  useEffect(() => {
-    img2imgFilesRef.current = img2imgFiles;
-  }, [img2imgFiles]);
-
-  useEffect(() => {
-    return () => {
-      resetPreviewFiles(uploadFilesRef.current);
-      resetPreviewFiles(img2imgFilesRef.current);
-    };
-  }, [resetPreviewFiles]);
-
-  const filteredLocations = useMemo(() => {
-    const keyword = searchQuery.trim().toLowerCase();
-    if (!keyword) return locations;
-    return locations.filter((location) => (
-      location.name.toLowerCase().includes(keyword)
-      || location.loc_code.toLowerCase().includes(keyword)
-      || (location.domain || '').toLowerCase().includes(keyword)
-    ));
-  }, [locations, searchQuery]);
-
-  const locationImageItems = useMemo(
-    () => buildSceneImageItems(locDetail?.reference_image_urls || [], locationAssets),
-    [locDetail?.reference_image_urls, locationAssets],
-  );
-
-  const studioImageItems = useMemo(
-    () => buildSceneImageItems(studioReferenceUrls, activeStudioVersion ? studioVersionAssets : locationAssets),
-    [activeStudioVersion, locationAssets, studioReferenceUrls, studioVersionAssets],
-  );
-
-  const reusableVersionImages = useMemo(() => {
-    if (!locDetail) return [];
-
-    return locDetail.versions
-      .filter((version) => version.id !== activeStudioVersion?.id)
-      .flatMap((version) => version.reference_image_urls.map((url) => ({
-        key: `${version.id}-${url}`,
-        url,
-        versionId: version.id,
-        versionLabel: version.label,
-      })))
-      .filter((item, index, arr) => arr.findIndex((candidate) => candidate.url === item.url) === index)
-      .filter((item) => !studioReferenceUrls.includes(item.url));
-  }, [activeStudioVersion?.id, locDetail, studioReferenceUrls]);
-
-  const projectLibraryImageItems = useMemo(() => [] as Array<{ url: string; assetId: number }>, []);
-
-  const selectedSourceVersion = useMemo(
-    () => sourceLocationDetail?.versions.find((version) => version.id === selectedSourceVersionId) ?? null,
-    [sourceLocationDetail?.versions, selectedSourceVersionId],
-  );
-
-  const sourceLibraryMatchesCurrentTarget = useMemo(
-    () => selectedSourceLocationId === locDetail?.id && (selectedSourceVersionId ?? null) === (activeStudioVersion?.id ?? null),
-    [activeStudioVersion?.id, locDetail?.id, selectedSourceLocationId, selectedSourceVersionId],
-  );
-
-  const externalSourceImageItems = useMemo(() => {
-    if (sourceLibraryMatchesCurrentTarget) return [];
-    const sourceReferenceUrls = selectedSourceVersion?.reference_image_urls || sourceLocationDetail?.reference_image_urls || [];
-    const sourceAssets = selectedSourceVersion ? sourceVersionAssets : sourceLocationAssets;
-    return buildSceneImageItems(sourceReferenceUrls, sourceAssets)
-      .filter((item) => !studioReferenceUrls.includes(item.url));
-  }, [selectedSourceVersion, sourceLibraryMatchesCurrentTarget, sourceLocationAssets, sourceLocationDetail?.reference_image_urls, sourceVersionAssets, studioReferenceUrls]);
-
-  const addPendingFiles = useCallback((files: FileList | null, target: 'upload' | 'img2img') => {
-    if (!files || files.length === 0) return;
-
-    const validTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-    const nextFiles: PendingImageFile[] = [];
-
-    Array.from(files).forEach((file) => {
-      if (!validTypes.includes(file.type)) {
-        toast.error(`${file.name} 不是支持的图片格式`);
-        return;
-      }
-      if (file.size > 10 * 1024 * 1024) {
-        toast.error(`${file.name} 超过 10MB 限制`);
-        return;
-      }
-      nextFiles.push({
-        id: `${Date.now()}-${Math.random()}`,
-        file,
-        preview: URL.createObjectURL(file),
-      });
-    });
-
-    if (nextFiles.length === 0) return;
-
-    if (target === 'upload') {
-      setUploadFiles((prev) => [...prev, ...nextFiles].slice(0, 10));
-    } else {
-      setImg2imgFiles((prev) => [...prev, ...nextFiles].slice(0, 5));
-    }
-  }, []);
-
-  const removePendingFile = useCallback((id: string, target: 'upload' | 'img2img') => {
-    const setter = target === 'upload' ? setUploadFiles : setImg2imgFiles;
-    setter((prev) => {
-      const removed = prev.find((item) => item.id === id);
-      if (removed) URL.revokeObjectURL(removed.preview);
-      return prev.filter((item) => item.id !== id);
-    });
-  }, []);
-
-  const updateLocationReferenceUrls = useCallback(async (urls: string[]) => {
-    if (!locDetail) return null;
-    await locationsApi.update(projectIdNum, locDetail.id, {
-      reference_image_urls: Array.from(new Set(urls)),
-    });
-    return loadLocationDetail(locDetail.id);
-  }, [loadLocationDetail, locDetail, projectIdNum]);
-
-  const updateStudioReferenceUrls = useCallback(async (urls: string[]) => {
-    if (!locDetail) return null;
-
-    if (activeStudioVersion) {
-      await locationsApi.updateVersion(projectIdNum, locDetail.id, activeStudioVersion.id, {
-        reference_image_urls: Array.from(new Set(urls)),
-      });
-    } else {
-      await locationsApi.update(projectIdNum, locDetail.id, {
-        reference_image_urls: Array.from(new Set(urls)),
-      });
-    }
-
-    return loadLocationDetail(locDetail.id);
-  }, [activeStudioVersion, loadLocationDetail, locDetail, projectIdNum]);
+    if (!selectedLocId) { setLocDetail(null); setLocationAssets([]); return; }
+    loadLocationDetail(selectedLocId);
+    loadLocationAssets(selectedLocId);
+  }, [selectedLocId, loadLocationDetail, loadLocationAssets]);
 
   const uploadFilesToLocation = useCallback(async (files: PendingImageFile[]) => {
-    if (!locDetail) return [];
-    const uploadedAssets = await Promise.all(
-      files.map((item) => assetsApi.upload(projectIdNum, item.file, undefined, locDetail.id)),
+    return Promise.all(
+      files.map((item) => assetsApi.upload(projectIdNum, item.file, undefined, locDetail!.id)),
     );
-    return uploadedAssets.map((asset) => asset.file_url);
   }, [locDetail, projectIdNum]);
 
-  const uploadFilesToStudio = useCallback(async (files: PendingImageFile[]) => {
-    if (!locDetail) return [];
-    const uploadedAssets = await Promise.all(
-      files.map((item) => assetsApi.upload(projectIdNum, item.file, undefined, locDetail.id, activeStudioVersion?.id)),
-    );
-    return uploadedAssets.map((asset) => asset.file_url);
-  }, [activeStudioVersion?.id, locDetail, projectIdNum]);
-
-  const waitForTask = useCallback(async (taskId: number) => {
-    for (let attempt = 0; attempt < 60; attempt += 1) {
-      const task = await tasksApi.get(taskId);
-      if (task.status === 'success') return task;
-      if (task.status === 'failed') {
-        throw new Error(task.error_message || '图像生成失败');
-      }
-      await new Promise((resolve) => setTimeout(resolve, 5000));
+  // Handle upload cover pic
+  const handleUploadPic = useCallback(async (file: File) => {
+    if (!locDetail) return;
+    setUploadingPic(true);
+    try {
+      const updated = await locationsApi.uploadPic(projectIdNum, locDetail.id, file);
+      setLocDetail(updated);
+      setLocations(prev => prev.map(l => l.id === updated.id ? updated : l));
+      toast.success('封面图上传成功');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '上传失败');
+    } finally {
+      setUploadingPic(false);
     }
-    throw new Error('生成时间较长，请稍后刷新查看结果');
-  }, []);
+  }, [locDetail, projectIdNum]);
 
+  // Handle delete cover pic
+  const handleDeletePic = useCallback(async () => {
+    if (!locDetail) return;
+    setDeletingPic(true);
+    try {
+      const updated = await locationsApi.deletePic(projectIdNum, locDetail.id);
+      setLocDetail(updated);
+      setLocations(prev => prev.map(l => l.id === updated.id ? updated : l));
+      toast.success('封面图已删除');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '删除失败');
+    } finally {
+      setDeletingPic(false);
+    }
+  }, [locDetail, projectIdNum]);
+
+  // Handle upload files to asset library
+  const handleUploadFiles = useCallback(async () => {
+    if (!locDetail || uploadFiles.length === 0) return;
+    setUploadingSceneImage(true);
+    try {
+      await uploadFilesToLocation(uploadFiles);
+      resetPreviewFiles(uploadFiles);
+      setUploadFiles([]);
+      await loadLocationAssets(locDetail.id);
+      toast.success('上传成功');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '上传失败');
+    } finally {
+      setUploadingSceneImage(false);
+    }
+  }, [locDetail, uploadFiles, uploadFilesToLocation, resetPreviewFiles, loadLocationAssets]);
+
+  // Create location
   const handleCreateLocation = useCallback(async () => {
     if (!newLocName.trim()) return;
     setCreating(true);
     try {
-      const location = await locationsApi.create(projectIdNum, {
+      const loc = await locationsApi.create(projectIdNum, {
         name: newLocName.trim(),
         location_type: newLocType,
-        domain: newLocDomain.trim() || undefined,
-        description: newLocDesc.trim() || undefined,
       });
-      setLocations((prev) => [location, ...prev]);
-      setSelectedLocId(location.id);
+      setLocations(prev => [loc, ...prev]);
+      setSelectedLocId(loc.id);
       setIsCreateDialogOpen(false);
       setNewLocName('');
-      setNewLocType('outdoor');
-      setNewLocDomain('');
-      setNewLocDesc('');
       toast.success('场景创建成功');
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '场景创建失败');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '创建失败');
     } finally {
       setCreating(false);
     }
-  }, [newLocDesc, newLocDomain, newLocName, newLocType, projectIdNum]);
+  }, [projectIdNum, newLocName, newLocType]);
 
-  const handleDeleteLocation = useCallback(async (locationId: number) => {
-    if (!window.confirm('确定删除这个场景吗？')) return;
+  // Delete location
+  const handleDeleteLocation = useCallback(async (locId: number) => {
+    if (!confirm('确定要删除这个场景吗？')) return;
     try {
-      await locationsApi.delete(projectIdNum, locationId);
-      const nextLocations = locations.filter((item) => item.id !== locationId);
-      setLocations(nextLocations);
-      if (selectedLocId === locationId) {
-        setSelectedLocId(nextLocations[0]?.id ?? null);
-        if (nextLocations.length === 0) setLocDetail(null);
-      }
+      await locationsApi.delete(projectIdNum, locId);
+      setLocations(prev => prev.filter(l => l.id !== locId));
+      if (selectedLocId === locId) { setSelectedLocId(null); setLocDetail(null); }
       toast.success('场景已删除');
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '删除失败');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '删除失败');
     }
-  }, [locations, projectIdNum, selectedLocId]);
+  }, [projectIdNum, selectedLocId]);
 
-  const openCreateVersionDialog = useCallback(() => {
-    setEditingVersion(null);
-    setVersionDialogOpen(true);
-  }, []);
-
-  const openEditVersionDialog = useCallback((version: LocationVersionResponse) => {
-    setEditingVersion(version);
-    setVersionDialogOpen(true);
-  }, []);
-
-  const openVersionDetailPage = useCallback((version: LocationVersionResponse) => {
-    if (!locDetail) return;
-    router.push(
-      `/projects/${projectId}/materials/locations?locationId=${locDetail.id}&versionId=${version.id}&tab=studio`,
-    );
-  }, [locDetail, projectId, router]);
-
-  const handleDeleteVersion = useCallback(async (versionId: number) => {
-    if (!locDetail || !window.confirm('确定删除这个场景版本吗？')) return;
-    try {
-      await locationsApi.deleteVersion(projectIdNum, locDetail.id, versionId);
-      if (selectedStudioVersionId === versionId) {
-        setSelectedStudioVersionId(locDetail.default_version?.id ?? null);
-      }
-      await loadLocationDetail(locDetail.id);
-      toast.success('场景版本已删除');
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '删除版本失败');
-    }
-  }, [loadLocationDetail, locDetail, projectIdNum, selectedStudioVersionId]);
-
-  const handleSetDefaultVersion = useCallback(async (versionId: number) => {
-    if (!locDetail) return;
-    try {
-      await locationsApi.updateVersion(projectIdNum, locDetail.id, versionId, { is_default: true });
-      await loadLocationDetail(locDetail.id);
-      toast.success('默认版本已更新');
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '设置默认版本失败');
-    }
-  }, [loadLocationDetail, locDetail, projectIdNum]);
-
-  const handleUploadSceneImages = useCallback(async (files: FileList | null) => {
-    if (!locDetail || uploadingSceneImage) return;
-    const nextFiles = createPendingImageFiles(files, 10);
-    if (nextFiles.length === 0) return;
-    setUploadFiles(nextFiles);
-    setUploadingSceneImage(true);
-    try {
-      const urls = await uploadFilesToStudio(nextFiles);
-      await updateStudioReferenceUrls([...(studioReferenceUrls || []), ...urls]);
-      if (activeStudioVersion) {
-        await loadStudioVersionAssets(locDetail.id, activeStudioVersion.id);
-      }
-      toast.success('场景图上传成功');
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '上传失败');
-    } finally {
-      resetPreviewFiles(nextFiles);
-      setUploadFiles([]);
-      setUploadingSceneImage(false);
-    }
-  }, [activeStudioVersion, loadStudioVersionAssets, locDetail, resetPreviewFiles, studioReferenceUrls, updateStudioReferenceUrls, uploadFilesToStudio, uploadingSceneImage]);
-
-  const handleGenerateFromPrompt = useCallback(async () => {
-    if (!locDetail || !textPrompt.trim()) {
-      toast.error('请先输入提示词');
-      return;
-    }
-
-    setTextGenerating(true);
-    try {
-      const task = await tasksApi.triggerImage({
-        project_id: projectIdNum,
-        location_id: locDetail.id,
-        location_version_id: activeStudioVersion?.id,
-        prompt: textPrompt.trim(),
-        negative_prompt: textNegativePrompt.trim() || undefined,
-        aspect_ratio: textAspectRatio,
-        resolution: textResolution,
-        style_preset: textStylePreset.trim() || undefined,
-        reference_image_urls: selectedReferenceUrls.length > 0 ? selectedReferenceUrls : undefined,
-        save_to_shot: true,
-      });
-      toast.success(selectedReferenceUrls.length > 0 ? '场景图生图任务已提交' : '场景图生成任务已提交');
-      await waitForTask(task.id);
-      await loadLocationDetail(locDetail.id);
-      if (activeStudioVersion) {
-        await loadStudioVersionAssets(locDetail.id, activeStudioVersion.id);
-      }
-      toast.success(selectedReferenceUrls.length > 0 ? '场景图生图完成' : '场景图生成完成');
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '生成失败');
-    } finally {
-      setTextGenerating(false);
-    }
-  }, [
-    activeStudioVersion,
-    loadLocationDetail,
-    loadStudioVersionAssets,
-    locDetail,
-    projectIdNum,
-    textAspectRatio,
-    textNegativePrompt,
-    textPrompt,
-    textResolution,
-    textStylePreset,
-    selectedReferenceUrls,
-    waitForTask,
-  ]);
-
-  const handleGenerateFromImage = useCallback(async () => {
-    if (!locDetail || !imgPrompt.trim()) {
-      toast.error('请先输入图生图提示词');
-      return;
-    }
-    if (selectedReferenceUrls.length === 0 && img2imgFiles.length === 0) {
-      toast.error('请至少选择或上传一张参考图');
-      return;
-    }
-
-    setImgGenerating(true);
-    try {
-      const uploadedUrls = img2imgFiles.length > 0 ? await uploadFilesToStudio(img2imgFiles) : [];
-      if (uploadedUrls.length > 0) {
-        await updateStudioReferenceUrls([...(studioReferenceUrls || []), ...uploadedUrls]);
-      }
-
-      const referenceUrls = Array.from(new Set([...selectedReferenceUrls, ...uploadedUrls])).slice(0, 5);
-      const task = await tasksApi.triggerImage({
-        project_id: projectIdNum,
-        location_id: locDetail.id,
-        location_version_id: activeStudioVersion?.id,
-        prompt: imgPrompt.trim(),
-        negative_prompt: imgNegativePrompt.trim() || undefined,
-        aspect_ratio: imgAspectRatio,
-        resolution: imgResolution,
-        style_preset: imgStylePreset.trim() || undefined,
-        reference_image_urls: referenceUrls,
-        save_to_shot: true,
-      });
-      toast.success('图生图任务已提交');
-      await waitForTask(task.id);
-      await loadLocationDetail(locDetail.id);
-      if (activeStudioVersion) {
-        await loadStudioVersionAssets(locDetail.id, activeStudioVersion.id);
-      }
-      resetPreviewFiles(img2imgFiles);
-      setImg2imgFiles([]);
-      toast.success('图生图生成完成');
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '图生图失败');
-    } finally {
-      setImgGenerating(false);
-    }
-  }, [
-    activeStudioVersion,
-    img2imgFiles,
-    imgAspectRatio,
-    imgNegativePrompt,
-    imgPrompt,
-    imgResolution,
-    imgStylePreset,
-    loadLocationDetail,
-    loadStudioVersionAssets,
-    locDetail,
-    projectIdNum,
-    resetPreviewFiles,
-    selectedReferenceUrls,
-    studioReferenceUrls,
-    updateStudioReferenceUrls,
-    uploadFilesToStudio,
-    waitForTask,
-  ]);
-
-  const toggleReferenceSelection = useCallback((url: string) => {
-    setSelectedReferenceUrls((prev) => {
-      if (prev.includes(url)) {
-        return prev.filter((item) => item !== url);
-      }
-      if (prev.length >= 5) {
-        toast.error('图生图最多使用 5 张参考图');
-        return prev;
-      }
-      return [...prev, url];
-    });
-  }, []);
-
-  const handleRemoveReferenceImage = useCallback(async (url: string) => {
-    if (!locDetail) return;
-    try {
-      await updateLocationReferenceUrls(locDetail.reference_image_urls.filter((item) => item !== url));
-      toast.success('已从当前场景移除参考图');
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '移除失败');
-    }
-  }, [locDetail, updateLocationReferenceUrls]);
-
-  const handleDeleteLocationImage = useCallback(async (item: SceneImageItem) => {
-    if (!locDetail) return;
-    try {
-      if (item.assetId) {
-        await assetsApi.delete(projectIdNum, item.assetId);
-        await loadLocationDetail(locDetail.id);
-        if (activeStudioVersion) {
-          await loadStudioVersionAssets(locDetail.id, activeStudioVersion.id);
-        }
-        setSelectedReferenceUrls((prev) => prev.filter((url) => url !== item.url));
-        toast.success('场景图片已删除');
-        return;
-      }
-
-      await updateStudioReferenceUrls(studioReferenceUrls.filter((url) => url !== item.url));
-      setSelectedReferenceUrls((prev) => prev.filter((url) => url !== item.url));
-      toast.success('场景参考图已移除');
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '删除失败');
-    }
-  }, [activeStudioVersion, loadLocationDetail, loadStudioVersionAssets, locDetail, projectIdNum, studioReferenceUrls, updateStudioReferenceUrls]);
-
-  const handleAddReusableStudioImage = useCallback(async (url: string) => {
-    try {
-      await updateStudioReferenceUrls([...studioReferenceUrls, url]);
-      toast.success('已加入当前场景图库');
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '加入图库失败');
-    }
-  }, [studioReferenceUrls, updateStudioReferenceUrls]);
+  const filteredLocations = locations.filter(loc =>
+    loc.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    loc.loc_code.toLowerCase().includes(searchQuery.toLowerCase())
+  );
 
   if (loading) {
     return (
       <AppLayout projectId={projectId}>
-        <div className="flex h-full items-center justify-center">
+        <div className="h-full flex items-center justify-center">
           <Loader2 className="h-8 w-8 animate-spin text-primary" />
         </div>
-      </AppLayout>
-    );
-  }
-
-  if (!project) {
-    return (
-      <AppLayout projectId={projectId}>
-        <EmptyState title="项目不存在" description="请返回项目列表重新选择。" />
       </AppLayout>
     );
   }
@@ -1238,1534 +417,213 @@ export default function LocationsPage({
       projectId={projectId}
       breadcrumbs={[
         { label: '项目', href: '/projects' },
-        { label: project.name, href: `/projects/${projectId}` },
+        { label: project?.name || '加载中...', href: `/projects/${projectId}` },
         { label: '素材库', href: `/projects/${projectId}/materials` },
         { label: '场景管理' },
       ]}
     >
-      <div className="flex h-[calc(100vh-4rem)]">
-        <div className="flex w-80 flex-col border-r border-border bg-card">
-          <div className="space-y-3 border-b border-border p-4">
+      <div className="h-[calc(100vh-4rem)] flex">
+        {/* 左侧：场景列表 */}
+        <div className="w-80 border-r border-border bg-card flex flex-col">
+          <div className="p-4 border-b border-border space-y-3">
             <div className="flex items-center justify-between">
-              <h2 className="font-semibold text-foreground">场景列表</h2>
-              <Badge variant="outline">{locations.length} 个</Badge>
+              <h2 className="font-semibold">场景列表</h2>
+              <Badge variant="outline">{locations.length}</Badge>
             </div>
-
             <div className="relative">
               <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={searchQuery}
-                onChange={(event) => setSearchQuery(event.target.value)}
-                placeholder="搜索场景..."
-                className="pl-9"
-              />
+              <Input placeholder="搜索场景..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="pl-9" />
             </div>
-
+            <Button className="w-full" onClick={() => setIsCreateDialogOpen(true)}>
+              <Plus className="h-4 w-4 mr-2" />创建场景
+            </Button>
             <Dialog open={isCreateDialogOpen} onOpenChange={setIsCreateDialogOpen}>
-              <DialogTrigger asChild>
-                <Button className="w-full">
-                  <Plus className="mr-2 h-4 w-4" />
-                  创建场景
-                </Button>
-              </DialogTrigger>
               <DialogContent>
-                <DialogHeader>
-                  <DialogTitle>创建新场景</DialogTitle>
-                  <DialogDescription>先录入基础信息，后续再补充提示词和场景图。</DialogDescription>
-                </DialogHeader>
-
+                <DialogHeader><DialogTitle>创建新场景</DialogTitle></DialogHeader>
                 <div className="space-y-4 py-4">
                   <div className="space-y-2">
-                    <label className="text-sm font-medium">场景名称</label>
-                    <Input value={newLocName} onChange={(event) => setNewLocName(event.target.value)} placeholder="例如：云岚宗广场" />
+                    <label className="text-sm font-medium">场景名称 *</label>
+                    <Input placeholder="输入场景名称" value={newLocName} onChange={(e) => setNewLocName(e.target.value)} />
                   </div>
                   <div className="space-y-2">
                     <label className="text-sm font-medium">场景类型</label>
                     <Select value={newLocType} onValueChange={setNewLocType}>
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="indoor">室内</SelectItem>
-                        <SelectItem value="outdoor">室外</SelectItem>
-                        <SelectItem value="fantasy">奇幻</SelectItem>
-                        <SelectItem value="mixed">混合</SelectItem>
+                        {Object.entries(locationTypeLabels).map(([value, label]) => (
+                          <SelectItem key={value} value={value}>{label}</SelectItem>
+                        ))}
                       </SelectContent>
                     </Select>
                   </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">所属领域</label>
-                    <Input value={newLocDomain} onChange={(event) => setNewLocDomain(event.target.value)} placeholder="例如：云岚宗" />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">场景描述</label>
-                    <Textarea value={newLocDesc} onChange={(event) => setNewLocDesc(event.target.value)} rows={4} placeholder="描述场景的核心视觉特征..." />
-                  </div>
                 </div>
-
                 <DialogFooter>
                   <Button variant="outline" onClick={() => setIsCreateDialogOpen(false)}>取消</Button>
-                  <Button onClick={handleCreateLocation} disabled={creating || !newLocName.trim()}>
-                    {creating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                    创建
-                  </Button>
+                  <Button onClick={handleCreateLocation} disabled={!newLocName.trim() || creating}>{creating && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}创建</Button>
                 </DialogFooter>
               </DialogContent>
             </Dialog>
           </div>
-
           <ScrollArea className="flex-1">
-            <div className="space-y-2 p-3">
-              {filteredLocations.map((location) => {
-                const Icon = locationTypeIcons[location.location_type] || MapPin;
-                const isActive = selectedLocId === location.id;
+            <div className="p-3 space-y-2">
+              {filteredLocations.map(loc => {
+                const Icon = locationTypeIcons[loc.location_type] || Building;
                 return (
-                  <div
-                    key={location.id}
-                    className={`group rounded-lg border p-3 transition ${isActive ? 'border-primary bg-primary/5' : 'border-transparent hover:border-border hover:bg-secondary/40'}`}
-                    onClick={() => setSelectedLocId(location.id)}
-                    role="button"
-                    tabIndex={0}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' || event.key === ' ') {
-                        event.preventDefault();
-                        setSelectedLocId(location.id);
-                      }
-                    }}
-                  >
-                    <div className="flex items-start gap-3">
-                      <div className="rounded-lg bg-info/10 p-2 text-info">
-                        <Icon className="h-5 w-5" />
+                  <div key={loc.id} className="group relative">
+                    <div onClick={() => setSelectedLocId(loc.id)} className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-all ${selectedLocId === loc.id ? 'bg-primary/10 border border-primary/30' : 'hover:bg-secondary/50 border border-transparent'}`}>
+                      {loc.pic_url ? (
+                        <img src={loc.pic_url} alt={loc.name} className="h-10 w-10 rounded-lg object-cover shrink-0" />
+                      ) : (
+                        <div className="h-10 w-10 shrink-0 rounded-lg bg-secondary flex items-center justify-center"><Icon className="h-5 w-5 text-muted-foreground" /></div>
+                      )}
+                      <div className="flex-1 min-w-0">
+                        <span className="font-medium text-sm truncate block">{loc.name}</span>
+                        <p className="text-xs text-muted-foreground truncate">{locationTypeLabels[loc.location_type] || loc.loc_code}</p>
                       </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate font-medium text-foreground">{location.name}</div>
-                        <div className="truncate text-xs text-muted-foreground">
-                          {location.domain || locationTypeLabels[location.location_type] || location.location_type}
-                        </div>
-                      </div>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="opacity-0 transition group-hover:opacity-100"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          handleDeleteLocation(location.id);
-                        }}
-                      >
-                        <Trash2 className="h-4 w-4 text-muted-foreground hover:text-destructive" />
-                      </Button>
+                      <Button variant="ghost" size="icon" className="h-8 w-8 opacity-0 group-hover:opacity-100 shrink-0 text-muted-foreground hover:text-destructive" onClick={(e) => { e.stopPropagation(); handleDeleteLocation(loc.id); }}><Trash2 className="h-4 w-4" /></Button>
                     </div>
                   </div>
                 );
               })}
-
-              {filteredLocations.length === 0 ? (
-                <div className="py-10 text-center text-sm text-muted-foreground">
-                  没有找到匹配的场景
-                </div>
-              ) : null}
+              {filteredLocations.length === 0 && <div className="py-8 text-center text-muted-foreground"><MapPin className="h-12 w-12 mx-auto mb-3 opacity-50" /><p>没有找到场景</p></div>}
             </div>
           </ScrollArea>
         </div>
 
-        <div className="flex-1 overflow-y-auto bg-background">
-          {!locDetail ? (
-            <EmptyState title="选择一个场景" description="从左侧列表选择场景后，就可以上传或生成场景图。" />
-          ) : (
-            <div className="space-y-6 p-6">
+        {/* 右侧：场景详情 */}
+        <div className="flex-1 bg-background overflow-y-auto">
+          {locDetail ? (
+            <div className="p-6 space-y-6">
+              {/* 场景头部 */}
               <div className="flex flex-col gap-4 rounded-2xl border bg-card p-6 lg:flex-row lg:items-start lg:justify-between">
                 <div className="flex items-start gap-4">
-                  <div className="rounded-2xl bg-info/10 p-4 text-info">
-                    {(() => {
-                      const Icon = locationTypeIcons[locDetail.location_type] || MapPin;
-                      return <Icon className="h-10 w-10" />;
-                    })()}
+                  <div className="relative h-16 w-16 rounded-xl bg-secondary shrink-0 overflow-hidden">
+                    {locDetail.pic_url ? (
+                      <img src={locDetail.pic_url} alt={locDetail.name} className="h-full w-full object-cover" />
+                    ) : (
+                      <div className="h-full w-full flex items-center justify-center">
+                        {(() => { const Icon = locationTypeIcons[locDetail.location_type] || Building; return <Icon className="h-8 w-8 text-muted-foreground" />; })()}
+                      </div>
+                    )}
+                    <input
+                      ref={picFileInputRef}
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) handleUploadPic(file);
+                        e.target.value = '';
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className="absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 hover:opacity-100 transition-opacity rounded-xl"
+                      onClick={() => picFileInputRef.current?.click()}
+                      disabled={uploadingPic}
+                    >
+                      {uploadingPic ? <Loader2 className="h-5 w-5 text-white animate-spin" /> : <Camera className="h-5 w-5 text-white" />}
+                    </button>
                   </div>
-                  <div className="space-y-3">
-                    <div className="flex flex-wrap items-center gap-2">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
                       <h1 className="text-2xl font-bold text-foreground">{locDetail.name}</h1>
                       <Badge variant="outline">{locDetail.loc_code}</Badge>
-                      <Badge variant={locDetail.is_active ? 'default' : 'secondary'}>
-                        {locDetail.is_active ? '启用中' : '已停用'}
-                      </Badge>
                     </div>
-                    <p className="max-w-3xl text-sm text-muted-foreground">
-                      {locDetail.description || '暂未填写场景描述。'}
+                    <p className="text-sm text-muted-foreground">
+                      {[locationTypeLabels[locDetail.location_type], locDetail.domain].filter(Boolean).join(' · ') || '暂无信息'}
                     </p>
-                    <div className="flex flex-wrap gap-4 text-sm text-muted-foreground">
-                      <span>类型：<span className="text-foreground">{locationTypeLabels[locDetail.location_type] || locDetail.location_type}</span></span>
-                      <span>领域：<span className="text-foreground">{locDetail.domain || '未设置'}</span></span>
-                      <span>参考图：<span className="text-foreground">{locDetail.reference_image_urls.length} 张</span></span>
-                      <span>版本：<span className="text-foreground">{locDetail.version_count} 个</span></span>
-                    </div>
                   </div>
                 </div>
-              </div>
-
-              <Tabs value={activeWorkspaceTab} onValueChange={(value) => setActiveWorkspaceTab(value as 'studio' | 'versions' | 'details')} className="space-y-4">
-                <TabsList>
-                  <TabsTrigger value="studio">场景出图工作区</TabsTrigger>
-                  <TabsTrigger value="versions">场景版本</TabsTrigger>
-                  <TabsTrigger value="details">场景信息</TabsTrigger>
-                </TabsList>
-
-                <TabsContent value="studio" className="space-y-6">
-                  <Card>
-                    <CardContent className="flex flex-col gap-3 p-4 md:flex-row md:items-center md:justify-between">
-                      <div>
-                        <div className="font-medium text-foreground">当前出图目标</div>
-                        <div className="text-sm text-muted-foreground">
-                          选择主场景或某个版本后，上传、生成、图库展示和落库都会自动切换到对应目标。
-                        </div>
-                      </div>
-                      <div className="w-full md:w-72">
-                        <Select
-                          value={selectedStudioVersionId === null ? '__base__' : String(selectedStudioVersionId)}
-                          onValueChange={(value) => {
-                            setSelectedStudioVersionId(value === '__base__' ? null : Number(value));
-                            setSelectedReferenceUrls([]);
-                          }}
-                        >
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="__base__">主场景图库</SelectItem>
-                            {locDetail.versions.map((version) => (
-                              <SelectItem key={version.id} value={String(version.id)}>
-                                {version.label} ({version.version_code})
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                    </CardContent>
-                  </Card>
-
-                  <div className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
-                    <Card>
-                      <CardHeader>
-                        <CardTitle>{activeStudioVersion ? `${activeStudioVersion.label} 生成与上传` : '主场景生成与上传'}</CardTitle>
-                        <CardDescription>
-                          {activeStudioVersion
-                            ? '当前上传、文生图和图生图结果会同步保存到该版本。'
-                            : '当前上传、文生图和图生图结果会保存到主场景图库。'}
-                        </CardDescription>
-                      </CardHeader>
-                      <CardContent className="space-y-4">
-                        <div className="space-y-2">
-                          <label className="text-sm font-medium">正向提示词</label>
-                          <Textarea
-                            value={textPrompt}
-                            onChange={(event) => setTextPrompt(event.target.value)}
-                            rows={5}
-                            placeholder="描述你想要的场景；如果右侧已选择参考图，会在这些参考图基础上继续生成。"
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <label className="text-sm font-medium">负面提示词</label>
-                          <Input
-                            value={textNegativePrompt}
-                            onChange={(event) => setTextNegativePrompt(event.target.value)}
-                            placeholder="例如：blurry, low quality, watermark"
-                          />
-                        </div>
-                        <div className="grid gap-4 md:grid-cols-3">
-                          <div className="space-y-2">
-                            <label className="text-sm font-medium">画幅比例</label>
-                            <Select value={textAspectRatio} onValueChange={setTextAspectRatio}>
-                              <SelectTrigger>
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                {aspectRatios.map((item) => (
-                                  <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          </div>
-                          <div className="space-y-2">
-                            <label className="text-sm font-medium">分辨率</label>
-                            <Select value={textResolution} onValueChange={setTextResolution}>
-                              <SelectTrigger>
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                {resolutions.map((item) => (
-                                  <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          </div>
-                          <div className="space-y-2">
-                            <label className="text-sm font-medium">风格预设</label>
-                            <Input value={textStylePreset} onChange={(event) => setTextStylePreset(event.target.value)} placeholder="例如：anime cinematic" />
-                          </div>
-                        </div>
-
-                        {selectedReferenceUrls.length > 0 ? (
-                          <div className="space-y-3 rounded-xl border border-primary/20 bg-primary/5 p-4">
-                            <div className="flex items-center justify-between">
-                              <div>
-                                <div className="text-sm font-medium">已选择参考图</div>
-                                <div className="text-xs text-muted-foreground">当前会按图生图模式生成，可在右侧点击取消选择。</div>
-                              </div>
-                              <Badge variant="secondary">{selectedReferenceUrls.length}/5</Badge>
-                            </div>
-                            <div className="grid gap-3 sm:grid-cols-2">
-                              {selectedReferenceUrls.map((url) => (
-                                <div key={url} className="overflow-hidden rounded-xl border border-primary ring-2 ring-primary/20">
-                                  <button
-                                    type="button"
-                                    onClick={() => setPreviewUrl(url)}
-                                    className="group relative block w-full overflow-hidden"
-                                  >
-                                    <img src={url} alt="" className="aspect-video w-full object-cover transition group-hover:scale-[1.01]" />
-                                    <div className="absolute inset-x-0 bottom-0 flex items-center justify-end bg-gradient-to-t from-black/55 to-transparent p-3 opacity-0 transition group-hover:opacity-100">
-                                      <span className="inline-flex items-center gap-1 rounded-full bg-white/90 px-2 py-1 text-xs font-medium text-foreground">
-                                        <Eye className="h-3 w-3" />
-                                        预览
-                                      </span>
-                                    </div>
-                                  </button>
-                                  <div className="flex justify-end p-2">
-                                    <Button variant="ghost" size="sm" onClick={() => toggleReferenceSelection(url)}>
-                                      取消选择
-                                    </Button>
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
-                            当前未选择参考图。你可以直接文生图，或者在右侧图库中点击“设为参考图”切换为图生图。
-                          </div>
-                        )}
-
-                        <div className="flex justify-end">
-                          <Button onClick={handleGenerateFromPrompt} disabled={textGenerating || !textPrompt.trim()}>
-                            {textGenerating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : selectedReferenceUrls.length > 0 ? <Sparkles className="mr-2 h-4 w-4" /> : <Wand2 className="mr-2 h-4 w-4" />}
-                            {selectedReferenceUrls.length > 0 ? '根据参考图生成场景图' : '生成场景图'}
-                          </Button>
-                        </div>
-                      </CardContent>
-                    </Card>
-
-                    <Card>
-                      <CardHeader>
-                        <CardTitle>{activeStudioVersion ? `${activeStudioVersion.label} 版本图库` : '主场景图库'}</CardTitle>
-                          <CardDescription>
-                            {activeStudioVersion
-                            ? '右侧展示当前版本图库，同时支持直接从项目素材库引用图片加入当前版本。'
-                            : '这里展示主场景图库，同时支持直接从项目素材库引用图片加入当前主场景。'}
-                          </CardDescription>
-                      </CardHeader>
-                      <CardContent className="space-y-4">
-                        <div className="space-y-3">
-                          <div className="flex items-center justify-between gap-3">
-                            <div>
-                              <div className="text-sm font-medium">
-                                {activeStudioVersion ? '上传到当前版本图库' : '上传到主场景图库'}
-                              </div>
-                              <div className="text-xs text-muted-foreground">
-                                点击或拖拽图片到这里，上传后会保存到当前选中的出图目标。
-                              </div>
-                            </div>
-                            {uploadingSceneImage ? (
-                              <div className="inline-flex items-center gap-2 rounded-full bg-primary/10 px-3 py-1 text-xs font-medium text-primary">
-                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                正在上传
-                              </div>
-                            ) : null}
-                            {false ? (
-                              <Button onClick={() => undefined} disabled={uploadingSceneImage}>
-                                {uploadingSceneImage ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ImagePlus className="mr-2 h-4 w-4" />}
-                                {activeStudioVersion ? '保存到当前版本' : '保存到主场景'}
-                              </Button>
-                            ) : null}
-                          </div>
-
-                          <FileDropZone
-                            onSelect={handleUploadSceneImages}
-                            disabled={uploadingSceneImage}
-                            title={activeStudioVersion ? '上传版本场景图' : '上传主场景图'}
-                            description="支持点击选择和拖拽上传，JPG / PNG / WebP / GIF，单张不超过 10MB"
-                          />
-
-                          {uploadFiles.length > 0 ? (
-                            <div className="grid gap-3 sm:grid-cols-2">
-                              {uploadFiles.map((item) => (
-                                <div key={item.id} className="rounded-xl border bg-secondary/20 p-2">
-                                  <div className="relative overflow-hidden rounded-lg">
-                                    <img src={item.preview} alt={item.file.name} className="aspect-video w-full object-cover" />
-                                    <Button
-                                      variant="secondary"
-                                      size="icon"
-                                      className="hidden"
-                                      onClick={() => removePendingFile(item.id, 'upload')}
-                                    >
-                                      <X className="h-4 w-4" />
-                                    </Button>
-                                  </div>
-                                  <div className="mt-2 truncate text-xs text-muted-foreground">{item.file.name}</div>
-                                </div>
-                              ))}
-                            </div>
-                          ) : null}
-                        </div>
-
-                        <div className="rounded-xl border bg-secondary/10 p-4">
-                          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                            <div className="space-y-1">
-                              <div className="text-sm font-medium">引用素材库图片</div>
-                              <div className="text-xs text-muted-foreground">
-                                点击按钮后在弹窗中分页浏览素材库图片，选择后再加入当前图库。
-                              </div>
-                            </div>
-                            <Button variant="outline" onClick={() => setIsStudioAssetPickerOpen(true)}>
-                              <ImagePlus className="mr-2 h-4 w-4" />
-                              从素材库选择图片
-                            </Button>
-                          </div>
-                        </div>
-
-                        <div className="hidden space-y-3 rounded-xl border bg-secondary/10 p-4">
-                            <div>
-                              <div className="text-sm font-medium">引用素材库图片</div>
-                              <div className="text-xs text-muted-foreground">
-                                直接从项目素材库中选择图片加入当前图库，不再区分来源场景或来源图库。
-                              </div>
-                            </div>
-
-                          {projectLibraryImageItems.length > 0 ? (
-                            <div className="grid gap-3 sm:grid-cols-2">
-                              {projectLibraryImageItems.map((item) => (
-                                <div key={item.url} className="overflow-hidden rounded-xl border bg-card">
-                                  <img src={item.url} alt="" className="aspect-video w-full object-cover" />
-                                  <div className="flex items-center justify-between gap-2 p-3">
-                                    <div className="text-xs text-muted-foreground">素材库图片</div>
-                                    <Button size="sm" variant="outline" onClick={() => handleAddReusableStudioImage(item.url)}>
-                                      引用到当前图库
-                                    </Button>
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          ) : (
-                            <div className="rounded-xl border border-dashed p-6 text-center text-sm text-muted-foreground">
-                              当前素材库里暂无可引用图片，或者这些图片已经在当前图库中了。
-                            </div>
-                          )}
-                        </div>
-
-                        {studioImageItems.length === 0 ? (
-                          <div className="rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">
-                            还没有场景图。你可以先输入提示词生成一张，或者上传本地图片。
-                          </div>
-                        ) : (
-                          <div className="grid gap-4 sm:grid-cols-2">
-                            {studioImageItems.map((item, index) => {
-                              const url = item.url;
-                              return (
-                              <div key={item.url} className="overflow-hidden rounded-xl border bg-card">
-                                <button
-                                  type="button"
-                                  onClick={() => setPreviewUrl(item.url)}
-                                  className="group relative block w-full overflow-hidden"
-                                >
-                                  <img src={item.url} alt={`场景图 ${index + 1}`} className="aspect-video w-full object-cover transition group-hover:scale-[1.01]" />
-                                  <div className="absolute inset-x-0 bottom-0 flex items-center justify-end bg-gradient-to-t from-black/55 to-transparent p-3 opacity-0 transition group-hover:opacity-100">
-                                    <span className="inline-flex items-center gap-1 rounded-full bg-white/90 px-2 py-1 text-xs font-medium text-foreground">
-                                      <Eye className="h-3 w-3" />
-                                      预览
-                                    </span>
-                                  </div>
-                                </button>
-                                <div className="flex items-center justify-between gap-2 p-3">
-                                  <div className="text-xs text-muted-foreground">场景图 #{index + 1}</div>
-                                  <div className="flex items-center gap-2">
-                                    <Button
-                                      variant={selectedReferenceUrls.includes(item.url) ? 'default' : 'outline'}
-                                      size="sm"
-                                      onClick={() => toggleReferenceSelection(item.url)}
-                                    >
-                                      {selectedReferenceUrls.includes(url) ? '已选中' : '设为参考图'}
-                                    </Button>
-                                    <Button variant="ghost" size="icon" onClick={() => handleDeleteLocationImage(item)}>
-                                      <Trash2 className="h-4 w-4 text-muted-foreground hover:text-destructive" />
-                                    </Button>
-                                  </div>
-                                </div>
-                              </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </CardContent>
-                    </Card>
-                    <AssetLibraryPickerDialog
-                      open={isStudioAssetPickerOpen}
-                      onOpenChange={setIsStudioAssetPickerOpen}
-                      projectId={projectIdNum}
-                      excludedUrls={studioImageItems.map((item) => item.url)}
-                      onSelect={handleAddReusableStudioImage}
-                      title={activeStudioVersion ? '选择素材库图片加入当前版本' : '选择素材库图片加入主场景'}
-                      description="弹窗中按页浏览项目素材库图片，选择后会直接加入当前右侧图库。"
-                      selectLabel="加入当前图库"
-                    />
-                    <FullscreenPreview
-                      url={previewUrl}
-                      open={!!previewUrl}
-                      onOpenChange={() => setPreviewUrl(null)}
-                    />
-                  </div>
-                </TabsContent>
-
-                <TabsContent value="versions" className="space-y-4">
-                  <Card>
-                    <CardContent className="flex flex-col gap-3 p-4 md:flex-row md:items-center md:justify-between">
-                      <div>
-                        <div className="font-medium text-foreground">场景版本管理</div>
-                        <div className="text-sm text-muted-foreground">
-                          为同一个场景维护白天、夜景、战损等多套版本，并分别管理版本场景图。
-                        </div>
-                      </div>
-                      <Button onClick={openCreateVersionDialog}>
-                        <Plus className="mr-2 h-4 w-4" />
-                        新增版本
-                      </Button>
-                    </CardContent>
-                  </Card>
-
-                  {locDetail.versions.length === 0 ? (
-                    <Card>
-                      <CardContent className="py-12 text-center text-sm text-muted-foreground">
-                        当前场景还没有版本。后续可以通过版本区分白天、夜晚、战损等状态。
-                      </CardContent>
-                    </Card>
-                  ) : (
-                    <div className="grid gap-4 lg:grid-cols-2">
-                      {locDetail.versions.map((version: LocationVersionResponse) => (
-                        <Card key={version.id}>
-                          <CardHeader>
-                            <div className="flex items-center justify-between gap-3">
-                              <div>
-                                <CardTitle className="text-base">{version.label}</CardTitle>
-                                <CardDescription>{version.version_code}</CardDescription>
-                              </div>
-                              <div className="flex items-center gap-2">
-                                {version.is_default ? <Badge>默认</Badge> : null}
-                                {version.time_of_day ? (
-                                  <Badge variant="outline">
-                                    {version.time_of_day === 'night' ? <Moon className="mr-1 h-3 w-3" /> : <Sun className="mr-1 h-3 w-3" />}
-                                    {timeOfDayLabels[version.time_of_day] || version.time_of_day}
-                                  </Badge>
-                                ) : null}
-                                {version.weather ? (
-                                  <Badge variant="outline">
-                                    {version.weather === 'rain' ? <CloudRain className="mr-1 h-3 w-3" /> : <Cloud className="mr-1 h-3 w-3" />}
-                                    {weatherLabels[version.weather] || version.weather}
-                                  </Badge>
-                                ) : null}
-                              </div>
-                            </div>
-                          </CardHeader>
-                          <CardContent className="space-y-4">
-                            <p className="text-sm text-muted-foreground">
-                              {version.description || '暂无版本描述。'}
-                            </p>
-
-                            <div className="flex flex-wrap gap-2">
-                              {!version.is_default ? (
-                                <Button variant="outline" size="sm" onClick={() => handleSetDefaultVersion(version.id)}>
-                                  设为默认
-                                </Button>
-                              ) : null}
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => {
-                                  setSelectedStudioVersionId(version.id);
-                                  setActiveWorkspaceTab('studio');
-                                }}
-                              >
-                                <Sparkles className="mr-2 h-4 w-4" />
-                                图片工作台
-                              </Button>
-                              <Button variant="outline" size="sm" onClick={() => openVersionDetailPage(version)}>
-                                <ArrowRight className="mr-2 h-4 w-4" />
-                                详情
-                              </Button>
-                              <Button variant="outline" size="sm" onClick={() => openEditVersionDialog(version)}>
-                                编辑版本
-                              </Button>
-                              <Button variant="ghost" size="sm" onClick={() => handleDeleteVersion(version.id)}>
-                                <Trash2 className="mr-2 h-4 w-4 text-muted-foreground" />
-                                删除
-                              </Button>
-                            </div>
-
-                            {version.additional_elements.length > 0 ? (
-                              <div className="space-y-2">
-                                <div className="text-xs font-medium text-muted-foreground">新增元素</div>
-                                <div className="flex flex-wrap gap-2">
-                                  {version.additional_elements.map((item) => (
-                                    <Badge key={item} variant="secondary">{item}</Badge>
-                                  ))}
-                                </div>
-                              </div>
-                            ) : null}
-
-                            {version.removed_elements.length > 0 ? (
-                              <div className="space-y-2">
-                                <div className="text-xs font-medium text-muted-foreground">移除元素</div>
-                                <div className="flex flex-wrap gap-2">
-                                  {version.removed_elements.map((item) => (
-                                    <Badge key={item} variant="outline">{item}</Badge>
-                                  ))}
-                                </div>
-                              </div>
-                            ) : null}
-
-                            {version.reference_image_urls.length > 0 ? (
-                              <div className="grid gap-3 sm:grid-cols-2">
-                                {version.reference_image_urls.slice(0, 4).map((url) => (
-                                  <img key={url} src={url} alt="" className="aspect-video rounded-lg object-cover" />
-                                ))}
-                              </div>
-                            ) : null}
-                          </CardContent>
-                        </Card>
-                      ))}
-                    </div>
-                  )}
-                </TabsContent>
-
-                <TabsContent value="details" className="space-y-4">
-                  <div className="grid gap-4 lg:grid-cols-2">
-                    <Card>
-                      <CardHeader>
-                        <CardTitle className="text-base">标志性元素</CardTitle>
-                      </CardHeader>
-                      <CardContent>
-                        {locDetail.key_elements.length > 0 ? (
-                          <div className="flex flex-wrap gap-2">
-                            {locDetail.key_elements.map((item) => (
-                              <Badge key={item} variant="secondary">{item}</Badge>
-                            ))}
-                          </div>
-                        ) : (
-                          <p className="text-sm text-muted-foreground">暂未设置标志性元素。</p>
-                        )}
-                      </CardContent>
-                    </Card>
-
-                    <Card>
-                      <CardHeader>
-                        <CardTitle className="text-base">建筑风格</CardTitle>
-                      </CardHeader>
-                      <CardContent>
-                        <p className="text-sm text-foreground">{locDetail.architectural_style || '暂未设置'}</p>
-                      </CardContent>
-                    </Card>
-
-                    <Card>
-                      <CardHeader>
-                        <CardTitle className="text-base">默认氛围</CardTitle>
-                      </CardHeader>
-                      <CardContent>
-                        {locDetail.default_atmosphere ? (
-                          <pre className="overflow-x-auto rounded-xl bg-secondary p-3 text-xs text-foreground">
-                            {JSON.stringify(locDetail.default_atmosphere, null, 2)}
-                          </pre>
-                        ) : (
-                          <p className="text-sm text-muted-foreground">暂未设置默认氛围。</p>
-                        )}
-                      </CardContent>
-                    </Card>
-
-                    <Card>
-                      <CardHeader>
-                        <CardTitle className="text-base">时间变体描述</CardTitle>
-                      </CardHeader>
-                      <CardContent>
-                        {locDetail.time_variants ? (
-                          <div className="grid gap-3 sm:grid-cols-2">
-                            {Object.entries(locDetail.time_variants).map(([timeKey, description]) => (
-                              <div key={timeKey} className="rounded-xl bg-secondary/50 p-3">
-                                <div className="mb-1 text-xs font-medium text-muted-foreground">
-                                  {timeOfDayLabels[timeKey] || timeKey}
-                                </div>
-                                <div className="text-sm text-foreground">{description}</div>
-                              </div>
-                            ))}
-                          </div>
-                        ) : (
-                          <p className="text-sm text-muted-foreground">暂未设置时间变体。</p>
-                        )}
-                      </CardContent>
-                    </Card>
-
-                    <Card className="lg:col-span-2">
-                      <CardHeader>
-                        <CardTitle className="text-base">生成提示词</CardTitle>
-                        <CardDescription>这些字段会直接影响文生图和图生图的基础效果。</CardDescription>
-                      </CardHeader>
-                      <CardContent className="grid gap-4 lg:grid-cols-3">
-                        <div className="space-y-2">
-                          <div className="text-xs font-medium text-muted-foreground">基础背景提示词</div>
-                          <div className="rounded-xl bg-secondary p-3 text-sm text-foreground">
-                            {locDetail.base_background_prompt || '暂未设置'}
-                          </div>
-                        </div>
-                        <div className="space-y-2">
-                          <div className="text-xs font-medium text-muted-foreground">负面提示词</div>
-                          <div className="rounded-xl bg-secondary p-3 text-sm text-foreground">
-                            {locDetail.negative_prompt || '暂未设置'}
-                          </div>
-                        </div>
-                        <div className="space-y-2">
-                          <div className="text-xs font-medium text-muted-foreground">风格预设</div>
-                          <div className="rounded-xl bg-secondary p-3 text-sm text-foreground">
-                            {locDetail.style_preset || '暂未设置'}
-                          </div>
-                        </div>
-                      </CardContent>
-                    </Card>
-                  </div>
-                </TabsContent>
-              </Tabs>
-
-              <LocationVersionDialog
-                open={versionDialogOpen}
-                onOpenChange={setVersionDialogOpen}
-                projectId={projectIdNum}
-                locationId={locDetail.id}
-                version={editingVersion}
-                onSuccess={async () => {
-                  await loadLocationDetail(locDetail.id);
-                }}
-              />
-
-            </div>
-          )}
-        </div>
-      </div>
-    </AppLayout>
-  );
-}
-
-function LocationVersionDialog({
-  open,
-  onOpenChange,
-  projectId,
-  locationId,
-  version,
-  onSuccess,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  projectId: number;
-  locationId: number;
-  version: LocationVersionResponse | null;
-  onSuccess: () => Promise<void>;
-}) {
-  const [saving, setSaving] = useState(false);
-  const [versionCode, setVersionCode] = useState('');
-  const [label, setLabel] = useState('');
-  const [description, setDescription] = useState('');
-  const [timeOfDay, setTimeOfDay] = useState('');
-  const [weather, setWeather] = useState('');
-  const [additionalElements, setAdditionalElements] = useState('');
-  const [removedElements, setRemovedElements] = useState('');
-  const [promptSuffix, setPromptSuffix] = useState('');
-  const [fullPrompt, setFullPrompt] = useState('');
-  const [applicableSceneCodes, setApplicableSceneCodes] = useState('');
-  const [isDefault, setIsDefault] = useState(false);
-
-  useEffect(() => {
-    if (!open) return;
-    setVersionCode(version?.version_code ?? '');
-    setLabel(version?.label ?? '');
-    setDescription(version?.description ?? '');
-    setTimeOfDay(version?.time_of_day ?? '');
-    setWeather(version?.weather ?? '');
-    setAdditionalElements((version?.additional_elements ?? []).join('\n'));
-    setRemovedElements((version?.removed_elements ?? []).join('\n'));
-    setPromptSuffix(version?.prompt_suffix ?? '');
-    setFullPrompt(version?.full_prompt ?? '');
-    setApplicableSceneCodes((version?.applicable_scene_codes ?? []).join('\n'));
-    setIsDefault(version?.is_default ?? false);
-  }, [open, version]);
-
-  const handleSave = useCallback(async () => {
-    if (!label.trim()) {
-      toast.error('请输入版本名称');
-      return;
-    }
-
-    setSaving(true);
-    try {
-      const payload = {
-        label: label.trim(),
-        description: description.trim() || undefined,
-        time_of_day: timeOfDay || undefined,
-        weather: weather || undefined,
-        additional_elements: splitMultilineValue(additionalElements),
-        removed_elements: splitMultilineValue(removedElements),
-        prompt_suffix: promptSuffix.trim() || undefined,
-        full_prompt: fullPrompt.trim() || undefined,
-        applicable_scene_codes: splitMultilineValue(applicableSceneCodes),
-        is_default: isDefault,
-      };
-
-      if (version) {
-        await locationsApi.updateVersion(projectId, locationId, version.id, payload);
-        toast.success('场景版本已更新');
-      } else {
-        await locationsApi.createVersion(projectId, locationId, payload);
-        toast.success('场景版本已创建');
-      }
-
-      await onSuccess();
-      onOpenChange(false);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '保存版本失败');
-    } finally {
-      setSaving(false);
-    }
-  }, [
-    additionalElements,
-    applicableSceneCodes,
-    description,
-    fullPrompt,
-    isDefault,
-    label,
-    locationId,
-    onOpenChange,
-    onSuccess,
-    projectId,
-    promptSuffix,
-    removedElements,
-    timeOfDay,
-    version,
-    versionCode,
-    weather,
-  ]);
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl">
-        <DialogHeader>
-          <DialogTitle>{version ? '编辑场景版本' : '新增场景版本'}</DialogTitle>
-          <DialogDescription>
-            版本可用于区分白天、夜景、战损、雨天等不同场景状态，并拥有独立场景图。
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="grid gap-4 md:grid-cols-2">
-          <div className="space-y-2">
-            <label className="text-sm font-medium">版本名称</label>
-            <Input value={label} onChange={(event) => setLabel(event.target.value)} placeholder="例如：夜景" />
-          </div>
-          <div className="space-y-2">
-            <label className="text-sm font-medium">版本编码</label>
-            <Input
-              value={versionCode}
-              onChange={(event) => setVersionCode(event.target.value)}
-              placeholder="例如：night"
-              disabled={Boolean(version)}
-            />
-          </div>
-
-          <div className="space-y-2">
-            <label className="text-sm font-medium">时间</label>
-            <Select value={timeOfDay || '__none__'} onValueChange={(value) => setTimeOfDay(value === '__none__' ? '' : value)}>
-              <SelectTrigger>
-                <SelectValue placeholder="未设置" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__none__">未设置</SelectItem>
-                {Object.entries(timeOfDayLabels).map(([value, text]) => (
-                  <SelectItem key={value} value={value}>{text}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-2">
-            <label className="text-sm font-medium">天气</label>
-            <Select value={weather || '__none__'} onValueChange={(value) => setWeather(value === '__none__' ? '' : value)}>
-              <SelectTrigger>
-                <SelectValue placeholder="未设置" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__none__">未设置</SelectItem>
-                {Object.entries(weatherLabels).map(([value, text]) => (
-                  <SelectItem key={value} value={value}>{text}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-
-        <div className="space-y-2">
-          <label className="text-sm font-medium">版本描述</label>
-          <Textarea value={description} onChange={(event) => setDescription(event.target.value)} rows={3} />
-        </div>
-
-        <div className="grid gap-4 md:grid-cols-2">
-          <div className="space-y-2">
-            <label className="text-sm font-medium">新增元素</label>
-            <Textarea value={additionalElements} onChange={(event) => setAdditionalElements(event.target.value)} rows={4} placeholder="每行一个，或用逗号分隔" />
-          </div>
-          <div className="space-y-2">
-            <label className="text-sm font-medium">移除元素</label>
-            <Textarea value={removedElements} onChange={(event) => setRemovedElements(event.target.value)} rows={4} placeholder="每行一个，或用逗号分隔" />
-          </div>
-        </div>
-
-        <div className="grid gap-4 md:grid-cols-2">
-          <div className="space-y-2">
-            <label className="text-sm font-medium">追加提示词</label>
-            <Textarea value={promptSuffix} onChange={(event) => setPromptSuffix(event.target.value)} rows={3} />
-          </div>
-          <div className="space-y-2">
-            <label className="text-sm font-medium">完整提示词覆盖</label>
-            <Textarea value={fullPrompt} onChange={(event) => setFullPrompt(event.target.value)} rows={3} />
-          </div>
-        </div>
-
-        <div className="space-y-2">
-          <label className="text-sm font-medium">适用场景编码</label>
-          <Textarea value={applicableSceneCodes} onChange={(event) => setApplicableSceneCodes(event.target.value)} rows={3} placeholder="每行一个 scene code" />
-        </div>
-
-        <label className="flex items-center gap-2 text-sm text-foreground">
-          <input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} />
-          设为默认版本
-        </label>
-
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={handleSave} disabled={saving}>
-            {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-            保存版本
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function LocationVersionStudioDialog({
-  open,
-  onOpenChange,
-  projectId,
-  locationId,
-  version,
-  onRefresh,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  projectId: number;
-  locationId: number;
-  version: LocationVersionResponse | null;
-  onRefresh: () => Promise<void>;
-}) {
-  const [uploadFiles, setUploadFiles] = useState<PendingImageFile[]>([]);
-  const [uploading, setUploading] = useState(false);
-  const [prompt, setPrompt] = useState('');
-  const [negativePrompt, setNegativePrompt] = useState('');
-  const [stylePreset, setStylePreset] = useState('');
-  const [aspectRatio, setAspectRatio] = useState('16:9');
-  const [resolution, setResolution] = useState('1K');
-  const [generating, setGenerating] = useState(false);
-  const [imgPrompt, setImgPrompt] = useState('');
-  const [imgNegativePrompt, setImgNegativePrompt] = useState('');
-  const [imgStylePreset, setImgStylePreset] = useState('');
-  const [imgAspectRatio, setImgAspectRatio] = useState('16:9');
-  const [imgResolution, setImgResolution] = useState('1K');
-  const [img2imgFiles, setImg2imgFiles] = useState<PendingImageFile[]>([]);
-  const [versionAssets, setVersionAssets] = useState<AssetResponse[]>([]);
-  const [locationLibraryAssets, setLocationLibraryAssets] = useState<AssetResponse[]>([]);
-  const [selectedReferenceUrls, setSelectedReferenceUrls] = useState<string[]>([]);
-  const [imgGenerating, setImgGenerating] = useState(false);
-  const [isVersionAssetPickerOpen, setIsVersionAssetPickerOpen] = useState(false);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-
-  const resetPreviewFiles = useCallback((files: PendingImageFile[]) => {
-    files.forEach((item) => URL.revokeObjectURL(item.preview));
-  }, []);
-
-  useEffect(() => {
-    if (!open || !version) return;
-    setSelectedReferenceUrls((prev) => prev.filter((url) => version.reference_image_urls.includes(url)));
-  }, [open, version]);
-
-  const loadVersionAssets = useCallback(async () => {
-    if (!version) {
-      setVersionAssets([]);
-      return [];
-    }
-    const items = await assetsApi.list(projectId, 1, 100, {
-      assetType: 'image',
-      locationId,
-      locationVersionId: version.id,
-      isCurrent: true,
-    }).then((response) => response.items);
-    setVersionAssets(items);
-    return items;
-  }, [locationId, projectId, version]);
-
-  const loadLocationLibraryAssets = useCallback(async () => {
-    const items = await assetsApi.list(projectId, 1, 100, {
-      assetType: 'image',
-      isCurrent: true,
-    }).then((response) => response.items);
-    setLocationLibraryAssets(items.filter((asset) => asset.file_url && !version?.reference_image_urls.includes(asset.file_url)));
-    return items;
-  }, [projectId, version?.reference_image_urls]);
-
-  useEffect(() => {
-    if (open) {
-      loadVersionAssets().catch(() => setVersionAssets([]));
-      loadLocationLibraryAssets().catch(() => setLocationLibraryAssets([]));
-      return;
-    }
-    resetPreviewFiles(uploadFiles);
-    resetPreviewFiles(img2imgFiles);
-    setUploadFiles([]);
-    setImg2imgFiles([]);
-    setPrompt('');
-    setNegativePrompt('');
-    setStylePreset('');
-    setImgPrompt('');
-    setImgNegativePrompt('');
-    setImgStylePreset('');
-    setAspectRatio('16:9');
-    setResolution('1K');
-    setImgAspectRatio('16:9');
-    setImgResolution('1K');
-    setSelectedReferenceUrls([]);
-    setVersionAssets([]);
-    setLocationLibraryAssets([]);
-  }, [img2imgFiles, loadLocationLibraryAssets, loadVersionAssets, open, resetPreviewFiles, uploadFiles]);
-
-  const versionImageItems = useMemo(
-    () => buildSceneImageItems(version?.reference_image_urls || [], versionAssets),
-    [version?.reference_image_urls, versionAssets],
-  );
-
-  const reusableLibraryItems = useMemo(() => {
-    const currentUrls = new Set(version?.reference_image_urls || []);
-    return Array.from(
-      new Map<string, { url: string; sourceLabel: string }>(
-        locationLibraryAssets
-          .filter((asset) => !currentUrls.has(asset.file_url))
-          .map((asset) => [
-            asset.file_url,
-            {
-              url: asset.file_url,
-              sourceLabel: '素材库图片',
-            },
-          ]),
-      ).values(),
-    );
-  }, [locationLibraryAssets, version?.reference_image_urls]);
-
-  const addPendingFiles = useCallback((files: FileList | null, target: 'upload' | 'img2img') => {
-    if (!files || files.length === 0) return;
-
-    const validTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-    const nextFiles: PendingImageFile[] = [];
-
-    Array.from(files).forEach((file) => {
-      if (!validTypes.includes(file.type)) {
-        toast.error(`${file.name} 不是支持的图片格式`);
-        return;
-      }
-      if (file.size > 10 * 1024 * 1024) {
-        toast.error(`${file.name} 超过 10MB 限制`);
-        return;
-      }
-      nextFiles.push({
-        id: `${Date.now()}-${Math.random()}`,
-        file,
-        preview: URL.createObjectURL(file),
-      });
-    });
-
-    if (target === 'upload') {
-      setUploadFiles((prev) => [...prev, ...nextFiles].slice(0, 10));
-    } else {
-      setImg2imgFiles((prev) => [...prev, ...nextFiles].slice(0, 5));
-    }
-  }, []);
-
-  const removePendingFile = useCallback((id: string, target: 'upload' | 'img2img') => {
-    const setter = target === 'upload' ? setUploadFiles : setImg2imgFiles;
-    setter((prev) => {
-      const removed = prev.find((item) => item.id === id);
-      if (removed) {
-        URL.revokeObjectURL(removed.preview);
-      }
-      return prev.filter((item) => item.id !== id);
-    });
-  }, []);
-
-  const syncReferenceUrls = useCallback(async (urls: string[]) => {
-    if (!version) return;
-    await locationsApi.updateVersion(projectId, locationId, version.id, {
-      reference_image_urls: Array.from(new Set(urls)),
-    });
-    await onRefresh();
-  }, [locationId, onRefresh, projectId, version]);
-
-  const uploadFilesToVersion = useCallback(async (files: PendingImageFile[]) => {
-    const assets = await Promise.all(
-      files.map((item) => assetsApi.upload(projectId, item.file, undefined, locationId, version?.id)),
-    );
-    return assets.map((asset) => asset.file_url);
-  }, [locationId, projectId, version?.id]);
-
-  const waitForTask = useCallback(async (taskId: number) => {
-    for (let attempt = 0; attempt < 60; attempt += 1) {
-      const task = await tasksApi.get(taskId);
-      if (task.status === 'success') return task;
-      if (task.status === 'failed') {
-        throw new Error(task.error_message || '图片生成失败');
-      }
-      await new Promise((resolve) => setTimeout(resolve, 5000));
-    }
-    throw new Error('生成耗时较长，请稍后刷新查看结果');
-  }, []);
-
-  const handleUpload = useCallback(async (files: FileList | null) => {
-    if (!version || uploading) return;
-    const nextFiles = createPendingImageFiles(files, 10);
-    if (nextFiles.length === 0) return;
-    setUploadFiles(nextFiles);
-    setUploading(true);
-    try {
-      const urls = await uploadFilesToVersion(nextFiles);
-      await syncReferenceUrls([...(version.reference_image_urls || []), ...urls]);
-      await loadVersionAssets();
-      await loadLocationLibraryAssets();
-      toast.success('版本场景图已上传');
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '上传失败');
-    } finally {
-      resetPreviewFiles(nextFiles);
-      setUploadFiles([]);
-      setUploading(false);
-    }
-  }, [loadLocationLibraryAssets, loadVersionAssets, resetPreviewFiles, syncReferenceUrls, uploadFilesToVersion, version, uploading]);
-
-  const handlePromptGenerate = useCallback(async () => {
-    if (!version || !prompt.trim()) {
-      toast.error('请输入提示词');
-      return;
-    }
-    setGenerating(true);
-    try {
-      const task = await tasksApi.triggerImage({
-        project_id: projectId,
-        location_id: locationId,
-        location_version_id: version.id,
-        prompt: prompt.trim(),
-        negative_prompt: negativePrompt.trim() || undefined,
-        aspect_ratio: aspectRatio,
-        resolution,
-        style_preset: stylePreset.trim() || undefined,
-        reference_image_urls: selectedReferenceUrls.length > 0 ? selectedReferenceUrls : undefined,
-      });
-      await waitForTask(task.id);
-      await onRefresh();
-      await loadVersionAssets();
-      await loadLocationLibraryAssets();
-      toast.success(selectedReferenceUrls.length > 0 ? '版本图生图完成' : '版本场景图生成完成');
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '生成失败');
-    } finally {
-      setGenerating(false);
-    }
-  }, [aspectRatio, loadLocationLibraryAssets, loadVersionAssets, locationId, negativePrompt, onRefresh, projectId, prompt, resolution, selectedReferenceUrls, stylePreset, version, waitForTask]);
-
-  const handleImageGenerate = useCallback(async () => {
-    if (!version || !imgPrompt.trim()) {
-      toast.error('请输入图生图提示词');
-      return;
-    }
-    if (selectedReferenceUrls.length === 0 && img2imgFiles.length === 0) {
-      toast.error('请至少准备一张参考图');
-      return;
-    }
-
-    setImgGenerating(true);
-    try {
-      const uploadedUrls = img2imgFiles.length > 0 ? await uploadFilesToVersion(img2imgFiles) : [];
-      if (uploadedUrls.length > 0) {
-        await syncReferenceUrls([...(version.reference_image_urls || []), ...uploadedUrls]);
-      }
-
-      const task = await tasksApi.triggerImage({
-        project_id: projectId,
-        location_id: locationId,
-        location_version_id: version.id,
-        prompt: imgPrompt.trim(),
-        negative_prompt: imgNegativePrompt.trim() || undefined,
-        aspect_ratio: imgAspectRatio,
-        resolution: imgResolution,
-        style_preset: imgStylePreset.trim() || undefined,
-        reference_image_urls: Array.from(new Set([...selectedReferenceUrls, ...uploadedUrls])).slice(0, 5),
-      });
-      await waitForTask(task.id);
-      await onRefresh();
-      await loadVersionAssets();
-      resetPreviewFiles(img2imgFiles);
-      setImg2imgFiles([]);
-      toast.success('版本图生图完成');
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '图生图失败');
-    } finally {
-      setImgGenerating(false);
-    }
-  }, [
-    img2imgFiles,
-    imgAspectRatio,
-    imgNegativePrompt,
-    imgPrompt,
-    imgResolution,
-    imgStylePreset,
-    locationId,
-    onRefresh,
-    projectId,
-    resetPreviewFiles,
-    selectedReferenceUrls,
-    syncReferenceUrls,
-    uploadFilesToVersion,
-    version,
-    waitForTask,
-    loadVersionAssets,
-  ]);
-
-  const handleAddLibraryImage = useCallback(async (url: string) => {
-    if (!version) return;
-    try {
-      await syncReferenceUrls([...(version.reference_image_urls || []), url]);
-      await loadVersionAssets();
-      await loadLocationLibraryAssets();
-      toast.success('已加入当前版本图库');
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '加入图库失败');
-    }
-  }, [loadLocationLibraryAssets, loadVersionAssets, syncReferenceUrls, version]);
-
-  const handleRemoveReferenceImage = useCallback(async (url: string) => {
-    if (!version) return;
-    try {
-      await syncReferenceUrls(version.reference_image_urls.filter((item) => item !== url));
-      setSelectedReferenceUrls((prev) => prev.filter((item) => item !== url));
-      toast.success('已移除版本场景图');
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '移除失败');
-    }
-  }, [syncReferenceUrls, version]);
-
-  const handleDeleteVersionImage = useCallback(async (item: SceneImageItem) => {
-    if (!version) return;
-    try {
-      if (item.assetId) {
-        await assetsApi.delete(projectId, item.assetId);
-        await onRefresh();
-        await loadVersionAssets();
-        setSelectedReferenceUrls((prev) => prev.filter((url) => url !== item.url));
-        toast.success('版本场景图已删除');
-        return;
-      }
-
-      await syncReferenceUrls(version.reference_image_urls.filter((url) => url !== item.url));
-      setSelectedReferenceUrls((prev) => prev.filter((url) => url !== item.url));
-      toast.success('版本参考图已移除');
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '删除失败');
-    }
-  }, [loadVersionAssets, onRefresh, projectId, syncReferenceUrls, version]);
-
-  const toggleReferenceSelection = useCallback((url: string) => {
-    setSelectedReferenceUrls((prev) => {
-      if (prev.includes(url)) {
-        return prev.filter((item) => item !== url);
-      }
-      if (prev.length >= 5) {
-        toast.error('最多选择 5 张参考图');
-        return prev;
-      }
-      return [...prev, url];
-    });
-  }, []);
-
-  if (!version) {
-    return null;
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-5xl">
-        <DialogHeader>
-          <DialogTitle>{version.label} 图片工作台</DialogTitle>
-          <DialogDescription>
-            这里管理当前版本的独立场景图，支持手动上传、文生图和图生图。
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">生成场景图</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <label className="text-sm font-medium">正向提示词</label>
-                <Textarea
-                  value={prompt}
-                  onChange={(event) => setPrompt(event.target.value)}
-                  rows={5}
-                  placeholder="描述你想要的版本场景；如果右侧已选择参考图，会在这些参考图基础上继续生成。"
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium">负向提示词</label>
-                <Input value={negativePrompt} onChange={(event) => setNegativePrompt(event.target.value)} />
-              </div>
-              <div className="grid gap-4 md:grid-cols-3">
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">画幅比例</label>
-                  <Select value={aspectRatio} onValueChange={setAspectRatio}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {aspectRatios.map((item) => (
-                        <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">分辨率</label>
-                  <Select value={resolution} onValueChange={setResolution}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {resolutions.map((item) => (
-                        <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">风格预设</label>
-                  <Input value={stylePreset} onChange={(event) => setStylePreset(event.target.value)} />
-                </div>
-              </div>
-
-              {selectedReferenceUrls.length > 0 ? (
-                <div className="space-y-3 rounded-xl border border-primary/20 bg-primary/5 p-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="text-sm font-medium">已选择参考图</div>
-                      <div className="text-xs text-muted-foreground">当前会按图生图模式生成，可在右侧点击取消选择。</div>
-                    </div>
-                    <Badge variant="secondary">{selectedReferenceUrls.length}/5</Badge>
-                  </div>
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    {selectedReferenceUrls.map((url) => (
-                      <div key={url} className="overflow-hidden rounded-xl border border-primary ring-2 ring-primary/20">
-                        <button
-                          type="button"
-                          onClick={() => setPreviewUrl(url)}
-                          className="group relative block w-full overflow-hidden"
-                        >
-                          <img src={url} alt="" className="aspect-video w-full object-cover transition group-hover:scale-[1.01]" />
-                          <div className="absolute inset-x-0 bottom-0 flex items-center justify-end bg-gradient-to-t from-black/55 to-transparent p-3 opacity-0 transition group-hover:opacity-100">
-                            <span className="inline-flex items-center gap-1 rounded-full bg-white/90 px-2 py-1 text-xs font-medium text-foreground">
-                              <Eye className="h-3 w-3" />
-                              预览
-                            </span>
-                          </div>
-                        </button>
-                        <div className="flex justify-end p-2">
-                          <Button variant="ghost" size="sm" onClick={() => toggleReferenceSelection(url)}>
-                            取消选择
-                          </Button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                <div className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
-                  当前未选择参考图。你可以直接文生图，或者在右侧图库中点击“设为参考图”切换为图生图。
-                </div>
-              )}
-
-              <div className="flex justify-end">
-                <Button onClick={handlePromptGenerate} disabled={generating || !prompt.trim()}>
-                  {generating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : selectedReferenceUrls.length > 0 ? <Sparkles className="mr-2 h-4 w-4" /> : <Wand2 className="mr-2 h-4 w-4" />}
-                  {selectedReferenceUrls.length > 0 ? '根据参考图生成版本场景图' : '生成版本场景图'}
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">当前版本图库</CardTitle>
-              <CardDescription>这里展示当前版本图库，同时支持直接从项目素材库引用图片。</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="space-y-3">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-sm font-medium">上传到当前版本图库</div>
-                    <div className="text-xs text-muted-foreground">支持点击或拖拽上传，保存后会进入当前版本的素材图库。</div>
-                  </div>
-                  {uploading ? (
-                    <div className="inline-flex items-center gap-2 rounded-full bg-primary/10 px-3 py-1 text-xs font-medium text-primary">
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      正在上传
-                    </div>
-                  ) : null}
-                  {false ? (
-                    <Button onClick={() => undefined} disabled={uploading || uploadFiles.length === 0}>
-                      {uploading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ImagePlus className="mr-2 h-4 w-4" />}
-                      保存到当前版本
-                    </Button>
-                  ) : null}
-                </div>
-                <FileDropZone
-                  onSelect={handleUpload}
-                  disabled={uploading}
-                  title="上传版本场景图"
-                  description="支持 JPG、PNG、WebP、GIF，单张不超过 10MB"
-                />
-                {uploadFiles.length > 0 ? (
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    {uploadFiles.map((item) => (
-                      <div key={item.id} className="rounded-xl border bg-secondary/20 p-2">
-                        <div className="relative overflow-hidden rounded-lg">
-                          <img src={item.preview} alt={item.file.name} className="aspect-video w-full object-cover" />
-                          <Button variant="secondary" size="icon" className="hidden" onClick={() => removePendingFile(item.id, 'upload')}>
-                            <X className="h-4 w-4" />
-                          </Button>
-                        </div>
-                        <div className="mt-2 truncate text-xs text-muted-foreground">{item.file.name}</div>
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-              </div>
-
-              <div className="rounded-xl border bg-secondary/10 p-4">
-                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                  <div className="space-y-1">
-                    <div className="text-sm font-medium">引用素材库图片</div>
-                    <div className="text-xs text-muted-foreground">点击按钮后在弹窗中分页浏览素材库图片，选择后再加入当前版本图库。</div>
-                  </div>
-                  <Button variant="outline" onClick={() => setIsVersionAssetPickerOpen(true)}>
-                    <ImagePlus className="mr-2 h-4 w-4" />
-                    从素材库选择图片
+                {locDetail.pic_url && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-muted-foreground shrink-0"
+                    disabled={deletingPic}
+                    onClick={handleDeletePic}
+                  >
+                    {deletingPic ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Trash2 className="h-4 w-4 mr-1" />}
+                    删除封面
                   </Button>
-                </div>
-              </div>
-
-              <div className="hidden space-y-3 rounded-xl border bg-secondary/10 p-4">
-                <div>
-                  <div className="text-sm font-medium">引用素材库图片</div>
-                  <div className="text-xs text-muted-foreground">这里会列出当前场景主图库或其他版本的素材图，可直接加入当前版本。</div>
-                </div>
-                {reusableLibraryItems.length > 0 ? (
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    {reusableLibraryItems.map((item) => (
-                      <div key={item.url} className="overflow-hidden rounded-xl border bg-card">
-                        <img src={item.url} alt="" className="aspect-video w-full object-cover" />
-                        <div className="flex items-center justify-between gap-2 p-3">
-                          <div className="text-xs text-muted-foreground">{item.sourceLabel}</div>
-                          <Button size="sm" variant="outline" onClick={() => handleAddLibraryImage(item.url)}>
-                            引用到当前图库
-                          </Button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="rounded-xl border border-dashed p-6 text-center text-sm text-muted-foreground">
-                    当前没有可引用的其他素材图，或者这些图片已经在当前版本中了。
-                  </div>
                 )}
               </div>
 
-              {versionImageItems.length === 0 ? (
-                <div className="rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">
-                  当前版本还没有场景图。
-                </div>
-              ) : (
-                <div className="grid gap-4">
-                  {versionImageItems.map((item, index) => {
-                    const url = item.url;
-                    return (
-                    <div key={url} className="overflow-hidden rounded-xl border bg-card">
-                      <button
-                        type="button"
-                        onClick={() => setPreviewUrl(url)}
-                        className="group relative block w-full overflow-hidden"
-                      >
-                        <img src={url} alt={`版本场景图 ${index + 1}`} className="aspect-video w-full object-cover transition group-hover:scale-[1.01]" />
-                        <div className="absolute inset-x-0 bottom-0 flex items-center justify-end bg-gradient-to-t from-black/55 to-transparent p-3 opacity-0 transition group-hover:opacity-100">
-                          <span className="inline-flex items-center gap-1 rounded-full bg-white/90 px-2 py-1 text-xs font-medium text-foreground">
-                            <Eye className="h-3 w-3" />
-                            预览
-                          </span>
-                        </div>
-                      </button>
-                      <div className="flex items-center justify-between gap-2 p-3">
-                        <div className="text-xs text-muted-foreground">版本场景图 #{index + 1}</div>
-                        <div className="flex items-center gap-2">
-                          <Button
-                            variant={selectedReferenceUrls.includes(url) ? 'default' : 'outline'}
-                            size="sm"
-                            onClick={() => toggleReferenceSelection(url)}
-                          >
-                            {selectedReferenceUrls.includes(url) ? '已选中' : '设为参考图'}
-                          </Button>
-                          <Button variant="ghost" size="icon" onClick={() => handleDeleteVersionImage(item)}>
-                            <Trash2 className="h-4 w-4 text-muted-foreground hover:text-destructive" />
-                          </Button>
-                        </div>
+              {/* 上传图片到素材库 */}
+              <Card>
+                <CardHeader><CardTitle>上传场景图片</CardTitle></CardHeader>
+                <CardContent className="space-y-4">
+                  <FileDropZone
+                    title="拖拽或点击上传"
+                    description="支持 JPG/PNG/WEBP，最多 5 张，单张不超过 10MB"
+                    onSelect={(files) => {
+                      resetPreviewFiles(uploadFiles);
+                      const next = createPendingImageFiles(files, 5);
+                      setUploadFiles(next);
+                      uploadFilesRef.current = next;
+                    }}
+                    disabled={uploadingSceneImage}
+                  />
+                  {uploadFiles.length > 0 && (
+                    <div className="space-y-3">
+                      <div className="flex flex-wrap gap-3">
+                        {uploadFiles.map((item) => (
+                          <div key={item.id} className="relative group">
+                            <img src={item.preview} alt="" className="h-24 w-24 object-cover rounded-lg border" />
+                            <button type="button" className="absolute -top-2 -right-2 h-5 w-5 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity" onClick={() => {
+                              setUploadFiles((prev) => { const next = prev.filter((f) => f.id !== item.id); URL.revokeObjectURL(item.preview); return next; });
+                            }}><X className="h-3 w-3" /></button>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="flex gap-2">
+                        <Button onClick={handleUploadFiles} disabled={uploadingSceneImage}>
+                          {uploadingSceneImage ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Upload className="h-4 w-4 mr-2" />}
+                          上传到素材库
+                        </Button>
+                        <Button variant="outline" onClick={() => { resetPreviewFiles(uploadFiles); setUploadFiles([]); }} disabled={uploadingSceneImage}>清除</Button>
                       </div>
                     </div>
-                    );
-                  })}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-          <AssetLibraryPickerDialog
-            open={isVersionAssetPickerOpen}
-            onOpenChange={setIsVersionAssetPickerOpen}
-            projectId={projectId}
-            excludedUrls={versionImageItems.map((item) => item.url)}
-            onSelect={handleAddLibraryImage}
-            title={`选择素材库图片加入 ${version.label}`}
-            description="弹窗中按页浏览项目素材库图片，选择后会直接加入当前版本右侧图库。"
-            selectLabel="加入当前版本"
-          />
-          <FullscreenPreview
-            url={previewUrl}
-            open={!!previewUrl}
-            onOpenChange={() => setPreviewUrl(null)}
-          />
+                  )}
+                </CardContent>
+              </Card>
+
+              {/* 场景图片库 */}
+              <Card>
+                <CardHeader className="flex flex-row items-center justify-between">
+                  <CardTitle>场景图片</CardTitle>
+                  <span className="text-sm text-muted-foreground">{locationAssets.length} 张</span>
+                </CardHeader>
+                <CardContent>
+                  {locationAssets.length === 0 ? (
+                    <div className="rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">
+                      暂无场景图片，可通过上方上传
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+                      {locationAssets.map((asset) => (
+                        <div key={asset.id} className="group relative aspect-[4/3] bg-secondary rounded-lg overflow-hidden border">
+                          <img src={asset.file_url} alt="" className="w-full h-full object-cover" />
+                          <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
+                            <Button size="icon" variant="secondary" onClick={() => setPreviewUrl(asset.file_url)}><Eye className="h-4 w-4" /></Button>
+                          </div>
+                          <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-2">
+                            <Badge variant="secondary" className="text-[10px]">{asset.source === 'generated' ? 'AI生成' : '上传'}</Badge>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </div>
+          ) : (
+            <EmptyState title="选择一个场景" description="从左侧列表选择场景查看详情" />
+          )}
         </div>
-      </DialogContent>
-    </Dialog>
+      </div>
+
+      <FullscreenPreview url={previewUrl} open={!!previewUrl} onOpenChange={() => setPreviewUrl(null)} />
+    </AppLayout>
   );
 }

@@ -10,7 +10,6 @@ class AssetCreate(BaseModel):
 
     shot_id: Optional[int] = Field(None, description="Related shot ID")
     location_id: Optional[int] = Field(None, description="Related location ID")
-    location_version_id: Optional[int] = Field(None, description="Related location version ID")
     asset_code: str = Field(..., max_length=100, description="Asset code")
     asset_type: str = Field(..., pattern="^(image|video|audio|reference)$", description="Asset type")
     file_url: str = Field(..., max_length=5000, description="File URL")
@@ -32,7 +31,6 @@ class AssetResponse(BaseResponse):
     project_id: int
     shot_id: Optional[int]
     location_id: Optional[int]
-    location_version_id: Optional[int]
     asset_code: str
     asset_type: str
     file_url: str

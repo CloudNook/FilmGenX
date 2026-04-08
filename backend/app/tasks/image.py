@@ -55,8 +55,8 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
     import httpx
 
     from app.repositories.asset import AssetRepository
-    from app.repositories.character import CharacterRepository, CharacterVersionRepository
-    from app.repositories.location import LocationRepository, LocationVersionRepository
+    from app.repositories.character import CharacterRepository
+    from app.repositories.location import LocationRepository
     from app.repositories.shot import ShotRepository
     from app.repositories.shot_group import ShotGroupRepository
     from app.repositories.task import TaskRepository
@@ -70,9 +70,7 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
             asset_repo = AssetRepository(session)
             shot_repo = ShotRepository(session)
             location_repo = LocationRepository(session)
-            location_version_repo = LocationVersionRepository(session)
             character_repo = CharacterRepository(session)
-            character_version_repo = CharacterVersionRepository(session)
 
             gen_task = await task_repo.get(task_db_id)
             if not gen_task:
@@ -93,9 +91,7 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
                 project_id = params.get("project_id")
                 shot_id = params.get("shot_id")
                 location_id = params.get("location_id")
-                location_version_id = params.get("location_version_id")
                 character_id = params.get("character_id")
-                character_version_id = params.get("character_version_id")
                 prompt = params.get("prompt", "")
                 negative_prompt = params.get("negative_prompt")
                 aspect_ratio = params.get("aspect_ratio", "16:9")
@@ -121,33 +117,18 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
                 location = None
                 if location_id:
                     location = await location_repo.get(location_id)
-                location_version = None
-                if location_id and location_version_id:
-                    location_version = await location_version_repo.get_by_id_and_location(
-                        location_version_id,
-                        location_id,
-                    )
 
                 character = None
                 if character_id:
                     character = await character_repo.get_by_id_and_project(character_id, project_id or 0)
 
-                character_version = None
-                if character_id and character_version_id:
-                    character_version = await character_version_repo.get_by_id_and_character(
-                        character_version_id,
-                        character_id,
-                    )
-
                 logger.info(
-                    "Start image generation task=%s project=%s shot=%s location=%s location_version=%s character=%s character_version=%s image_kind=%s refs=%s",
+                    "Start image generation task=%s project=%s shot=%s location=%s character=%s image_kind=%s refs=%s",
                     task_db_id,
                     project_id,
                     shot_id,
                     location_id,
-                    location_version_id,
                     character_id,
-                    character_version_id,
                     character_image_kind,
                     len(reference_image_urls),
                 )
@@ -196,18 +177,8 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
                     asset_code = f"{shot.shot_code}_image"
                 elif character:
                     asset_code = f"{character.char_code.lower()}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                    if character_version:
-                        asset_code = (
-                            f"{character.char_code.lower()}_{character_version.version_code}_"
-                            f"{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                        )
                 elif location:
                     asset_code = f"{location.loc_code.lower()}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                    if location_version:
-                        asset_code = (
-                            f"{location.loc_code.lower()}_{location_version.version_code}_"
-                            f"{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                        )
 
                 filename = f"{asset_code}.{file_format}"
                 directory = "generated/images"
@@ -227,14 +198,10 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
                         tags = [shot.shot_code, "image", "generated"]
                     elif character:
                         tags = [character.char_code, "image", "generated", "character"]
-                        if character_version:
-                            tags.append(character_version.version_code)
                         if character_image_kind:
                             tags.append(character_image_kind)
                     elif location:
                         tags = [location.loc_code, "image", "generated", "location"]
-                        if location_version:
-                            tags.append(location_version.version_code)
 
                     if shot:
                         await asset_repo.deprecate_shot_assets(shot.id, "image")
@@ -245,7 +212,6 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
                             project_id=project_id,
                             shot_id=shot.id,
                             location_id=location.id if location else None,
-                            location_version_id=location_version.id if location_version else None,
                             character_id=character.id if character else None,
                             asset_code=f"{shot.shot_code}_image_v{next_version}",
                             asset_type="image",
@@ -267,7 +233,6 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
                             project_id=project_id,
                             shot_id=None,
                             location_id=location.id if location else None,
-                            location_version_id=location_version.id if location_version else None,
                             character_id=character.id if character else None,
                             asset_code=f"img_{uuid.uuid4().hex[:8]}_{datetime.now().strftime('%Y%m%d%H%M%S')}",
                             asset_type="image",
@@ -282,38 +247,15 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
                         )
                         asset_id = new_asset.id
 
-                    # Update character version with generated image
-                    if character_version:
-                        if character_image_kind == "three_view":
-                            await character_version_repo.update(
-                                character_version,
-                                {"three_view_url": image_url},
-                            )
-                        else:
-                            reference_urls = list(character_version.reference_image_urls or [])
-                            if image_url not in reference_urls:
-                                reference_urls.append(image_url)
-                                await character_version_repo.update(
-                                    character_version,
-                                    {"reference_image_urls": reference_urls},
-                                )
-                    elif character:
-                        # If no version specified, update the character's default reference images
-                        pass  # Character doesn't have direct reference_image_urls, only versions do
-
-                    if location_version:
-                        reference_urls = list(location_version.reference_image_urls or [])
+                    # Update character with generated image
+                    if character:
+                        reference_urls = list(character.reference_image_urls or [])
                         if image_url not in reference_urls:
                             reference_urls.append(image_url)
-                            await location_version_repo.update(
-                                location_version,
+                            await character_repo.update(
+                                character,
                                 {"reference_image_urls": reference_urls},
                             )
-                    elif location:
-                        reference_urls = list(location.reference_image_urls or [])
-                        if image_url not in reference_urls:
-                            reference_urls.append(image_url)
-                            await location_repo.update(location, {"reference_image_urls": reference_urls})
 
                 # 将生成的图片写入 ShotGroup.image_start_url（首帧参考图）
                 if shot_group_id:

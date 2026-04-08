@@ -29,7 +29,7 @@ class CompositionConfig(BaseModel):
 
 class CharacterInShot(BaseModel):
     """镜头中的单个角色配置。"""
-    char_version_id: int = Field(..., description="角色版本ID")
+    character_id: int = Field(..., description="角色ID")
     action: Optional[str] = Field(None, description="动作描述")
     expression: Optional[str] = Field(None, description="表情描述")
     emotion_intensity: Optional[int] = Field(None, ge=1, le=10, description="情绪强度 1-10")
@@ -39,7 +39,6 @@ class CharacterInShot(BaseModel):
 class EnvironmentConfig(BaseModel):
     """环境配置。"""
     location_id: Optional[int] = Field(None, description="场景地点ID")
-    location_version_id: Optional[int] = Field(None, description="场景变体ID")
     time_of_day: Optional[str] = Field(None, description="时间：dawn/day/dusk/night")
     weather: Optional[str] = Field(None, description="天气：clear/cloudy/rain/snow/fog/storm")
     lighting: Optional[str] = Field(None, description="光照描述")

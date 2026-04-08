@@ -537,55 +537,19 @@ export const conversationsApi = {
 // Characters API
 // ---------------------------------------------------------------------------
 
-export interface CharacterVersionResponse {
-  id: number;
-  character_id: number;
-  version_code: string;
-  label: string;
-  applicable_chapter_start: string | null;
-  applicable_chapter_end: string | null;
-  age_description: string | null;
-  height_cm: number | null;
-  build_description: string | null;
-  face_description: string | null;
-  hair_description: string | null;
-  costumes: Record<string, unknown> | null;
-  dou_qi_color: string | null;
-  dou_qi_level: string | null;
-  key_features: string[];
-  reference_image_urls: string[];
-  base_image_prompt: string | null;
-  // 三视图（单张图片）
-  three_view_url: string | null;
-  // 状态图片
-  state_images: Record<string, string> | null;
-  created_at: string;
-  updated_at: string;
-}
-
 export interface CharacterResponse {
   id: number;
   project_id: number;
   char_code: string;
   name: string;
-  name_aliases: string[];
-  consistent_features: Record<string, unknown> | null;
-  expression_guide: Record<string, unknown> | null;
-  action_guide: Record<string, unknown> | null;
-  relationships: Record<string, unknown> | null;
-  role_description: string | null;
+  pic_name: string | null;
+  pic_url: string | null;
   created_at: string;
   updated_at: string;
 }
 
-export interface CharacterDetailResponse extends CharacterResponse {
-  versions: CharacterVersionResponse[];
-}
-
 export interface CharacterDashboardResponse {
   total_characters: number;
-  total_versions: number;
-  total_images: number;
   recent_characters: CharacterResponse[];
 }
 
@@ -612,7 +576,7 @@ export const charactersApi = {
   },
 
   get(projectId: number, characterId: number) {
-    return request<CharacterDetailResponse>(
+    return request<CharacterResponse>(
       `/projects/${projectId}/characters/${characterId}`,
       { method: 'GET' },
     );
@@ -632,138 +596,29 @@ export const charactersApi = {
     );
   },
 
-  // 角色版本
-  listVersions(projectId: number, characterId: number) {
-    return request<CharacterVersionResponse[]>(
-      `/projects/${projectId}/characters/${characterId}/versions`,
-      { method: 'GET' },
-    );
+  // 角色头像上传
+  uploadPic(projectId: number, characterId: number, file: File): Promise<CharacterResponse> {
+    const formData = new FormData();
+    formData.append('file', file);
+    const token = getToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    return fetch(
+      `${BASE_URL}/projects/${projectId}/characters/${characterId}/images/pic`,
+      { method: 'POST', headers, body: formData },
+    ).then(async (res) => {
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: '上传失败' }));
+        throw new Error(err.detail || '上传失败');
+      }
+      return res.json() as Promise<CharacterResponse>;
+    });
   },
 
-  createVersion(projectId: number, characterId: number, data: Record<string, unknown>) {
-    return request<CharacterVersionResponse>(
-      `/projects/${projectId}/characters/${characterId}/versions`,
-      { method: 'POST', body: data },
-    );
-  },
-
-  updateVersion(projectId: number, characterId: number, versionId: number, data: Record<string, unknown>) {
-    return request<CharacterVersionResponse>(
-      `/projects/${projectId}/characters/${characterId}/versions/${versionId}`,
-      { method: 'PATCH', body: data },
-    );
-  },
-
-  deleteVersion(projectId: number, characterId: number, versionId: number) {
+  deletePic(projectId: number, characterId: number) {
     return request<void>(
-      `/projects/${projectId}/characters/${characterId}/versions/${versionId}`,
+      `/projects/${projectId}/characters/${characterId}/images/pic`,
       { method: 'DELETE' },
-    );
-  },
-
-  // 角色图片上传
-  uploadReferenceImage(projectId: number, characterId: number, versionId: number, file: File): Promise<CharacterVersionResponse> {
-    const formData = new FormData();
-    formData.append('file', file);
-    const token = getToken();
-    const headers: Record<string, string> = {};
-    if (token) headers['Authorization'] = `Bearer ${token}`;
-    return fetch(
-      `${BASE_URL}/projects/${projectId}/characters/${characterId}/versions/${versionId}/images/reference`,
-      { method: 'POST', headers, body: formData },
-    ).then(async (res) => {
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: '上传失败' }));
-        throw new Error(err.detail || '上传失败');
-      }
-      return res.json() as Promise<CharacterVersionResponse>;
-    });
-  },
-
-  addReferenceImageFromUrl(projectId: number, characterId: number, versionId: number, imageUrl: string): Promise<CharacterVersionResponse> {
-    return request<CharacterVersionResponse>(
-      `/projects/${projectId}/characters/${characterId}/versions/${versionId}/images/reference/from-url?image_url=${encodeURIComponent(imageUrl)}`,
-      { method: 'POST' },
-    );
-  },
-
-  uploadThreeViewImage(projectId: number, characterId: number, versionId: number, file: File): Promise<CharacterVersionResponse> {
-    const formData = new FormData();
-    formData.append('file', file);
-    const token = getToken();
-    const headers: Record<string, string> = {};
-    if (token) headers['Authorization'] = `Bearer ${token}`;
-    return fetch(
-      `${BASE_URL}/projects/${projectId}/characters/${characterId}/versions/${versionId}/images/three-view`,
-      { method: 'POST', headers, body: formData },
-    ).then(async (res) => {
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: '上传失败' }));
-        throw new Error(err.detail || '上传失败');
-      }
-      return res.json() as Promise<CharacterVersionResponse>;
-    });
-  },
-
-  uploadStateImage(projectId: number, characterId: number, versionId: number, stateType: string, file: File): Promise<CharacterVersionResponse> {
-    const formData = new FormData();
-    formData.append('file', file);
-    const token = getToken();
-    const headers: Record<string, string> = {};
-    if (token) headers['Authorization'] = `Bearer ${token}`;
-    return fetch(
-      `${BASE_URL}/projects/${projectId}/characters/${characterId}/versions/${versionId}/images/state/${stateType}`,
-      { method: 'POST', headers, body: formData },
-    ).then(async (res) => {
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: '上传失败' }));
-        throw new Error(err.detail || '上传失败');
-      }
-      return res.json() as Promise<CharacterVersionResponse>;
-    });
-  },
-
-  // 删除图片
-  deleteReferenceImage(projectId: number, characterId: number, versionId: number, imageIndex: number) {
-    return request<CharacterVersionResponse>(
-      `/projects/${projectId}/characters/${characterId}/versions/${versionId}/images/reference/${imageIndex}`,
-      { method: 'DELETE' },
-    );
-  },
-
-  deleteViewImage(projectId: number, characterId: number, versionId: number, viewType: 'front' | 'side' | 'back') {
-    return request<CharacterVersionResponse>(
-      `/projects/${projectId}/characters/${characterId}/versions/${versionId}/images/view/${viewType}`,
-      { method: 'DELETE' },
-    );
-  },
-
-  deleteThreeViewImage(projectId: number, characterId: number, versionId: number) {
-    return request<CharacterVersionResponse>(
-      `/projects/${projectId}/characters/${characterId}/versions/${versionId}/images/three-view`,
-      { method: 'DELETE' },
-    );
-  },
-
-  deleteStateImage(projectId: number, characterId: number, versionId: number, stateType: string) {
-    return request<CharacterVersionResponse>(
-      `/projects/${projectId}/characters/${characterId}/versions/${versionId}/images/state/${stateType}`,
-      { method: 'DELETE' },
-    );
-  },
-
-  // 图片生成
-  generateViewImage(projectId: number, characterId: number, versionId: number, viewType: 'front' | 'side' | 'back', promptOverride?: string) {
-    return request<{ id: number; task_id: number; task_type: string; status: string; message: string }>(
-      `/projects/${projectId}/characters/${characterId}/versions/${versionId}/images/generate/view`,
-      { method: 'POST', body: { view_type: viewType, prompt_override: promptOverride } },
-    );
-  },
-
-  generateStateImage(projectId: number, characterId: number, versionId: number, stateType: string, stateDescription?: string, promptOverride?: string) {
-    return request<{ id: number; task_id: number; task_type: string; status: string; message: string }>(
-      `/projects/${projectId}/characters/${characterId}/versions/${versionId}/images/generate/state`,
-      { method: 'POST', body: { state_type: stateType, state_description: stateDescription, prompt_override: promptOverride } },
     );
   },
 };
@@ -911,9 +766,8 @@ export interface ShotGroupMember {
 }
 
 export interface ImageRef {
-  char_version_id?: number | null;
+  character_id?: number | null;
   location_id?: number | null;
-  location_version_id?: number | null;
   /** 角色或场景的显示名称，用于提示词生成 */
   name?: string;
   url: string;
@@ -1024,7 +878,6 @@ export interface AssetResponse {
   project_id: number;
   shot_id: number | null;
   location_id: number | null;
-  location_version_id: number | null;
   asset_code: string;
   asset_type: string;
   file_url: string;
@@ -1059,7 +912,6 @@ export const assetsApi = {
       assetType?: string;
       shotId?: number;
       locationId?: number;
-      locationVersionId?: number;
       source?: string;
       isCurrent?: boolean;
     },
@@ -1069,7 +921,6 @@ export const assetsApi = {
     if (filters?.assetType) params.set('asset_type', filters.assetType);
     if (filters?.shotId !== undefined) params.set('shot_id', String(filters.shotId));
     if (filters?.locationId !== undefined) params.set('location_id', String(filters.locationId));
-    if (filters?.locationVersionId !== undefined) params.set('location_version_id', String(filters.locationVersionId));
     if (filters?.source) params.set('source', filters.source);
     if (filters?.isCurrent !== undefined) params.set('is_current', String(filters.isCurrent));
     return request<PageResponse<AssetResponse>>(
@@ -1092,7 +943,7 @@ export const assetsApi = {
     );
   },
 
-  upload(projectId: number, file: File, shotId?: number, locationId?: number, locationVersionId?: number): Promise<AssetResponse> {
+  upload(projectId: number, file: File, shotId?: number, locationId?: number): Promise<AssetResponse> {
     const formData = new FormData();
     formData.append('file', file);
     if (shotId !== undefined) {
@@ -1100,9 +951,6 @@ export const assetsApi = {
     }
     if (locationId !== undefined) {
       formData.append('location_id', String(locationId));
-    }
-    if (locationVersionId !== undefined) {
-      formData.append('location_version_id', String(locationVersionId));
     }
 
     const token = getToken();
@@ -1170,9 +1018,7 @@ export interface ImageGenerationRequest {
   project_id?: number;
   shot_id?: number;
   location_id?: number;
-  location_version_id?: number;
   character_id?: number;
-  character_version_id?: number;
   prompt: string;
   negative_prompt?: string;
   aspect_ratio?: string;
@@ -1221,26 +1067,6 @@ export const tasksApi = {
 // Locations API
 // ---------------------------------------------------------------------------
 
-export interface LocationVersionResponse {
-  id: number;
-  location_id: number;
-  version_code: string;
-  label: string;
-  description: string | null;
-  atmosphere_override: Record<string, unknown> | null;
-  time_of_day: string | null;
-  weather: string | null;
-  additional_elements: string[];
-  removed_elements: string[];
-  prompt_suffix: string | null;
-  full_prompt: string | null;
-  reference_image_urls: string[];
-  applicable_scene_codes: string[];
-  is_default: boolean;
-  created_at: string;
-  updated_at: string;
-}
-
 export interface LocationResponse {
   id: number;
   project_id: number;
@@ -1249,31 +1075,16 @@ export interface LocationResponse {
   aliases: string[];
   location_type: string;
   domain: string | null;
-  description: string | null;
-  architectural_style: string | null;
-  key_elements: string[];
-  default_atmosphere: Record<string, unknown> | null;
-  time_variants: Record<string, string> | null;
-  base_background_prompt: string | null;
-  negative_prompt: string | null;
-  style_preset: string | null;
-  reference_image_urls: string[];
-  tags: string[];
   is_active: boolean;
   usage_count: number;
+  pic_name: string | null;
+  pic_url: string | null;
   created_at: string;
   updated_at: string;
 }
 
-export interface LocationDetailResponse extends LocationResponse {
-  versions: LocationVersionResponse[];
-  default_version: LocationVersionResponse | null;
-  version_count: number;
-}
-
 export interface LocationDashboardResponse {
   total_locations: number;
-  total_versions: number;
   total_images: number;
   recent_locations: LocationResponse[];
 }
@@ -1310,7 +1121,7 @@ export const locationsApi = {
   },
 
   get(projectId: number, locationId: number) {
-    return request<LocationDetailResponse>(
+    return request<LocationResponse>(
       `/projects/${projectId}/locations/${locationId}`,
       { method: 'GET' },
     );
@@ -1330,31 +1141,28 @@ export const locationsApi = {
     );
   },
 
-  // Versions
-  listVersions(projectId: number, locationId: number) {
-    return request<LocationVersionResponse[]>(
-      `/projects/${projectId}/locations/${locationId}/versions`,
-      { method: 'GET' },
-    );
+  // 场景封面图上传
+  uploadPic(projectId: number, locationId: number, file: File): Promise<LocationResponse> {
+    const formData = new FormData();
+    formData.append('file', file);
+    const token = getToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    return fetch(
+      `${BASE_URL}/projects/${projectId}/locations/${locationId}/images/pic`,
+      { method: 'POST', headers, body: formData },
+    ).then(async (res) => {
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: '上传失败' }));
+        throw new Error(err.detail || '上传失败');
+      }
+      return res.json() as Promise<LocationResponse>;
+    });
   },
 
-  createVersion(projectId: number, locationId: number, data: Record<string, unknown>) {
-    return request<LocationVersionResponse>(
-      `/projects/${projectId}/locations/${locationId}/versions`,
-      { method: 'POST', body: data },
-    );
-  },
-
-  updateVersion(projectId: number, locationId: number, versionId: number, data: Record<string, unknown>) {
-    return request<LocationVersionResponse>(
-      `/projects/${projectId}/locations/${locationId}/versions/${versionId}`,
-      { method: 'PATCH', body: data },
-    );
-  },
-
-  deleteVersion(projectId: number, locationId: number, versionId: number) {
-    return request<void>(
-      `/projects/${projectId}/locations/${locationId}/versions/${versionId}`,
+  deletePic(projectId: number, locationId: number) {
+    return request<LocationResponse>(
+      `/projects/${projectId}/locations/${locationId}/images/pic`,
       { method: 'DELETE' },
     );
   },

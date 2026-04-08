@@ -34,12 +34,10 @@ async def get_character_dashboard(
 ):
     await _require_project(project_id, user_id, db)
     repo = CharacterRepository(db)
-    total_characters, total_versions, total_images = await repo.get_dashboard_stats(project_id)
+    total_characters = await repo.get_dashboard_stats(project_id)
     recent_characters = await repo.get_recent_by_project(project_id, limit=5)
     return CharacterDashboardResponse(
         total_characters=total_characters,
-        total_versions=total_versions,
-        total_images=total_images,
         recent_characters=recent_characters,
     )
 
@@ -52,11 +50,10 @@ async def get_location_dashboard(
 ):
     await _require_project(project_id, user_id, db)
     repo = LocationRepository(db)
-    total_locations, total_versions, total_images = await repo.get_dashboard_stats(project_id)
+    total_locations, total_images = await repo.get_dashboard_stats(project_id)
     recent_locations = await repo.get_recent_by_project(project_id, limit=5)
     return LocationDashboardResponse(
         total_locations=total_locations,
-        total_versions=total_versions,
         total_images=total_images,
         recent_locations=recent_locations,
     )
