@@ -9,13 +9,13 @@ from app.core.agent.loop import AgentLoop
 from app.core.agent.llm import LLMAdapter
 from app.core.agent.tool import ToolExecutor
 from app.core.agent.persist import (
-    AgentMessageRecord,
-    AgentSession,
     PersistStrategy,
+    AgentMessageRecord,
     RedisPersistStrategy,
+    DBPersistStrategy,
 )
 from app.core.middleware.chain import AgentMiddleware, MiddlewareChain, MiddlewareContext
-from app.core.middleware.builtin import LoggingMiddleware, PersistMiddleware
+from app.core.middleware.builtin import LoggingMiddleware
 from app.core.tools import ToolRegistry, get_tool_registry, register_tool
 
 __all__ = [
@@ -34,10 +34,10 @@ __all__ = [
     "LLMAdapter",
     "ToolExecutor",
     # 持久化
-    "AgentSession",
-    "AgentMessageRecord",
     "PersistStrategy",
+    "AgentMessageRecord",
     "RedisPersistStrategy",
+    "DBPersistStrategy",
     # Tool 系统
     "ToolRegistry",
     "get_tool_registry",
@@ -47,5 +47,4 @@ __all__ = [
     "MiddlewareChain",
     "MiddlewareContext",
     "LoggingMiddleware",
-    "PersistMiddleware",
 ]

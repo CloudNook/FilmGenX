@@ -1,11 +1,12 @@
 """
 Redis 持久化策略实现。
 
-将 Agent 执行数据存储到 Redis。
+每条消息用 RPUSH 追加到 Redis List（agent:messages:{session_id}），
+读取时用 LRANGE 全量拉取，按 seq 排序。
 """
 
-from datetime import datetime
 from typing import Any, Dict, List, Optional
+import json
 
 from app.core.agent.persist.base import PersistStrategy
 
@@ -14,39 +15,25 @@ class RedisPersistStrategy(PersistStrategy):
     """
     Redis 持久化策略。
 
-    数据存储结构：
-    - agent:session:{session_id} -> Session JSON
-    - agent:messages:{session_id} -> [Message JSON, ...]
+    数据结构：
+        agent:messages:{session_id}  ->  Redis List
+            每个元素是一条消息的 JSON 字符串，按写入顺序排列。
 
-    注意：需确保 Redis 服务可用。
+    使用方式：
+        agent = create_agent(..., persist="redis")
     """
 
     name = "redis"
 
-    async def save_session(
+    async def load_messages(
         self,
         session_id: str,
-        request_id: str,
-        agent_name: str,
-        initial_input: str,
-        started_at: datetime,
-    ) -> None:
+    ) -> List[Dict[str, Any]]:
         from app.utils import redis_client
 
-        data = {
-            "session_id": session_id,
-            "request_id": request_id,
-            "agent_name": agent_name,
-            "initial_input": initial_input,
-            "loop_count": 0,
-            "schema_data": None,
-            "raw_output": None,
-            "error": None,
-            "finished": False,
-            "started_at": started_at.isoformat() if started_at else None,
-            "finished_at": None,
-        }
-        await redis_client.set_json(f"agent:session:{session_id}", data)
+        raw_list = await redis_client.lrange(f"agent:messages:{session_id}", 0, -1)
+        messages = [json.loads(item) for item in raw_list]
+        return sorted(messages, key=lambda m: m.get("seq", 0))
 
     async def append_message(
         self,
@@ -55,69 +42,26 @@ class RedisPersistStrategy(PersistStrategy):
         agent_name: str,
         role: str,
         content: str,
+        seq: int,
         *,
         tool_call_id: Optional[str] = None,
         tool_name: Optional[str] = None,
-        extra_metadata: Optional[Dict[str, Any]] = None,
-        seq: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         from app.utils import redis_client
 
         msg = {
+            "session_id": session_id,
             "request_id": request_id,
+            "agent_name": agent_name,
             "role": role,
             "content": content,
-            "agent_name": agent_name,
+            "seq": seq,
             "tool_call_id": tool_call_id,
             "tool_name": tool_name,
-            "metadata": extra_metadata or {},
-            "seq": seq,
+            "metadata": metadata or {},
         }
-        key = f"agent:messages:{session_id}"
-        messages: list = (await redis_client.get_json(key)) or []
-        messages.append(msg)
-        await redis_client.set_json(key, messages)
-
-    async def update_session(
-        self,
-        session_id: str,
-        loop_count: int,
-        schema_data: Optional[Dict[str, Any]],
-        raw_output: Optional[str],
-        error: Optional[str],
-        finished: bool,
-        finished_at: datetime,
-    ) -> None:
-        from app.utils import redis_client
-
-        key = f"agent:session:{session_id}"
-        data = await redis_client.get_json(key)
-        if data is None:
-            return
-
-        data.update({
-            "loop_count": loop_count,
-            "schema_data": schema_data,
-            "raw_output": raw_output,
-            "error": error,
-            "finished": finished,
-            "finished_at": finished_at.isoformat() if finished_at else None,
-        })
-        await redis_client.set_json(key, data)
-
-    async def load_messages(
-        self,
-        session_id: str,
-    ) -> List[Dict[str, Any]]:
-        from app.utils import redis_client
-
-        data = await redis_client.get_json(f"agent:messages:{session_id}")
-        return data or []
-
-    async def load_session(
-        self,
-        session_id: str,
-    ) -> Optional[Dict[str, Any]]:
-        from app.utils import redis_client
-
-        return await redis_client.get_json(f"agent:session:{session_id}")
+        await redis_client.rpush(
+            f"agent:messages:{session_id}",
+            json.dumps(msg, ensure_ascii=False),
+        )

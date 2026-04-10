@@ -5,33 +5,60 @@ Agent 工厂函数。
 """
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Literal, Optional, Type, Union
 
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.agent.agent import Agent
 from app.core.agent.base import AgentConfig
+from app.core.agent.persist.base import PersistStrategy
+from app.core.agent.persist.redis_strategy import RedisPersistStrategy
+from app.core.agent.persist.db_strategy import DBPersistStrategy
 from app.core.middleware.chain import AgentMiddleware
 
-if TYPE_CHECKING:
-    from app.core.agent.persist.base import PersistStrategy
-
 logger = logging.getLogger(__name__)
+
+PersistArg = Union[Literal["redis", "db"], PersistStrategy, None]
+
+
+def _resolve_persist(persist: PersistArg, db: Optional[AsyncSession]) -> Optional[PersistStrategy]:
+    """
+    将 persist 参数解析为 PersistStrategy 实例。
+
+    - "redis"           → RedisPersistStrategy()
+    - "db"              → DBPersistStrategy(db=db)，需同时传 db
+    - PersistStrategy   → 直接使用
+    - None              → 不持久化
+    """
+    if persist is None:
+        return None
+    if isinstance(persist, PersistStrategy):
+        return persist
+    if persist == "redis":
+        return RedisPersistStrategy()
+    if persist == "db":
+        if db is None:
+            raise ValueError('persist="db" 需要传入 db 参数（AsyncSession）')
+        return DBPersistStrategy(db=db)
+    raise ValueError(f"未知的 persist 参数：{persist!r}，可选值：'redis' | 'db' | None")
 
 
 def create_agent(
     agent_name: str,
+    session_id: str,
     prompt: str = "",
     *,
     model: str = "gemini-3-flash-preview",
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
-    response_schema: Optional[Type[BaseModel] | Dict[str, Any]] = None,
-    tools: List[Dict[str, Any]] | None = None,
-    skills: List[str] | None = None,
+    response_schema: Optional[Union[Type[BaseModel], Dict[str, Any]]] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    skills: Optional[List[str]] = None,
     max_loop: int = 20,
-    persist: "PersistStrategy | None" = None,
-    middlewares: List[AgentMiddleware] | None = None,
+    persist: PersistArg = None,
+    db: Optional[AsyncSession] = None,
+    middlewares: Optional[List[AgentMiddleware]] = None,
 ) -> Agent:
     """
     创建 Agent 实例。
@@ -40,17 +67,19 @@ def create_agent(
     实际执行需调用 agent.run() 或 agent.stream()。
 
     Args:
-        agent_name: Agent 名称，用于标识和日志
-        prompt: 系统提示词
-        model: LLM 模型名称
-        temperature: 温度参数
-        max_tokens: 最大 token 数
+        agent_name:      Agent 名称
+        session_id:      会话 ID，绑定在 Agent 实例上，用于多轮对话持久化
+        prompt:          系统提示词
+        model:           LLM 模型名称
+        temperature:     温度参数
+        max_tokens:      最大 token 数
         response_schema: 响应数据模型（Pydantic 模型类或 dict）
-        tools: 工具列表（dict 格式）
-        skills: Skill 名称列表，从注册表加载
-        max_loop: 最大循环次数
-        persist: 持久化策略（如 RedisPersistStrategy()），None 则不持久化
-        middlewares: 中间件列表
+        tools:           工具列表
+        skills:          Skill 名称列表
+        max_loop:        最大循环次数
+        persist:         持久化方式，"redis" | "db" | PersistStrategy 实例 | None
+        db:              persist="db" 时必传的 AsyncSession
+        middlewares:     中间件列表
 
     Returns:
         Agent 实例，需调用 run() / stream() 执行
@@ -63,11 +92,8 @@ def create_agent(
         elif isinstance(response_schema, dict):
             schema_dict = response_schema
         else:
-            logger.warning(
-                f"response_schema must be BaseModel or dict, got {type(response_schema)}"
-            )
+            logger.warning(f"response_schema 类型不支持：{type(response_schema)}")
 
-    # 构建配置
     config = AgentConfig(
         agent_name=agent_name,
         prompt=prompt,
@@ -81,6 +107,11 @@ def create_agent(
         middleware=[mw.name for mw in (middlewares or [])],
     )
 
-    logger.info(f"[create_agent] Created agent: {agent_name}")
+    persist_strategy = _resolve_persist(persist, db)
 
-    return Agent(config=config, persist=persist, middlewares=middlewares)
+    logger.info(
+        f"[create_agent] Created agent: {agent_name}, "
+        f"persist={persist_strategy.name if persist_strategy else 'none'}"
+    )
+
+    return Agent(config=config, session_id=session_id, persist=persist_strategy, middlewares=middlewares)
