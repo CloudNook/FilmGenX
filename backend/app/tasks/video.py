@@ -419,11 +419,22 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
                         sound=sound,
                     )
                 else:
-                    # Existing text-to-video path
+                    # Text-to-video mode: build prompts from member shots
+                    t2v_multi_prompts = []
+                    for i, (shot, normalized_duration) in enumerate(zip(member_shots, shot_durations, strict=False)):
+                        content = build_compact_video_prompt(shot)
+                        if len(content) > 512:
+                            content = content[:512]
+                        t2v_multi_prompts.append(MultiShotPrompt(
+                            index=i + 1,
+                            prompt=content,
+                            duration=str(normalized_duration),
+                        ))
+                    
                     evolink_payload = {
                         "multi_shot_prompts": [
                             {"index": mp.index, "prompt": mp.prompt, "duration": mp.duration}
-                            for mp in multi_prompts
+                            for mp in t2v_multi_prompts
                         ],
                         "duration": total_duration,
                         "quality": quality,
@@ -431,7 +442,7 @@ async def _run_multi_shot_video_generation(task: VideoGenerationTask, task_db_id
                     }
                     logger.info("Evolink text_to_video 请求 payload:\n%s", evolink_payload)
                     video_task = await evolink_client.text_to_video(
-                        multi_shot_prompts=multi_prompts,
+                        multi_shot_prompts=t2v_multi_prompts,
                         duration=total_duration,
                         quality=quality,
                         sound=sound,
