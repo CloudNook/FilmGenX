@@ -2,6 +2,8 @@
 Agent LLM 适配器。
 
 使用统一的 Provider Adapter 进行请求/响应/工具 schema 转换。
+核心变化：generate() 返回 LLMResponse（包含原生 tool_calls），
+不再依赖文本解析工具调用。
 """
 
 import json
@@ -9,7 +11,7 @@ import logging
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from app.core.adapter import get_adapter
-from app.core.agent.base import AgentConfig
+from app.core.agent.base import AgentConfig, LLMResponse, StructuredToolCall, UnifiedToolMessage
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +22,7 @@ class LLMAdapter:
 
     持有 AgentConfig 和工具列表，通过 Provider Adapter 进行：
     - 请求格式转换
-    - 响应格式转换
+    - 响应格式转换（返回 LLMResponse，原生 tool_calls）
     - 工具 schema 转换
     """
 
@@ -52,20 +54,46 @@ class LLMAdapter:
             return []
         return self._provider.to_tool_schema(self.tools)
 
+    def build_tool_messages(
+        self,
+        tool_results: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        将工具执行结果构建为 Provider 原生 tool 消息格式。
+
+        Args:
+            tool_results: 工具结果列表，每项包含 tool_call_id / tool_name / result
+
+        Returns:
+            Provider 原生格式的 tool 消息列表
+        """
+        provider = self._provider.provider_name
+        messages = []
+        for tr in tool_results:
+            # tr["result"] 已经是原始字符串，直接传给 UnifiedToolMessage
+            # 不要在这里 json.dumps，避免双重序列化
+            msg = UnifiedToolMessage(
+                tool_call_id=tr["tool_call_id"],
+                tool_name=tr["tool_name"],
+                content=tr["result"],
+            )
+            messages.append(msg.to_provider_format(provider))
+        return messages
+
     async def generate(
         self,
         messages: List[Dict[str, Any]],
         system_prompt: str = "",
-    ) -> str:
+    ) -> LLMResponse:
         """
         非流式生成。
 
         Args:
-            messages: 消息历史
+            messages: 消息历史（统一格式）
             system_prompt: 系统提示词
 
         Returns:
-            LLM 生成的文本
+            LLMResponse 结构化响应（包含 content + 原生 tool_calls）
         """
         full_system = system_prompt or self.config.prompt
         kwargs = self._build_llm_kwargs()
@@ -103,12 +131,18 @@ class LLMAdapter:
         ):
             yield chunk
 
-    def parse_tool_calls(self, response_text: str) -> List[Dict[str, Any]]:
-        """从响应文本中解析工具调用。"""
-        return self._provider.parse_tool_calls(response_text)
+    # ------------------------------------------------------------------
+    # 以下方法已废弃，不再用于主流程
+    # 保留用于渐进式迁移和调试场景
+    # ------------------------------------------------------------------
 
     def parse_json(self, text: str) -> Optional[Dict[str, Any]]:
-        """解析 LLM 输出中的 JSON。"""
+        """
+        解析 LLM 输出中的 JSON（仅用于 response_schema 模式）。
+
+        Deprecated: 当 finish_reason == "stop" 且 content 不为空时，
+        直接将 content 当作 JSON 解析即可。
+        """
         import re
 
         # 尝试 ```json ... ``` 块

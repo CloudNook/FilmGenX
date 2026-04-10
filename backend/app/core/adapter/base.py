@@ -10,6 +10,8 @@ LLM Provider 适配器基类。
 from abc import ABC, abstractmethod
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
+from app.core.agent.base import LLMResponse
+
 
 class ProviderAdapter(ABC):
     """
@@ -49,9 +51,13 @@ class ProviderAdapter(ABC):
         messages: List[Dict[str, Any]],
         system_prompt: str = "",
         **kwargs,
-    ) -> str:
+    ) -> LLMResponse:
         """
         非流式生成。
+
+        返回结构化响应，包含文本内容和原生 tool_calls。
+        优先使用 Provider 原生 function calling API，
+        不再依赖文本解析。
 
         Args:
             messages: 消息列表
@@ -59,7 +65,7 @@ class ProviderAdapter(ABC):
             **kwargs: 其他参数
 
         Returns:
-            生成的文本
+            LLMResponse 结构化响应
         """
         ...
 
@@ -95,17 +101,3 @@ class ProviderAdapter(ABC):
             Provider 特定的工具格式
         """
         ...
-
-    def parse_tool_calls(self, response_text: str) -> List[Dict[str, Any]]:
-        """
-        从响应文本中解析工具调用。
-
-        默认实现为通用正则匹配，子类可覆盖。
-
-        Args:
-            response_text: LLM 响应文本
-
-        Returns:
-            工具调用列表 [{"name": "...", "arguments": {...}}]
-        """
-        return []

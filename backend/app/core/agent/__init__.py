@@ -3,7 +3,16 @@ Agent 框架 - 统一导出。
 """
 
 from app.core.agent.agent import Agent
-from app.core.agent.base import AgentConfig, AgentMessage, AgentResult, ToolCall, ToolResult
+from app.core.agent.base import (
+    AgentConfig,
+    AgentMessage,
+    AgentResult,
+    LLMResponse,
+    StructuredToolCall,
+    ToolCall,
+    ToolResult,
+    UnifiedToolMessage,
+)
 from app.core.agent.factory import create_agent
 from app.core.agent.loop import AgentLoop
 from app.core.agent.llm import LLMAdapter
@@ -27,8 +36,11 @@ __all__ = [
     "AgentConfig",
     "AgentMessage",
     "AgentResult",
+    "LLMResponse",
+    "StructuredToolCall",
     "ToolCall",
     "ToolResult",
+    "UnifiedToolMessage",
     # 核心组件
     "AgentLoop",
     "LLMAdapter",

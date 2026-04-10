@@ -1,15 +1,16 @@
 """
 Google Gemini 适配器。
 
-处理 Gemini API 的请求/响应/工具 schema 转换。
+使用 Gemini 原生 function calling API（tools + function_declarations），
+返回结构化 LLMResponse。
 """
 
 import json
 import logging
-import re
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from app.core.adapter.base import ProviderAdapter
+from app.core.agent.base import LLMResponse, StructuredToolCall
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -21,18 +22,13 @@ _UNSUPPORTED_SCHEMA_KEYS = frozenset({
     "additionalProperties",
 })
 
-# 工具调用正则（支持多种格式）
-TOOL_CALL_PATTERNS = [
-    # <tool_call>{"name": "xxx", "arguments": {...}}</tool_call>
-    re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL),
-    # tool_call: xxx({...})
-    re.compile(r"tool_call:\s*(\w+)\s*\(\s*(\{.*?\})\s*\)", re.DOTALL),
-]
-
 
 class GeminiAdapter(ProviderAdapter):
     """
     Google Gemini 适配器。
+
+    使用 Gemini 原生 function calling（tools.function_declarations），
+    不再依赖文本解析工具调用。
     """
 
     provider_name = "gemini"
@@ -48,14 +44,50 @@ class GeminiAdapter(ProviderAdapter):
         转换为 Gemini API 格式。
 
         Gemini 消息格式：
-        [{"role": "user"|"model", "parts": [{"text": "..."}]}]
+        [{"role": "user"|"model", "parts": [{"text": "..."}] or [...]}]
         """
         contents = []
         for msg in messages:
-            role = "user" if msg.get("role") == "user" else "model"
+            role = msg.get("role", "user")
+
+            # 透传 Provider 原生 tool 消息格式
+            if role == "tool":
+                # Gemini 的 tool 结果通过 functionResponse 格式返回
+                contents.append({
+                    "role": "user",
+                    "parts": [{
+                        "functionResponse": {
+                            "name": msg.get("tool_name", ""),
+                            "response": {"result": msg.get("content", "")},
+                        }
+                    }],
+                })
+                continue
+
+            if role == "assistant" and msg.get("tool_calls"):
+                # Assistant 消息带原生 function_call parts
+                parts = []
+                if msg.get("content"):
+                    parts.append({"text": msg["content"]})
+                for tc in msg["tool_calls"]:
+                    parts.append({
+                        "functionCall": {
+                            "name": tc["name"],
+                            "args": tc["arguments"],
+                        }
+                    })
+                contents.append({"role": "model", "parts": parts})
+                continue
+
+            # 普通消息
+            if role == "system":
+                # Gemini 没有 system role，合并到第一条 user 消息
+                continue
+
+            text = msg.get("content", "")
             contents.append({
-                "role": role,
-                "parts": [{"text": msg.get("content", "")}],
+                "role": "user" if role == "user" else "model",
+                "parts": [{"text": text}] if text else [],
             })
 
         config: Dict[str, Any] = {}
@@ -123,8 +155,8 @@ class GeminiAdapter(ProviderAdapter):
         system_prompt: str = "",
         tools: Optional[List[Dict[str, Any]]] = None,
         **kwargs,
-    ) -> str:
-        """Gemini 非流式生成。"""
+    ) -> LLMResponse:
+        """Gemini 非流式生成，使用原生 function calling。"""
         from google import genai
         from google.genai import types
 
@@ -137,30 +169,66 @@ class GeminiAdapter(ProviderAdapter):
             config=types.GenerateContentConfig(**req["config"]),
         )
 
-        # 优先取纯文本
-        if response.text:
-            return response.text
+        # 解析原生 function_call parts
+        tool_calls = []
+        text_parts = []
 
-        # response_schema 模式下返回 function_call，需要从 parts 中提取 JSON
-        parts = []
         for candidate in response.candidates:
+            parts_info = []
             for part in candidate.content.parts:
                 if hasattr(part, "text") and part.text:
-                    parts.append(part.text)
+                    text_parts.append(part.text)
+                    parts_info.append(f"text:{repr(part.text)[:50]}")
                 elif hasattr(part, "function_call") and part.function_call:
                     fc = part.function_call
-                    args_str = fc.args
-                    if isinstance(args_str, str):
-                        parts.append(args_str)
-                    else:
-                        import json as _json
-                        parts.append(_json.dumps(args_str, ensure_ascii=False))
+                    name = fc.name or ""
+                    # Gemini 返回的 tool name 可能带 default_api: 前缀，需剥离
+                    if name.startswith("default_api:"):
+                        name = name[len("default_api:"):]
 
-        if parts:
-            return "".join(parts)
+                    args = fc.args
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except json.JSONDecodeError:
+                            args = {"_raw": args}
+                    elif not isinstance(args, dict):
+                        args = {"_raw": str(args)}
 
-        logger.warning("Gemini response has no text or function_call parts")
-        return ""
+                    tool_calls.append(StructuredToolCall(
+                        id=str(id(fc)),  # Gemini 原生无 id，用对象 id 代替
+                        name=name,
+                        arguments=args,
+                        raw={"fc": str(fc)},
+                    ))
+                    parts_info.append(f"fc:{name}")
+
+        content = "".join(text_parts)
+
+        # 解析 usage
+        usage = None
+        if hasattr(response, "usage_metadata"):
+            um = response.usage_metadata
+            usage = {
+                "prompt_tokens": getattr(um, "prompt_token_count", None),
+                "completion_tokens": getattr(um, "candidates_token_count", None),
+                "total_tokens": getattr(um, "total_token_count", None),
+            }
+
+        # DEBUG: 打印原始响应
+        logger.info(
+            f"[GeminiAdapter] parts_info={parts_info!r}, "
+            f"tool_calls={[tc.name for tc in tool_calls]}, "
+            f"finish_reason={response.candidates[0].finish_reason if response.candidates else None!r}"
+        )
+
+        return LLMResponse(
+            content=content,
+            tool_calls=tool_calls,
+            finish_reason=response.candidates[0].finish_reason if response.candidates else None,
+            usage=usage,
+            raw={"model_name": kwargs.get("model")},
+        )
 
     async def generate_stream(
         self,
@@ -189,14 +257,10 @@ class GeminiAdapter(ProviderAdapter):
     def to_tool_schema(self, tools: List[Dict[str, Any]]) -> Any:
         """
         转换为 Gemini 工具格式。
-
-        Gemini 格式：
-        [{"function_declarations": [{name, description, parameters}]}]
         """
         declarations = []
         for tool in tools:
             params = tool.get("parameters", {})
-            # Gemini 不支持 additionalProperties
             if "additionalProperties" in params:
                 params = {k: v for k, v in params.items() if k != "additionalProperties"}
 
@@ -207,37 +271,3 @@ class GeminiAdapter(ProviderAdapter):
             })
 
         return [{"function_declarations": declarations}] if declarations else []
-
-    def parse_tool_calls(self, response_text: str) -> List[Dict[str, Any]]:
-        """从 Gemini 响应中解析工具调用。"""
-        tool_calls = []
-        seen_ids = set()
-
-        for pattern in TOOL_CALL_PATTERNS:
-            for m in pattern.finditer(response_text):
-                try:
-                    if pattern.groups == 1:
-                        data = json.loads(m.group(1))
-                        name = data.get("name", "")
-                        args = data.get("arguments", data)
-                    else:
-                        name = m.group(1)
-                        args = json.loads(m.group(2).replace("'", '"'))
-
-                    # Gemini 返回的 tool name 可能带 default_api: 前缀，需剥离
-                    if name.startswith("default_api:"):
-                        name = name[len("default_api:") :]
-
-                    import uuid
-                    tc = {
-                        "id": str(uuid.uuid4()),
-                        "name": name,
-                        "arguments": args,
-                    }
-                    if tc["id"] not in seen_ids:
-                        tool_calls.append(tc)
-                        seen_ids.add(tc["id"])
-                except (json.JSONDecodeError, KeyError):
-                    continue
-
-        return tool_calls

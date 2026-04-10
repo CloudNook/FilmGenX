@@ -1,30 +1,25 @@
 """
 OpenAI 适配器。
 
-处理 OpenAI API 的请求/响应/工具 schema 转换。
+使用 OpenAI 原生 function calling API，返回结构化 LLMResponse。
 """
 
 import json
 import logging
-import re
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from app.core.adapter.base import ProviderAdapter
+from app.core.agent.base import LLMResponse, StructuredToolCall
 
 logger = logging.getLogger(__name__)
-
-# OpenAI 工具调用正则
-TOOL_CALL_PATTERNS = [
-    # ```json\n{"name": "xxx", "arguments": {...}}\n```
-    re.compile(r'```json\s*(\{.*?\})\s*```', re.DOTALL),
-    # <tool_call>{"name": "xxx", "arguments": {...}}</tool_call>
-    re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL),
-]
 
 
 class OpenAIAdapter(ProviderAdapter):
     """
     OpenAI 适配器。
+
+    优先使用 OpenAI 原生 function calling（tool_calls 字段），
+    不再依赖文本解析工具调用。
     """
 
     provider_name = "openai"
@@ -38,15 +33,28 @@ class OpenAIAdapter(ProviderAdapter):
     ) -> Dict[str, Any]:
         """
         转换为 OpenAI API 格式。
-
-        OpenAI 消息格式与统一格式基本一致，直接使用。
         """
         formatted_messages = []
         for msg in messages:
-            formatted_messages.append({
-                "role": msg.get("role", "user"),
-                "content": msg.get("content", ""),
-            })
+            # 透传 Provider 原生 tool 消息格式（由 LLMAdapter 构建）
+            if msg.get("role") == "tool":
+                formatted_messages.append({
+                    "role": "tool",
+                    "tool_call_id": msg.get("tool_call_id", ""),
+                    "content": msg.get("content", ""),
+                })
+            elif msg.get("role") == "assistant" and msg.get("tool_calls"):
+                # Assistant 消息带原生 tool_calls
+                formatted_messages.append({
+                    "role": "assistant",
+                    "content": msg.get("content") or None,
+                    "tool_calls": msg["tool_calls"],
+                })
+            else:
+                formatted_messages.append({
+                    "role": msg.get("role", "user"),
+                    "content": msg.get("content", ""),
+                })
 
         config: Dict[str, Any] = {"model": kwargs.get("model", "gpt-4o")}
         if system_prompt:
@@ -56,9 +64,7 @@ class OpenAIAdapter(ProviderAdapter):
         if "max_tokens" in kwargs:
             config["max_tokens"] = kwargs["max_tokens"]
         if kwargs.get("response_schema"):
-            config["response_format"] = {
-                "type": "json_object",
-            }
+            config["response_format"] = {"type": "json_object"}
 
         tool_schemas = self.to_tool_schema(tools) if tools else []
         if tool_schemas:
@@ -75,8 +81,8 @@ class OpenAIAdapter(ProviderAdapter):
         system_prompt: str = "",
         tools: Optional[List[Dict[str, Any]]] = None,
         **kwargs,
-    ) -> str:
-        """OpenAI 非流式生成。"""
+    ) -> LLMResponse:
+        """OpenAI 非流式生成，使用原生 function calling。"""
         import openai
 
         req = self.to_request(messages, system_prompt, tools=tools, **kwargs)
@@ -86,7 +92,50 @@ class OpenAIAdapter(ProviderAdapter):
             messages=req["messages"],
             **req["config"],
         )
-        return response.choices[0].message.content or ""
+
+        choice = response.choices[0]
+        msg = choice.message
+
+        # 解析原生 tool_calls
+        tool_calls = []
+        if msg.tool_calls:
+            for tc in msg.tool_calls:
+                func = tc.function
+                args_str = func.arguments or "{}"
+                try:
+                    args = json.loads(args_str) if isinstance(args_str, str) else args_str
+                except json.JSONDecodeError:
+                    args = {"_raw": args_str}
+                tool_calls.append(StructuredToolCall(
+                    id=tc.id or "",
+                    name=func.name or "",
+                    arguments=args,
+                    raw={
+                        "index": tc.index,
+                        "type": tc.type,
+                        "function": {
+                            "name": func.name,
+                            "arguments": func.arguments,
+                        },
+                    },
+                ))
+
+        # 解析 usage
+        usage = None
+        if response.usage:
+            usage = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens,
+            }
+
+        return LLMResponse(
+            content=msg.content or "",
+            tool_calls=tool_calls,
+            finish_reason=choice.finish_reason,
+            usage=usage,
+            raw={"model": response.model, "id": response.id},
+        )
 
     async def generate_stream(
         self,
@@ -114,9 +163,6 @@ class OpenAIAdapter(ProviderAdapter):
     def to_tool_schema(self, tools: List[Dict[str, Any]]) -> Any:
         """
         转换为 OpenAI 工具格式。
-
-        OpenAI 格式：
-        [{"type": "function", "function": {name, description, parameters}}]
         """
         result = []
         for tool in tools:
@@ -129,29 +175,3 @@ class OpenAIAdapter(ProviderAdapter):
                 },
             })
         return result
-
-    def parse_tool_calls(self, response_text: str) -> List[Dict[str, Any]]:
-        """从 OpenAI 响应中解析工具调用。"""
-        tool_calls = []
-        seen_ids = set()
-
-        for pattern in TOOL_CALL_PATTERNS:
-            for m in pattern.finditer(response_text):
-                try:
-                    data = json.loads(m.group(1))
-                    name = data.get("name", "")
-                    args = data.get("arguments", data)
-
-                    import uuid
-                    tc = {
-                        "id": str(uuid.uuid4()),
-                        "name": name,
-                        "arguments": args,
-                    }
-                    if tc["id"] not in seen_ids:
-                        tool_calls.append(tc)
-                        seen_ids.add(tc["id"])
-                except json.JSONDecodeError:
-                    continue
-
-        return tool_calls

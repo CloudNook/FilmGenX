@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# coding: utf-8
 """
 Agent 框架集成测试：Redis 持久化 + 长对话 + 工具调用
 
@@ -15,11 +16,18 @@ import json
 import logging
 import os
 import sys
+from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+# 计算 backend 根目录（.env 所在位置）
+BACKEND_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(BACKEND_ROOT))
+
+# 加载 .env 环境变量（让 settings 读取到正确的 REDIS_URL）
+from dotenv import load_dotenv
+load_dotenv(BACKEND_ROOT / ".env")
 
 from app.core.agent import create_agent
 from app.core.agent.persist import RedisPersistStrategy
