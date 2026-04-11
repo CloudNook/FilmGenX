@@ -17,6 +17,7 @@ from app.core.agent.base import (
     ThinkingEvent, TextEvent, ToolStartEvent, ToolEndEvent, DoneEvent, ErrorEvent,
 )
 from app.core.agent.llm import LLMAdapter
+from app.core.agent.persist.base import PersistStrategy
 from app.core.agent.tool import ToolExecutor
 from app.core.agent.usage import merge_usage
 
@@ -52,7 +53,7 @@ class AgentLoop:
         config: AgentConfig,
         llm: LLMAdapter,
         tool_executor: Optional[ToolExecutor] = None,
-        persist: Any = None,  # PersistStrategy | None
+        persist: Optional[PersistStrategy] = None,
         session_id: str = "",
         request_id: str = "",
         on_loop_start: Optional[Any] = None,
@@ -70,6 +71,7 @@ class AgentLoop:
         self.loop_count = 0
         self._seq = 0  # 全局序号，run() 开始时从历史最大 seq + 1 初始化
         self._system_prompt: Optional[str] = None  # 缓存，内容不随循环变化
+        self._session_accumulated_usage: Optional[Dict[str, Any]] = None  # 会话历史累积 usage
 
     def _build_system_prompt(self) -> str:
         if self._system_prompt is not None:
@@ -132,17 +134,25 @@ class AgentLoop:
         *,
         thinking: str = "",
         tool_calls: Optional[List[Any]] = None,
+        finish_reason: Optional[str] = None,
+        accumulated_usage: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         metadata: Dict[str, Any] = {}
         if thinking:
             metadata["thinking"] = thinking
         if tool_calls:
             metadata["tool_calls"] = self._serialize_tool_calls(tool_calls)
+        if finish_reason:
+            metadata["finish_reason"] = finish_reason
+        if accumulated_usage:
+            metadata["accumulated_usage"] = accumulated_usage
         return metadata or None
 
-    @staticmethod
-    def _add_usage(result: AgentResult, usage: Optional[Dict[str, Any]]) -> None:
+    def _add_usage(self, result: AgentResult, usage: Optional[Dict[str, Any]]) -> None:
+        """将本轮 LLM usage 累加到 result.usage（本次请求合计，供积分系统使用），
+        并同步更新 _session_accumulated_usage（会话全局累积，供 persist 写入）。"""
         result.usage = merge_usage(result.usage, usage)
+        self._session_accumulated_usage = merge_usage(self._session_accumulated_usage, usage)
 
     async def _persist(
         self,
@@ -151,6 +161,7 @@ class AgentLoop:
         tool_call_id: Optional[str] = None,
         tool_name: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        usage: Optional[Dict[str, Any]] = None,
     ) -> None:
         """写入一条消息，seq 使用当前值后自增。"""
         if self.persist is None:
@@ -167,12 +178,9 @@ class AgentLoop:
             tool_call_id=tool_call_id,
             tool_name=tool_name,
             metadata=metadata,
+            usage=usage,
         )
 
-    async def _flush(self) -> None:
-        """同步当前批次的待写入消息（具体事务边界由持久化策略决定）。"""
-        if self.persist is not None:
-            await self.persist.flush()
 
     async def _load_history(self) -> None:
         """从持久化存储加载历史消息，注入 self.messages，初始化 self._seq。"""
@@ -187,32 +195,36 @@ class AgentLoop:
         if not history:
             return
 
-        for msg in history:
-            role = msg["role"]
-            metadata = msg.get("metadata") or {}
-            if role == "tool":
+        for r in history:
+            metadata = r.extra_metadata or {}
+            if r.role == "tool":
                 self.messages.append({
                     "role": "tool",
-                    "tool_call_id": msg.get("tool_call_id") or "",
-                    "tool_name": msg.get("tool_name") or "",
-                    "content": msg["content"],
+                    "tool_call_id": r.tool_call_id or "",
+                    "tool_name": r.tool_name or "",
+                    "content": r.content,
                 })
             else:
-                restored = {
-                    "role": role,
-                    "content": msg["content"],
+                restored: Dict[str, Any] = {
+                    "role": r.role,
+                    "content": r.content,
                 }
-                if role == "assistant":
+                if r.role == "assistant":
                     if metadata.get("thinking"):
                         restored["thinking"] = metadata["thinking"]
                     if metadata.get("tool_calls"):
                         restored["tool_calls"] = metadata["tool_calls"]
+                    if r.usage:
+                        self._session_accumulated_usage = merge_usage(
+                            self._session_accumulated_usage, r.usage
+                        )
                 self.messages.append(restored)
 
-        self._seq = max(msg.get("seq", 0) for msg in history) + 1
+        self._seq = max(r.seq for r in history) + 1
         logger.info(
             f"[AgentLoop:{self.config.agent_name}] "
-            f"Loaded {len(history)} history messages, next seq={self._seq}"
+            f"Loaded {len(history)} history messages, next seq={self._seq}, "
+            f"session_accumulated_usage={self._session_accumulated_usage}"
         )
 
     async def run(self, initial_input: str) -> AgentResult:
@@ -245,7 +257,6 @@ class AgentLoop:
                     messages=list(self.messages),
                     system_prompt=self._build_system_prompt(),
                 )
-                self._add_usage(result, response.usage)
 
                 # Step 2: 将 assistant 消息加入历史
                 # 注意：content 即使为空也要写入（content: ""），否则消息历史
@@ -277,13 +288,17 @@ class AgentLoop:
                         agent_name=self.config.agent_name,
                     )
                 )
+                self._add_usage(result, response.usage)
                 await self._persist(
                     "assistant",
                     response.content,
                     metadata=self._build_assistant_metadata(
                         thinking=response.thinking,
                         tool_calls=response.tool_calls,
+                        finish_reason=response.finish_reason,
+                        accumulated_usage=self._session_accumulated_usage,
                     ),
+                    usage=response.usage,
                 )
 
                 # Step 3: 有 tool_calls → 执行工具（优先于 finish_reason 判断）
@@ -363,7 +378,7 @@ class AgentLoop:
                     result.loop_count = self.loop_count
                     if self.on_loop_end is not None:
                         await self.on_loop_end(result.messages)
-                    await self._flush()
+
                     return result
 
                 # Fallback：模型返回空内容且无法正常结束
@@ -395,7 +410,7 @@ class AgentLoop:
                         result.loop_count = self.loop_count
                         if self.on_loop_end is not None:
                             await self.on_loop_end(result.messages)
-                        await self._flush()
+    
                         return result
 
                 # 无结束信号也无内容 → 继续循环
@@ -413,7 +428,6 @@ class AgentLoop:
             result.error = f"Max loop reached ({self.config.max_loop})"
             result.finished = False
             result.finished_at = datetime.now(timezone.utc)
-            await self._flush()
             return result
 
         except Exception as e:
@@ -422,7 +436,6 @@ class AgentLoop:
             result.loop_count = self.loop_count
             result.finished = False
             result.finished_at = datetime.now(timezone.utc)
-            await self._flush()
             return result
 
     async def stream_run(self, initial_input: str):
@@ -464,7 +477,6 @@ class AgentLoop:
                     messages=list(self.messages),
                     system_prompt=self._build_system_prompt(),
                 ):
-                    self._add_usage(result, chunk.usage)
                     if chunk.thinking:
                         accumulated_thinking += chunk.thinking
                         yield ThinkingEvent(content=chunk.thinking)
@@ -472,8 +484,12 @@ class AgentLoop:
                         accumulated_content += chunk.content
                         yield TextEvent(content=chunk.content)
                     if chunk.finish_reason is not None:
-                        # 终止 chunk，不再有文本，携带完整 tool_calls
+                        # 终止 chunk，不再有文本，携带完整 tool_calls 和 usage
                         final_chunk = chunk
+
+                # usage 只在终止 chunk 上才有值，在 stop 判断完成后统一累加
+                if final_chunk is not None:
+                    self._add_usage(result, final_chunk.usage)
 
                 # --- 写入 assistant 消息 ---
                 assistant_msg_dict: Dict[str, Any] = {
@@ -505,7 +521,10 @@ class AgentLoop:
                     metadata=self._build_assistant_metadata(
                         thinking=accumulated_thinking,
                         tool_calls=final_chunk.tool_calls if final_chunk else None,
+                        finish_reason=final_chunk.finish_reason if final_chunk else None,
+                        accumulated_usage=self._session_accumulated_usage,
                     ),
+                    usage=final_chunk.usage if final_chunk else None,
                 )
 
                 # --- Act：有 tool_calls ---
@@ -583,7 +602,7 @@ class AgentLoop:
                     result.loop_count = self.loop_count
                     if self.on_loop_end is not None:
                         await self.on_loop_end(result.messages)
-                    await self._flush()
+
                     yield DoneEvent(result=result)
                     return
 
@@ -611,7 +630,7 @@ class AgentLoop:
                         yield TextEvent(content=fallback_content)
                         if self.on_loop_end is not None:
                             await self.on_loop_end(result.messages)
-                        await self._flush()
+    
                         yield DoneEvent(result=result)
                         return
 
@@ -625,7 +644,6 @@ class AgentLoop:
             result.error = f"Max loop reached ({self.config.max_loop})"
             result.finished = False
             result.finished_at = datetime.now(timezone.utc)
-            await self._flush()
             yield ErrorEvent(error=result.error)
             yield DoneEvent(result=result)
 
@@ -636,5 +654,4 @@ class AgentLoop:
             result.loop_count = self.loop_count
             result.finished = False
             result.finished_at = datetime.now(timezone.utc)
-            await self._flush()
             yield DoneEvent(result=result)

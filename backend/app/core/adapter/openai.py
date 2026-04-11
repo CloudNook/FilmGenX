@@ -166,17 +166,30 @@ class OpenAIAdapter(ProviderAdapter):
         # tool_calls 按 index 拼接（OpenAI 流式分片发送）
         accumulated_tool_calls: dict[int, dict] = {}
         finish_reason = None
+        final_usage = None
 
         async for chunk in await self._client.chat.completions.create(
             messages=req["messages"],
             stream=True,
+            stream_options={"include_usage": True},
             **req["config"],
         ):
+            # 只在终止 chunk（finish_reason 非空 或 choices 为空的 usage-only chunk）时读取 usage
+            if hasattr(chunk, "usage") and chunk.usage:
+                u = chunk.usage
+                final_usage = {
+                    "prompt_tokens": u.prompt_tokens,
+                    "completion_tokens": u.completion_tokens,
+                    "total_tokens": u.total_tokens,
+                }
+
             if not chunk.choices:
                 continue
 
             delta = chunk.choices[0].delta
-            finish_reason = chunk.choices[0].finish_reason or finish_reason
+            chunk_finish = chunk.choices[0].finish_reason
+            if chunk_finish:
+                finish_reason = chunk_finish
 
             # 文本片段立刻 yield
             if delta.content:
@@ -200,7 +213,7 @@ class OpenAIAdapter(ProviderAdapter):
                         if tc_delta.function.arguments:
                             accumulated_tool_calls[idx]["arguments"] += tc_delta.function.arguments
 
-        # 流结束：构建完整 tool_calls
+        # 流结束：构建完整 tool_calls，携带 usage
         tool_calls = []
         for tc in sorted(accumulated_tool_calls.values(), key=lambda x: x.get("index", 0)):
             try:
@@ -217,6 +230,7 @@ class OpenAIAdapter(ProviderAdapter):
             content="",
             tool_calls=tool_calls,
             finish_reason=finish_reason or "stop",
+            usage=final_usage,
         )
 
     def to_tool_schema(self, tools: List[Dict[str, Any]]) -> Any:

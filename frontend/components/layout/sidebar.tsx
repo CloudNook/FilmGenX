@@ -45,6 +45,7 @@ export function Sidebar({ projectId }: SidebarProps) {
         { title: '项目概览', href: `/projects/${projectId}`, icon: Film },
         { title: '素材库', href: `/projects/${projectId}/materials`, icon: Box },
         { title: 'AI 剧本', href: `/projects/${projectId}/chat`, icon: MessageSquare },
+        { title: 'AI 工作台', href: `/projects/${projectId}/workspace`, icon: Brain },
         { title: '分集管理', href: `/projects/${projectId}/episodes`, icon: Clapperboard },
         { title: '视频制作', href: `/projects/${projectId}/video`, icon: Video },
       ]

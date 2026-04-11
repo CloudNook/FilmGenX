@@ -1337,3 +1337,139 @@ export async function readSSEStream(
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// Workspaces API（AI 工作台）
+// ---------------------------------------------------------------------------
+
+export interface WorkspaceResponse {
+  id: number;
+  project_id: number;
+  title: string;
+  agent_name: string;
+  session_id: string;
+  system_prompt: string | null;
+  status: string;
+  total_tokens: number;
+  last_message_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentMessageResponse {
+  role: string;
+  content: string;
+  seq: number;
+  tool_call_id: string | null;
+  tool_name: string | null;
+  thinking: string | null;
+  tool_calls: Record<string, unknown>[] | null;
+  usage: { prompt_tokens?: number | null; completion_tokens?: number | null; thinking_tokens?: number | null; total_tokens?: number | null } | null;
+  accumulated_usage: { prompt_tokens?: number | null; completion_tokens?: number | null; thinking_tokens?: number | null; total_tokens?: number | null } | null;
+  created_at: string | null;
+}
+
+export interface WorkspaceDetailResponse extends WorkspaceResponse {
+  messages: AgentMessageResponse[];
+}
+
+/** Agent SSE 事件类型 */
+export type AgentSSEEvent =
+  | { type: 'thinking'; content: string }
+  | { type: 'text'; content: string }
+  | { type: 'tool_start'; tool_call_id: string; tool_name: string; arguments: Record<string, unknown> }
+  | { type: 'tool_end'; tool_call_id: string; tool_name: string; result: unknown; is_error: boolean }
+  | { type: 'done'; usage: { prompt_tokens?: number | null; completion_tokens?: number | null; thinking_tokens?: number | null; total_tokens?: number | null } | null; loop_count: number; finished: boolean }
+  | { type: 'error'; error: string };
+
+export const workspacesApi = {
+  list(projectId: number, page = 1, pageSize = 20) {
+    return request<PageResponse<WorkspaceResponse>>(
+      `/projects/${projectId}/workspaces?page=${page}&page_size=${pageSize}`,
+      { method: 'GET' },
+    );
+  },
+
+  create(projectId: number, data: { title?: string; system_prompt?: string } = {}) {
+    return request<WorkspaceResponse>(
+      `/projects/${projectId}/workspaces`,
+      { method: 'POST', body: data },
+    );
+  },
+
+  get(projectId: number, workspaceId: number) {
+    return request<WorkspaceDetailResponse>(
+      `/projects/${projectId}/workspaces/${workspaceId}`,
+      { method: 'GET' },
+    );
+  },
+
+  update(projectId: number, workspaceId: number, data: { title?: string; system_prompt?: string | null; status?: string }) {
+    return request<WorkspaceResponse>(
+      `/projects/${projectId}/workspaces/${workspaceId}`,
+      { method: 'PATCH', body: data },
+    );
+  },
+
+  delete(projectId: number, workspaceId: number) {
+    return request<void>(
+      `/projects/${projectId}/workspaces/${workspaceId}`,
+      { method: 'DELETE' },
+    );
+  },
+
+  /** 流式聊天，返回 Response 对象供前端读取 SSE */
+  chat(projectId: number, workspaceId: number, content: string, options?: { model?: string; temperature?: number }) {
+    const token = getToken();
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    return fetch(
+      `${BASE_URL}/projects/${projectId}/workspaces/${workspaceId}/chat`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          content,
+          model: options?.model,
+          temperature: options?.temperature,
+        }),
+      },
+    );
+  },
+};
+
+/** 读取 Agent SSE 事件流 */
+export async function readAgentSSEStream(
+  response: Response,
+  onEvent: (event: AgentSSEEvent) => void,
+): Promise<void> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('No response body');
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.startsWith('data: ')) continue;
+      const raw = trimmed.slice(6);
+      try {
+        const event = JSON.parse(raw) as AgentSSEEvent;
+        onEvent(event);
+      } catch {
+        // 忽略解析失败的行
+      }
+    }
+  }
+}

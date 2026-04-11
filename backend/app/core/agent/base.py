@@ -57,7 +57,6 @@ class AgentConfig(BaseModel):
     max_tokens: Optional[int] = Field(None, gt=0, description="最大 token 数")
     max_loop: int = Field(default=20, ge=1, le=100, description="最大循环次数")
     tools: List[Dict[str, Any]] = Field(default_factory=list, description="工具列表")
-    skill_names: List[str] = Field(default_factory=list, description="引用的 Skill 名称列表")
 
 
 class AgentMessage(BaseModel):

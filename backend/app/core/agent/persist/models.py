@@ -4,13 +4,31 @@
 只保留消息表，session 元信息由调用方业务表管理。
 """
 
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from sqlalchemy import DateTime, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
+
+
+@dataclass
+class MessageRecord:
+    """
+    消息记录的轻量数据类。
+
+    供 Redis 等非 ORM 持久化策略构造，确保 AgentLoop 可用统一字段访问。
+    DBPersistStrategy 直接返回 AgentMessageRecord（ORM），字段完全兼容。
+    """
+    role: str
+    content: str
+    seq: int
+    tool_call_id: Optional[str] = None
+    tool_name: Optional[str] = None
+    usage: Optional[Dict[str, Any]] = None
+    extra_metadata: Optional[Dict[str, Any]] = field(default=None)
 
 
 class AgentMessageRecord(Base):
@@ -67,12 +85,17 @@ class AgentMessageRecord(Base):
         String(100),
         nullable=True,
     )
+    usage: Mapped[Optional[dict]] = mapped_column(
+        JSON,
+        nullable=True,
+        comment="LLM token 用量，仅 assistant 消息填充",
+    )
     extra_metadata: Mapped[Optional[dict]] = mapped_column(
         JSON,
         nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
     )

@@ -19,10 +19,12 @@ def merge_usage(
 
     merged: Dict[str, Any] = dict(base or {})
     for key, value in (delta or {}).items():
-        if isinstance(value, (int, float)) and isinstance(merged.get(key), (int, float)):
+        if value is None:
+            # None 不覆盖已有数值，跳过
+            if key not in merged:
+                merged[key] = value
+        elif isinstance(value, (int, float)) and isinstance(merged.get(key), (int, float)):
             merged[key] += value
-        elif isinstance(value, (int, float)) and key not in merged:
-            merged[key] = value
         else:
             merged[key] = value
     return merged

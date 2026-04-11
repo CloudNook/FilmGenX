@@ -260,6 +260,7 @@ class GeminiAdapter(ProviderAdapter):
             usage = {
                 "prompt_tokens": getattr(um, "prompt_token_count", None),
                 "completion_tokens": getattr(um, "candidates_token_count", None),
+                "thinking_tokens": getattr(um, "thoughts_token_count", None),
                 "total_tokens": getattr(um, "total_token_count", None),
             }
 
@@ -304,6 +305,7 @@ class GeminiAdapter(ProviderAdapter):
 
         accumulated_tool_calls: list[StructuredToolCall] = []
         finish_reason = None
+        final_usage = None
 
         async for chunk in await self._client.aio.models.generate_content_stream(
             model=kwargs.get("model", "gemini-3-flash-preview"),
@@ -315,6 +317,16 @@ class GeminiAdapter(ProviderAdapter):
 
             candidate = chunk.candidates[0]
             finish_reason = candidate.finish_reason
+
+            # 只在终止 chunk（finish_reason 非空）时读取 usage_metadata
+            if finish_reason and hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
+                um = chunk.usage_metadata
+                final_usage = {
+                    "prompt_tokens": getattr(um, "prompt_token_count", None),
+                    "completion_tokens": getattr(um, "candidates_token_count", None),
+                    "thinking_tokens": getattr(um, "thoughts_token_count", None),
+                    "total_tokens": getattr(um, "total_token_count", None),
+                }
 
             text_parts = []
             chunk_tool_calls = []
@@ -361,11 +373,12 @@ class GeminiAdapter(ProviderAdapter):
                     finish_reason=None,
                 )
 
-        # 发出携带完整 finish_reason 和 tool_calls 的终止 chunk
+        # 发出携带完整 finish_reason、tool_calls 和 usage 的终止 chunk
         yield LLMResponse(
             content="",
             tool_calls=accumulated_tool_calls,
             finish_reason=self._normalize_finish_reason(finish_reason),
+            usage=final_usage,
         )
 
     def to_tool_schema(self, tools: List[Dict[str, Any]]) -> Any:

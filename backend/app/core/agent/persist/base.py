@@ -7,7 +7,10 @@ Agent 每次从 LLM 收到消息后，通过此接口写入持久化存储。
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING, Union
+
+if TYPE_CHECKING:
+    from app.core.agent.persist.models import AgentMessageRecord, MessageRecord
 
 
 class PersistStrategy(ABC):
@@ -25,14 +28,15 @@ class PersistStrategy(ABC):
     async def load_messages(
         self,
         session_id: str,
-    ) -> List[Dict[str, Any]]:
+    ) -> "List[Union[AgentMessageRecord, MessageRecord]]":
         """
         加载 session 的全部历史消息，按 seq 升序排列。
 
         在 AgentLoop.run() 开始时调用，用于恢复多轮对话上下文。
 
         Returns:
-            消息列表，每项包含 role / content / tool_call_id / tool_name / metadata
+            消息记录列表，字段：role / content / seq / tool_call_id /
+            tool_name / usage / extra_metadata
         """
         ...
 
@@ -68,10 +72,3 @@ class PersistStrategy(ABC):
         """
         ...
 
-    async def flush(self) -> None:
-        """
-        同步当前批次的待写入消息（DB 等事务型策略可选择 flush，最终提交由调用方决定）。
-
-        在 AgentLoop.run() 结束时由调用方触发，确保后续读取能看到本批消息。
-        """
-        pass

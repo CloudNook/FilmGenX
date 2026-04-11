@@ -2,13 +2,14 @@
 Redis 持久化策略实现。
 
 每条消息用 RPUSH 追加到 Redis List（agent:messages:{session_id}），
-读取时用 LRANGE 全量拉取，按 seq 排序。
+读取时用 LRANGE 全量拉取，按 seq 排序，返回 MessageRecord 列表。
 """
 
-from typing import Any, Dict, List, Optional
 import json
+from typing import Any, Dict, List, Optional
 
 from app.core.agent.persist.base import PersistStrategy
+from app.core.agent.persist.models import MessageRecord
 
 # 会话消息默认保留 7 天
 _DEFAULT_TTL_SECONDS = 7 * 24 * 3600
@@ -34,12 +35,24 @@ class RedisPersistStrategy(PersistStrategy):
     async def load_messages(
         self,
         session_id: str,
-    ) -> List[Dict[str, Any]]:
+    ) -> List[MessageRecord]:
         from app.utils import redis_client
 
         raw_list = await redis_client.lrange(f"agent:messages:{session_id}", 0, -1)
-        messages = [json.loads(item) for item in raw_list]
-        return sorted(messages, key=lambda m: m.get("seq", 0))
+        records = [json.loads(item) for item in raw_list]
+        records.sort(key=lambda m: m.get("seq", 0))
+        return [
+            MessageRecord(
+                role=r["role"],
+                content=r["content"],
+                seq=r["seq"],
+                tool_call_id=r.get("tool_call_id"),
+                tool_name=r.get("tool_name"),
+                usage=r.get("usage"),
+                extra_metadata=r.get("metadata") or {},
+            )
+            for r in records
+        ]
 
     async def append_message(
         self,
@@ -53,6 +66,7 @@ class RedisPersistStrategy(PersistStrategy):
         tool_call_id: Optional[str] = None,
         tool_name: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        usage: Optional[Dict[str, Any]] = None,
     ) -> None:
         from app.utils import redis_client
 
@@ -66,8 +80,8 @@ class RedisPersistStrategy(PersistStrategy):
             "seq": seq,
             "tool_call_id": tool_call_id,
             "tool_name": tool_name,
+            "usage": usage,
             "metadata": metadata or {},
         }
         await redis_client.rpush(key, json.dumps(msg, ensure_ascii=False))
-        # 每次写入后刷新 TTL，保证活跃会话不过期
         await redis_client.expire(key, self.ttl)

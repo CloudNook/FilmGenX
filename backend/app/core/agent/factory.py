@@ -71,7 +71,6 @@ def create_agent(
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     tools: Optional[List[Dict[str, Any]]] = None,
-    skills: Optional[List[str]] = None,
     skill_lite_list: Optional[List[Dict[str, Any]]] = None,
     max_loop: int = 20,
     persist: PersistArg = None,
@@ -91,7 +90,6 @@ def create_agent(
         temperature:     温度参数
         max_tokens:      最大 token 数
         tools:           工具列表
-        skills:          Skill 名称列表（仅记录到 config，技能注入由 skill_lite_list 控制）
         skill_lite_list: Skill 摘要列表（从 DB 加载，会注入到 system prompt）
         max_loop:        最大循环次数
         persist:         持久化策略，"redis" | PersistStrategy 实例 | None
@@ -101,7 +99,6 @@ def create_agent(
     Returns:
         Agent 实例，需调用 run() / stream() 执行
     """
-    # 注入 Skill 摘要到 system prompt
     full_prompt = _build_system_prompt_with_skills(prompt, skill_lite_list or [])
 
     config = AgentConfig(
@@ -111,7 +108,6 @@ def create_agent(
         temperature=temperature,
         max_tokens=max_tokens,
         tools=tools or [],
-        skill_names=skills or [],
         max_loop=max_loop,
     )
 
