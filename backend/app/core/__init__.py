@@ -26,3 +26,12 @@
 #   middleware/     - Agent 中间件系统
 #       chain.py    - AgentMiddleware 基类、MiddlewareChain 链式调用
 #       builtin.py  - 内置中间件（LoggingMiddleware、PersistMiddleware）
+#
+#   supervisor/     - Supervisor 元 Agent（动态调度 SubAgent）
+#       supervisor.py   - SupervisorAgent 核心类
+#       factory.py      - create_supervisor() 工厂
+#       tools.py        - call_sub_agent / call_reviewer / get_workflow_state
+#       context.py      - SupervisorContext 工作内存
+#       session.py      - SupervisorSession 管理
+#       events.py       - SupervisorStreamEvent 事件类型
+#       reviewer.py     - Reviewer Agent 配置
