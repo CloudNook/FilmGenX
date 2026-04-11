@@ -41,6 +41,12 @@ ALL_TOOLS = [
 
 SESSION_ID = "test_stream_session_001"
 PERSIST = RedisPersistStrategy()
+THINKING_TEST_PROMPT = (
+    "你是一个严谨的助手。可以先使用内部思考(thinking)来分析问题，"
+    "但最终回答中不要输出你的思考过程、推理步骤，"
+    "也不要输出“思考过程”之类的标题。"
+    "请直接给出结论和必要的简洁解释。"
+)
 
 
 def _event_label(event) -> str:
@@ -99,7 +105,7 @@ async def test_stream_with_thinking():
     agent = create_agent(
         agent_name="assistant",
         session_id=SESSION_ID,
-        prompt="你是一个严谨的助手。在给出最终回答之前，必须先用思考过程(thinking)详细分析问题、列出推理步骤，最后再给出结论。",
+        prompt=THINKING_TEST_PROMPT,
         model="gemini-3-pro-preview",
         max_loop=5,
         persist=PERSIST,
@@ -128,6 +134,9 @@ async def test_stream_with_thinking():
         print(f"思考内容预览: {thinking_buffer[:100]}...")
     else:
         print("注意：未收到 ThinkingEvent（当前模型可能不支持 thinking 输出）")
+
+    if "思考过程" in text_buffer:
+        print("警告：最终 TextEvent 仍包含“思考过程”字样，这更像是模型/提示词行为，不是事件分流错误。")
 
 
 async def test_stream_with_tools():

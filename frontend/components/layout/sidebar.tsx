@@ -15,6 +15,7 @@ import {
   ChevronRight,
   Home,
   Box,
+  Brain,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
@@ -35,7 +36,7 @@ export function Sidebar({ projectId }: SidebarProps) {
   const pathname = usePathname();
 
   const mainNavItems: NavItem[] = [
-    { title: '首页', href: '/', icon: Home },
+    { title: '首页', href: '/home', icon: Home },
     { title: '项目列表', href: '/projects', icon: FolderOpen },
   ];
 
@@ -51,6 +52,7 @@ export function Sidebar({ projectId }: SidebarProps) {
 
   const bottomNavItems: NavItem[] = [
     { title: '全局设置', href: '/settings', icon: Settings },
+    { title: 'AI 技能库', href: '/admin/skills', icon: Brain },
   ];
 
   const renderNavItem = (item: NavItem) => {

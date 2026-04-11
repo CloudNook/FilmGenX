@@ -8,7 +8,7 @@ from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
     auth, projects, scenes, storyboards, shots, shot_groups, characters, character_images,
-    assets, tasks, conversations, locations, location_images, dashboard
+    assets, tasks, conversations, locations, location_images, dashboard, skills
 )
 
 api_router = APIRouter()
@@ -20,7 +20,7 @@ api_router.include_router(dashboard.router,      prefix="/projects/{project_id}/
 api_router.include_router(scenes.router,         prefix="/projects/{project_id}/scenes",                tags=["高光片段"])
 api_router.include_router(storyboards.router,    prefix="/scenes/{scene_id}/storyboard",                tags=["分镜脚本"])
 api_router.include_router(shots.router,          prefix="/storyboards/{storyboard_id}/shots",           tags=["镜头"])
-api_router.include_router(shot_groups.router,    prefix="/storyboards/{storyboard_id}/groups",          tags=["分镜组"])
+api_router.include_router(shot_groups.router,   prefix="/storyboards/{storyboard_id}/groups",          tags=["分镜组"])
 api_router.include_router(characters.router,     prefix="/projects/{project_id}/characters",            tags=["角色"])
 api_router.include_router(
     character_images.router,
@@ -35,3 +35,6 @@ api_router.include_router(
 )
 api_router.include_router(assets.router,         prefix="/projects/{project_id}/assets",                tags=["素材"])
 api_router.include_router(tasks.router,          prefix="/tasks",                                       tags=["生成任务"])
+
+# Admin 路由
+api_router.include_router(skills.router, prefix="/admin/skills", tags=["Admin - Skill 管理"])

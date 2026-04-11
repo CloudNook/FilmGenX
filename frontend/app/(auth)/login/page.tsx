@@ -154,7 +154,7 @@ export default function LoginPage() {
         opacity: 0,
         duration: 0.5,
         ease: 'power2.in',
-        onComplete: () => router.push('/projects'),
+        onComplete: () => router.push('/home'),
       });
     } catch (err: any) {
       setError(err.message || '登录失败，请重试');

@@ -542,6 +542,7 @@ export interface CharacterResponse {
   project_id: number;
   char_code: string;
   name: string;
+  role_description?: string | null;
   pic_name: string | null;
   pic_url: string | null;
   created_at: string;
@@ -1166,6 +1167,134 @@ export const locationsApi = {
       `/projects/${projectId}/locations/${locationId}/images/pic`,
       { method: 'DELETE' },
     );
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Skills API
+// ---------------------------------------------------------------------------
+
+export interface SkillParseResult {
+  fields: Record<string, unknown>;
+  missing_fields: string[];
+  warnings: { field: string; message: string }[];
+  raw_markdown: string;
+}
+
+export interface SkillResponse {
+  id: number;
+  created_at: string;
+  updated_at: string;
+  name: string;
+  title: string | null;
+  description: string;
+  content: string | null;
+  parameters: Record<string, unknown>;
+  examples: string[];
+  constraints: string[];
+  category: string | null;
+  difficulty: string | null;
+  tags: string[];
+  author: string | null;
+  raw_markdown: string | null;
+  is_active: boolean;
+  version: number;
+  metadata: Record<string, unknown>;
+}
+
+export interface SkillCreate {
+  name: string;
+  title?: string;
+  description: string;
+  content?: string;
+  parameters?: Record<string, unknown>;
+  examples?: string[];
+  constraints?: string[];
+  category?: string;
+  difficulty?: string;
+  tags?: string[];
+  author?: string;
+  raw_markdown?: string;
+  is_active?: boolean;
+  metadata?: Record<string, unknown>;
+}
+
+export interface SkillUpdate {
+  title?: string;
+  description?: string;
+  content?: string;
+  parameters?: Record<string, unknown>;
+  examples?: string[];
+  constraints?: string[];
+  category?: string;
+  difficulty?: string;
+  tags?: string[];
+  author?: string;
+  raw_markdown?: string;
+  is_active?: boolean;
+  metadata?: Record<string, unknown>;
+}
+
+export interface SkillUploadResponse {
+  skill: SkillParseResult;
+  existing: SkillResponse | null;
+  is_update: boolean;
+}
+
+export const skillsApi = {
+  /** 上传并解析 Markdown */
+  upload(content: string) {
+    return request<SkillUploadResponse>('/admin/skills/upload', {
+      method: 'POST',
+      body: { content },
+    });
+  },
+
+  /** 仅解析 Markdown，不保存 */
+  preview(content: string) {
+    return request<SkillParseResult>('/admin/skills/preview', {
+      method: 'POST',
+      body: { content },
+    });
+  },
+
+  list(page = 1, pageSize = 20, category?: string, isActive?: boolean) {
+    const params = new URLSearchParams({
+      page: String(page),
+      page_size: String(pageSize),
+    });
+    if (category) params.set('category', category);
+    if (isActive !== undefined) params.set('is_active', String(isActive));
+    return request<PageResponse<SkillResponse>>(
+      `/admin/skills?${params}`,
+      { method: 'GET' },
+    );
+  },
+
+  get(name: string) {
+    return request<SkillResponse>(`/admin/skills/${name}`, { method: 'GET' });
+  },
+
+  create(data: SkillCreate) {
+    return request<SkillResponse>('/admin/skills', {
+      method: 'POST',
+      body: data,
+    });
+  },
+
+  update(name: string, data: SkillUpdate) {
+    return request<SkillResponse>(`/admin/skills/${name}`, {
+      method: 'PUT',
+      body: data,
+    });
+  },
+
+  delete(name: string) {
+    return request<void>(`/admin/skills/${name}`, { method: 'DELETE' });
+  },
+
+  downloadMarkdown(name: string) {
+    return request<string>(`/admin/skills/${name}/markdown`, { method: 'GET' });
   },
 };
 

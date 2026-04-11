@@ -17,11 +17,12 @@ import { useAuth } from '@/lib/auth';
 
 interface HeaderProps {
   title?: string;
+  description?: string;
   showSearch?: boolean;
   breadcrumbs?: Array<{ label: string; href?: string }>;
 }
 
-export function Header({ title, showSearch = true, breadcrumbs }: HeaderProps) {
+export function Header({ title, description, showSearch = true, breadcrumbs }: HeaderProps) {
   const { user, logout } = useAuth();
   const router = useRouter();
 
@@ -58,7 +59,12 @@ export function Header({ title, showSearch = true, breadcrumbs }: HeaderProps) {
           </nav>
         )}
         {title && !breadcrumbs && (
-          <h1 className="text-xl font-semibold text-foreground">{title}</h1>
+          <div className="min-w-0">
+            <h1 className="text-xl font-semibold text-foreground">{title}</h1>
+            {description ? (
+              <p className="mt-1 max-w-2xl truncate text-sm text-muted-foreground">{description}</p>
+            ) : null}
+          </div>
         )}
       </div>
 

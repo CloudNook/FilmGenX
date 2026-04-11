@@ -55,8 +55,9 @@ class Skill(BaseModel):
     )
     examples: List[str] = Field(default_factory=list, description="使用示例")
     constraints: List[str] = Field(default_factory=list, description="约束条件")
-    metadata: Dict[str, Any] = Field(
+    skill_metadata: Dict[str, Any] = Field(
         default_factory=dict,
+        alias="metadata",
         description="附加元数据（version、author、tags 等）",
     )
 

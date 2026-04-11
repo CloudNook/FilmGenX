@@ -8,6 +8,7 @@ from app.repositories.location import LocationRepository
 from app.repositories.asset import AssetRepository
 from app.repositories.task import TaskRepository
 from app.repositories.conversation import ConversationRepository, MessageRepository
+from app.repositories.skill import SkillRepository
 
 __all__ = [
     "BaseRepository",
@@ -21,4 +22,5 @@ __all__ = [
     "TaskRepository",
     "ConversationRepository",
     "MessageRepository",
+    "SkillRepository",
 ]

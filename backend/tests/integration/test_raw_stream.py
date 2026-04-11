@@ -22,6 +22,13 @@ print(f"API key: {'yes' if key else 'NO'}\n")
 from google import genai
 from google.genai import types
 
+THINKING_TEST_PROMPT = (
+    "你是一个严谨的助手。可以先使用内部思考(thinking)来分析问题，"
+    "但最终回答中不要输出你的思考过程、推理步骤，"
+    "也不要输出“思考过程”之类的标题。"
+    "请直接给出结论和必要的简洁解释。"
+)
+
 
 async def main():
     client = genai.Client(api_key=key)
@@ -30,7 +37,7 @@ async def main():
     config = types.GenerateContentConfig(
         system_instruction={
             "parts": [{
-                "text": "你是一个严谨的助手。在给出最终回答之前，必须先用思考过程(thinking)详细分析问题、列出推理步骤，最后再给出结论。"
+                "text": THINKING_TEST_PROMPT
             }]
         },
         thinking_config=types.ThinkingConfig(thinking_budget=-1, include_thoughts=True),
