@@ -20,10 +20,14 @@ backend/app/core/supervisor/
 ├── tools.py            # call_sub_agent / call_reviewer / get_workflow_state 工具
 ├── reviewer.py         # Reviewer Agent 配置和 prompt
 ├── supervisor.py       # SupervisorAgent 核心类
-└── factory.py          # create_supervisor() 工厂
+├── factory.py          # create_supervisor() 工厂
+├── workflow.py         # SupervisorWorkflow ORM 模型（DB）
+└── workflow_service.py # 流水线元信息读写服务
 
 backend/app/core/
 ├── agent/tool.py       # MODIFY: ToolExecutor 新增 execute_streaming_tool() 方法
+└── agent/persist/
+    └── models.py       # MODIFY: agent_messages 表新增 supervisor_session_id 字段
 
 backend/app/core/tools/
 └── supervisor_tools.py  # 导入 supervisor.tools 以触发 @register_tool 装饰器
@@ -45,6 +49,11 @@ backend/app/core/tools/
 | 8 | SupervisorAgent 核心类 | `supervisor.py` |
 | 9 | create_supervisor() 工厂 | `factory.py` |
 | 10 | 工具注册入口 | `tools/supervisor_tools.py` |
+| 11 | API 路由集成 | `api/supervisor.py` |
+| 12 | `supervisor_workflows` 表 | `agent/persist/models.py` |
+| 13 | `agent_messages` 表加字段 | `agent/persist/models.py` |
+| 14 | SupervisorWorkflow Service | `supervisor/workflow_service.py` |
+| 15 | DB 持久化改造 `call_sub_agent` | `supervisor/tools.py` |
 
 ---
 
@@ -1735,12 +1744,594 @@ cd backend && git add app/api/supervisor.py && git commit -m "feat(api): add POS
 ```
 ---
 
+## Task 12: 新增 `supervisor_workflows` 表
+
+**Files:**
+- Modify: `backend/app/core/agent/persist/models.py`（新增 SupervisorWorkflow ORM 模型）
+- Tests: `backend/app/tests/unit/core/supervisor/test_workflow.py`
+
+**目标**：存储流水线元信息，支持断点续跑和多会话关联查询。
+
+- [ ] **Step 1: 编写测试**
+
+```python
+# backend/app/tests/unit/core/supervisor/test_workflow.py
+import pytest
+from datetime import datetime, timezone
+from app.core.agent.persist.models import SupervisorWorkflow
+
+
+def test_supervisor_workflow_defaults():
+    wf = SupervisorWorkflow(
+        supervisor_session_id="sv-abc123",
+        user_request="生成科幻短片剧本",
+    )
+    assert wf.supervisor_session_id == "sv-abc123"
+    assert wf.current_phase == "init"
+    assert wf.artifacts == {}
+    assert wf.review_history == []
+    assert wf.status == "running"
+
+
+def test_supervisor_workflow_update_artifacts():
+    wf = SupervisorWorkflow(
+        supervisor_session_id="sv-abc123",
+        user_request="生成科幻短片剧本",
+    )
+    wf.artifacts["outline"] = {"title": "星际穿越", "scenes": 5}
+    assert wf.artifacts["outline"]["title"] == "星际穿越"
+    wf.current_phase = "outline"
+    assert wf.current_phase == "outline"
+
+
+def test_supervisor_workflow_status_transitions():
+    wf = SupervisorWorkflow(
+        supervisor_session_id="sv-abc123",
+        user_request="生成科幻短片剧本",
+    )
+    assert wf.status == "running"
+    wf.status = "completed"
+    assert wf.status == "completed"
+    wf.status = "failed"
+    assert wf.status == "failed"
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+```bash
+cd backend && python -m pytest app/tests/unit/core/supervisor/test_workflow.py -v
+```
+Expected: FAIL — model not found
+
+- [ ] **Step 3: 编写 ORM 模型（在 models.py 末尾追加）**
+
+```python
+# backend/app/core/agent/persist/models.py 末尾追加
+
+class SupervisorWorkflow(Base):
+    """
+    流水线元信息表。
+
+    记录每个 Supervisor session 的流水线状态：
+    - 当前阶段、产物快照、评估历史
+    - 支持断点续跑和多会话关联查询
+
+    关联关系：
+    - 通过 supervisor_session_id 与 agent_messages.supervisor_session_id 关联
+    - 各 SubAgent 的消息通过 supervisor_session_id 查到对应的完整流水线上下文
+    """
+
+    __tablename__ = "supervisor_workflows"
+
+    supervisor_session_id: Mapped[str] = mapped_column(
+        String(100),
+        primary_key=True,
+        comment="Supervisor session ID（与 agent_messages.supervisor_session_id 对应）",
+    )
+    user_request: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        comment="用户原始需求",
+    )
+    current_phase: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="init",
+        comment="当前阶段：init | outline | script | storyboard | review | done",
+    )
+    artifacts: Mapped[Optional[dict]] = mapped_column(
+        JSON,
+        nullable=True,
+        comment="各阶段产物 JSON：{outline: {...}, script: {...}, storyboard: {...}}",
+    )
+    review_history: Mapped[Optional[list]] = mapped_column(
+        JSON,
+        nullable=True,
+        comment="评估历史：[{\"agent\": \"outline_writer\", \"score\": 8.5, \"passed\": true}, ...]",
+    )
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="running",
+        comment="流水线状态：running | completed | failed",
+    )
+```
+
+- [ ] **Step 4: 运行测试，确认通过**
+
+```bash
+cd backend && python -m pytest app/tests/unit/core/supervisor/test_workflow.py -v
+```
+Expected: PASS
+
+- [ ] **Step 5: 提交**
+
+```bash
+cd backend && git add app/core/agent/persist/models.py app/tests/unit/core/supervisor/test_workflow.py && git commit -m "feat(db): add supervisor_workflows table for pipeline metadata"
+```
+---
+
+## Task 13: `agent_messages` 表新增 `supervisor_session_id` 字段
+
+**Files:**
+- Modify: `backend/app/core/agent/persist/models.py`（AgentMessageRecord 新增字段）
+- Modify: `backend/app/core/agent/persist/db_strategy.py`（DBPersistStrategy 支持新字段）
+- Tests: `backend/app/tests/unit/core/agent/test_db_persist.py`
+
+**目标**：SubAgent 的消息通过 `supervisor_session_id` 关联到 Supervisor，支持"查询某 Supervisor 下所有 SubAgent 消息"的查询。
+
+- [ ] **Step 1: 编写测试**
+
+```python
+# backend/app/tests/unit/core/agent/test_db_persist.py
+import pytest
+from unittest.mock import AsyncMock, MagicMock
+from app.core.agent.persist.db_strategy import DBPersistStrategy
+
+
+def test_append_message_includes_supervisor_session_id():
+    """验证 append_message 接收并写入 supervisor_session_id 字段。"""
+    mock_db = AsyncMock()
+    mock_db.commit = AsyncMock()
+
+    strategy = DBPersistStrategy(db=mock_db)
+
+    import asyncio
+    asyncio.get_event_loop().run_until_complete(
+        strategy.append_message(
+            session_id="sub-outline-001",
+            request_id="req-001",
+            agent_name="outline_writer",
+            role="assistant",
+            content="大纲已生成",
+            seq=0,
+            supervisor_session_id="sv-abc123",  # 新增字段
+        )
+    )
+
+    # 验证 self.db.add 被调用，且 record 包含新字段
+    call_args = mock_db.add.call_args
+    record = call_args[0][0]
+    assert hasattr(record, "supervisor_session_id")
+    assert record.supervisor_session_id == "sv-abc123"
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+```bash
+cd backend && python -m pytest app/tests/unit/core/agent/test_db_persist.py -v
+```
+Expected: FAIL — field not found
+
+- [ ] **Step 3: 修改 AgentMessageRecord（models.py）**
+
+在 `agent_messages` 表定义中，在 `agent_name` 字段后追加：
+
+```python
+# backend/app/core/agent/persist/models.py
+# AgentMessageRecord 中，在 agent_name 字段后追加：
+
+    supervisor_session_id: Mapped[Optional[str]] = mapped_column(
+        String(100),
+        nullable=True,
+        index=True,
+        comment="所属 Supervisor session ID（SubAgent 消息关联到 Supervisor）",
+    )
+```
+
+- [ ] **Step 4: 修改 DBPersistStrategy.append_message()（db_strategy.py）**
+
+```python
+# backend/app/core/agent/persist/db_strategy.py
+# append_message() 方法签名新增参数：
+
+    async def append_message(
+        self,
+        session_id: str,
+        request_id: str,
+        agent_name: str,
+        role: str,
+        content: str,
+        seq: int,
+        *,
+        tool_call_id: Optional[str] = None,
+        tool_name: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        usage: Optional[Dict[str, Any]] = None,
+        supervisor_session_id: Optional[str] = None,  # 新增
+    ) -> None:
+
+        record = AgentMessageRecord(
+            session_id=session_id,
+            request_id=request_id,
+            agent_name=agent_name,
+            role=role,
+            content=content,
+            seq=seq,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            extra_metadata=metadata,
+            usage=usage,
+            supervisor_session_id=supervisor_session_id,  # 新增
+        )
+        self.db.add(record)
+        await self.db.commit()
+```
+
+- [ ] **Step 5: 运行测试，确认通过**
+
+```bash
+cd backend && python -m pytest app/tests/unit/core/agent/test_db_persist.py -v
+```
+Expected: PASS
+
+- [ ] **Step 6: 提交**
+
+```bash
+cd backend && git add app/core/agent/persist/models.py app/core/agent/persist/db_strategy.py app/tests/unit/core/agent/test_db_persist.py && git commit -m "feat(db): add supervisor_session_id to agent_messages table"
+```
+---
+
+## Task 14: SupervisorWorkflow Service
+
+**Files:**
+- Create: `backend/app/core/supervisor/workflow_service.py`
+- Tests: `backend/app/tests/unit/core/supervisor/test_workflow_service.py`
+
+**目标**：封装流水线元信息的 DB 读写操作，供 `call_sub_agent` 工具调用。
+
+- [ ] **Step 1: 编写测试**
+
+```python
+# backend/app/tests/unit/core/supervisor/test_workflow_service.py
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+
+
+def test_create_workflow():
+    with patch("app.core.supervisor.workflow_service.SupervisorWorkflow") as mock_model:
+        from app.core.supervisor.workflow_service import SupervisorWorkflowService
+
+        mock_db = AsyncMock()
+        service = SupervisorWorkflowService(db=mock_db)
+
+        import asyncio
+        asyncio.get_event_loop().run_until_complete(
+            service.create_workflow(
+                supervisor_session_id="sv-abc123",
+                user_request="生成科幻短片剧本",
+            )
+        )
+        mock_db.add.assert_called_once()
+        mock_db.commit.assert_called_once()
+
+
+def test_update_artifacts():
+    with patch("app.core.supervisor.workflow_service.SupervisorWorkflow") as mock_model:
+        from app.core.supervisor.workflow_service import SupervisorWorkflowService
+
+        mock_db = AsyncMock()
+        mock_db.execute = AsyncMock()
+
+        # Mock 查到的 workflow
+        mock_wf = MagicMock()
+        mock_wf.artifacts = {}
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.first.return_value = mock_wf
+        mock_db.execute = AsyncMock(return_value=mock_result)
+
+        service = SupervisorWorkflowService(db=mock_db)
+        import asyncio
+        asyncio.get_event_loop().run_until_complete(
+            service.update_artifacts(
+                supervisor_session_id="sv-abc123",
+                phase="outline",
+                artifacts={"outline": {"title": "星际穿越"}},
+            )
+        )
+        assert mock_wf.current_phase == "outline"
+        assert mock_wf.artifacts["outline"] == {"title": "星际穿越"}
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+```bash
+cd backend && python -m pytest app/tests/unit/core/supervisor/test_workflow_service.py -v
+```
+Expected: FAIL — module not found
+
+- [ ] **Step 3: 编写实现**
+
+```python
+# backend/app/core/supervisor/workflow_service.py
+"""
+流水线元信息读写服务。
+
+封装 supervisor_workflows 表的 DB 操作：
+- 创建流水线记录
+- 更新阶段状态
+- 追加产物快照
+- 追加评估记录
+- 查询流水线状态
+"""
+
+import json
+import logging
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.agent.persist.models import SupervisorWorkflow
+
+if TYPE_CHECKING:
+    pass
+
+logger = logging.getLogger(__name__)
+
+
+class SupervisorWorkflowService:
+    """流水线元信息读写服务。"""
+
+    def __init__(self, db: "AsyncSession"):
+        self.db = db
+
+    async def create_workflow(
+        self,
+        supervisor_session_id: str,
+        user_request: str,
+    ) -> SupervisorWorkflow:
+        """
+        创建新的流水线记录。
+
+        在 SupervisorAgent 创建时调用。
+        """
+        workflow = SupervisorWorkflow(
+            supervisor_session_id=supervisor_session_id,
+            user_request=user_request,
+            current_phase="init",
+            artifacts={},
+            review_history=[],
+            status="running",
+        )
+        self.db.add(workflow)
+        await self.db.commit()
+        logger.info(f"[WorkflowService] created workflow sv={supervisor_session_id}")
+        return workflow
+
+    async def get_workflow(
+        self,
+        supervisor_session_id: str,
+    ) -> Optional[SupervisorWorkflow]:
+        """查询流水线记录。"""
+        stmt = select(SupervisorWorkflow).where(
+            SupervisorWorkflow.supervisor_session_id == supervisor_session_id
+        )
+        result = await self.db.execute(stmt)
+        return result.scalars().first()
+
+    async def update_phase(
+        self,
+        supervisor_session_id: str,
+        phase: str,
+    ) -> None:
+        """更新当前阶段。call_sub_agent 完成后调用。"""
+        workflow = await self.get_workflow(supervisor_session_id)
+        if workflow is None:
+            logger.warning(f"[WorkflowService] workflow not found: {supervisor_session_id}")
+            return
+        workflow.current_phase = phase
+        await self.db.commit()
+        logger.info(f"[WorkflowService] updated phase sv={supervisor_session_id} -> {phase}")
+
+    async def update_artifacts(
+        self,
+        supervisor_session_id: str,
+        phase: str,
+        artifacts: Dict[str, Any],
+    ) -> None:
+        """
+        更新流水线产物。
+
+        call_sub_agent 完成后，将 SubAgent 的 schema_data 追加到 artifacts。
+        同时更新 current_phase。
+        """
+        workflow = await self.get_workflow(supervisor_session_id)
+        if workflow is None:
+            return
+
+        current = dict(workflow.artifacts or {})
+        current[phase] = artifacts
+        workflow.artifacts = current
+        workflow.current_phase = phase
+        await self.db.commit()
+        logger.info(
+            f"[WorkflowService] updated artifacts sv={supervisor_session_id} "
+            f"phase={phase}, artifact_keys={list(current.keys())}"
+        )
+
+    async def append_review(
+        self,
+        supervisor_session_id: str,
+        agent_name: str,
+        score: float,
+        passed: bool,
+        feedback: str,
+    ) -> None:
+        """追加评估记录。call_reviewer 完成后调用。"""
+        workflow = await self.get_workflow(supervisor_session_id)
+        if workflow is None:
+            return
+
+        history = list(workflow.review_history or [])
+        history.append({
+            "agent": agent_name,
+            "score": score,
+            "passed": passed,
+            "feedback": feedback,
+        })
+        workflow.review_history = history
+        await self.db.commit()
+        logger.info(
+            f"[WorkflowService] appended review sv={supervisor_session_id} "
+            f"agent={agent_name} score={score}"
+        )
+
+    async def complete_workflow(
+        self,
+        supervisor_session_id: str,
+        status: str = "completed",
+    ) -> None:
+        """标记流水线结束（completed / failed）。"""
+        workflow = await self.get_workflow(supervisor_session_id)
+        if workflow is None:
+            return
+        workflow.status = status
+        await self.db.commit()
+        logger.info(f"[WorkflowService] workflow {supervisor_session_id} -> {status}")
+```
+
+- [ ] **Step 4: 运行测试，确认通过**
+
+```bash
+cd backend && python -m pytest app/tests/unit/core/supervisor/test_workflow_service.py -v
+```
+Expected: PASS
+
+- [ ] **Step 5: 提交**
+
+```bash
+cd backend && git add app/core/supervisor/workflow_service.py app/tests/unit/core/supervisor/test_workflow_service.py && git commit -m "feat(supervisor): add SupervisorWorkflowService for pipeline metadata CRUD"
+```
+---
+
+## Task 15: `call_sub_agent` 工具集成 DB 持久化
+
+**Files:**
+- Modify: `backend/app/core/supervisor/tools.py`（call_sub_agent 写入 DB）
+- Modify: `backend/app/core/agent/tool.py`（execute_streaming_tool 支持 db 参数注入）
+
+**目标**：SubAgent 执行完成后，将产物写入 `supervisor_workflows` 表，并将 `supervisor_session_id` 写入 `agent_messages`。
+
+- [ ] **Step 1: 确认 execute_streaming_tool 已有 db 注入逻辑**
+
+查看 Task 4 实现的 `execute_streaming_tool()`，确认其中已有：
+
+```python
+kwargs = dict(tool_call.arguments)
+if self.db and "db" not in kwargs:
+    kwargs["db"] = self.db
+```
+
+如果缺少，补上。
+
+- [ ] **Step 2: 修改 call_sub_agent 签名，注入 db 和 workflow_service**
+
+在 `call_sub_agent` 函数中，增加 `workflow_service` 参数（ToolExecutor 通过 kwargs 注入）：
+
+```python
+async def call_sub_agent(
+    sub_agent_name: str,
+    task_description: str,
+    context_snapshot: str = "",
+    supervisor_context: Optional[SupervisorContext] = None,
+    db=None,  # ToolExecutor 注入
+    workflow_service=None,  # 新增：WorkflowService 实例
+) -> AsyncGenerator[SubAgentEndEvent, None]:
+```
+
+- [ ] **Step 3: SubAgent 执行完毕后写入 DB**
+
+在 `call_sub_agent` 的 `yield SubAgentEndEvent` 之前，添加：
+
+```python
+    # SubAgent 执行完毕后，写入 DB
+    if workflow_service is not None and supervisor_context is not None:
+        try:
+            await workflow_service.update_artifacts(
+                supervisor_session_id=supervisor_context.supervisor_session_id,
+                phase=sub_agent_name,
+                artifacts=accumulated_result.get("schema_data") or accumulated_result.get("raw_output") or {},
+            )
+        except Exception as e:
+            logger.warning(f"[call_sub_agent] failed to persist artifacts: {e}")
+```
+
+- [ ] **Step 4: 修改 SupervisorAgent 构造时注入 workflow_service**
+
+在 `supervisor.py` 的 `__init__` 中，将 `SupervisorWorkflowService` 实例传入 tools 的上下文：
+
+```python
+    def __init__(self, ...):
+        # ...
+        self._tool_ctx = {
+            "supervisor_context": self.context,
+            "workflow_service": None,  # 由 factory 或 API 层通过此属性注入
+        }
+```
+
+在 `factory.py` 的 `create_supervisor()` 中，构造 SupervisorAgent 后注入 service：
+
+```python
+def create_supervisor(
+    user_request: str,
+    *,
+    db: "AsyncSession" = None,  # 新增参数
+    ...
+) -> SupervisorAgent:
+    supervisor = SupervisorAgent(...)
+    if db is not None:
+        from app.core.supervisor.workflow_service import SupervisorWorkflowService
+        supervisor._tool_ctx["workflow_service"] = SupervisorWorkflowService(db=db)
+        # 创建流水线记录
+        import asyncio
+        asyncio.get_event_loop().run_until_complete(
+            supervisor._tool_ctx["workflow_service"].create_workflow(
+                supervisor_session_id=supervisor.supervisor_session_id,
+                user_request=user_request,
+            )
+        )
+    return supervisor
+```
+
+- [ ] **Step 5: 提交**
+
+```bash
+cd backend && git add app/core/supervisor/tools.py app/core/supervisor/supervisor.py app/core/supervisor/factory.py && git commit -m "feat(supervisor): persist workflow state to DB in call_sub_agent"
+```
+---
+
 ## 自检清单
 
-- [ ] 所有测试路径存在：`test_context.py`, `test_session.py`, `test_events.py`, `test_tools.py`, `test_reviewer.py`, `test_supervisor.py`, `test_factory.py`
-- [ ] Task 1-11 所有步骤完成并提交
+- [ ] 所有测试路径存在：`test_context.py`, `test_session.py`, `test_events.py`, `test_tools.py`, `test_reviewer.py`, `test_supervisor.py`, `test_factory.py`, `test_workflow.py`, `test_workflow_service.py`, `test_db_persist.py`
+- [ ] Task 1-15 所有步骤完成并提交
 - [ ] `call_sub_agent`, `call_reviewer`, `get_workflow_state` 均已注册到 ToolRegistry
 - [ ] API 路由 `/supervisor/stream` 可访问
+- [ ] `supervisor_workflows` 表已创建（含 artifacts/review_history/status 字段）
+- [ ] `agent_messages` 表已加 `supervisor_session_id` 字段
+- [ ] SubAgent 完成后产物写入 `supervisor_workflows.artifacts`
+- [ ] 每个 Review 结果追加到 `supervisor_workflows.review_history`
 - [ ] 无 "TBD"/"TODO" 占位符
 - [ ] SupervisorContext 不被 SubAgent 直接访问（隔离原则）
 - [ ] SubAgent 工具支持 async generator 流式事件透传
+- [ ] 多用户并发无数据串扰（每个 Supervisor 独立 session_id）
