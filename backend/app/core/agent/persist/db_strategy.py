@@ -55,6 +55,7 @@ class DBPersistStrategy(PersistStrategy):
         tool_name: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         usage: Optional[Dict[str, Any]] = None,
+        supervisor_session_id: Optional[str] = None,
     ) -> None:
         record = AgentMessageRecord(
             session_id=session_id,
@@ -67,6 +68,7 @@ class DBPersistStrategy(PersistStrategy):
             tool_name=tool_name,
             extra_metadata=metadata,
             usage=usage,
+            supervisor_session_id=supervisor_session_id,
         )
         self.db.add(record)
         await self.db.commit()
