@@ -55,23 +55,29 @@ class AgentConfig(BaseModel):
     model: str = Field(default="gemini-3-flash-preview", description="LLM 模型")
     temperature: Optional[float] = Field(None, ge=0, le=2, description="温度参数")
     max_tokens: Optional[int] = Field(None, gt=0, description="最大 token 数")
-    response_schema: Optional[Dict[str, Any]] = Field(None, description="响应 JSON Schema")
     max_loop: int = Field(default=20, ge=1, le=100, description="最大循环次数")
     tools: List[Dict[str, Any]] = Field(default_factory=list, description="工具列表")
     skill_names: List[str] = Field(default_factory=list, description="引用的 Skill 名称列表")
 
 
 class AgentMessage(BaseModel):
-    """Agent 内部消息结构。"""
+    """
+    Agent 内部消息结构。
+
+    这份消息历史主要用于：
+    - 下一轮 LLM 调用时恢复上下文
+    - 调试 Agent 内部 think/act/observe 过程
+    - 持久化会话记录
+    """
 
     role: str = Field(..., description="user | assistant | system | tool")
-    content: str = Field(default="", description="消息内容")
-    thinking: str = Field(default="", description="思考过程（assistant 消息专用）")
+    content: str = Field(default="", description="消息内容；assistant/tool/user 的原始文本")
+    thinking: str = Field(default="", description="思考过程，仅 assistant 消息使用，不一定会展示给最终用户")
     agent_name: Optional[str] = Field(None, description="所属 Agent 名称")
     tool_call_id: Optional[str] = Field(None, description="工具调用 ID")
     tool_name: Optional[str] = Field(None, description="调用的工具名称")
     seq: int = Field(default=0, description="消息序号（用于跨请求排序）")
-    metadata: Dict[str, Any] = Field(default_factory=dict, description="附加元数据")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="附加元数据，用于调试、持久化和中间件扩展")
 
 
 class ToolCall(BaseModel):
@@ -86,19 +92,26 @@ class AgentResult(BaseModel):
     """
     Agent 执行结果。
 
-    包含 agent_id、request_id、schema_data 等返回数据。
+    这是业务侧最终消费的结果对象。
+
+    设计上：
+    - `messages` 更偏向调试/追踪 Agent 内部过程
+    - `raw_output` 是最终自然语言结论
+    - `schema_data` 是给业务代码直接使用的结构化结果
     """
 
     agent_id: str = Field(default_factory=lambda: str(uuid4()), description="Agent 实例 ID")
     agent_name: str = Field(..., description="Agent 名称")
     request_id: str = Field(default_factory=lambda: str(uuid4()), description="本次请求 ID")
-    loop_count: int = Field(default=0, description="本次执行的循环次数")
-    messages: List[AgentMessage] = Field(default_factory=list, description="完整消息历史")
-    schema_data: Optional[Dict[str, Any]] = Field(None, description="结构化 Schema 数据")
-    raw_output: Optional[str] = Field(None, description="原始文本输出")
-    error: Optional[str] = Field(None, description="错误信息")
-    finished: bool = Field(default=False, description="是否正常结束")
-    finished_at: Optional[datetime] = Field(None, description="结束时间")
+    loop_count: int = Field(default=0, description="本次执行的循环次数，便于判断 Agent 在多少轮内完成")
+    messages: List[AgentMessage] = Field(default_factory=list, description="完整消息历史，主要用于调试、回放和会话持久化")
+    usage: Optional[Dict[str, Any]] = Field(None, description="累计 token 用量，供 credit/billing/监控使用")
+    schema_data: Optional[Dict[str, Any]] = Field(None, description="最终结构化结果，供业务代码直接消费，例如落库或编排工作流")
+    schema_error: Optional[str] = Field(None, description="最终结构化后处理失败时的错误信息，不影响原始文本结果")
+    raw_output: Optional[str] = Field(None, description="最终自然语言输出，适合展示给用户或写入日志")
+    error: Optional[str] = Field(None, description="Agent 执行失败或提前退出时的错误信息")
+    finished: bool = Field(default=False, description="是否正常完成整个 Agent 流程")
+    finished_at: Optional[datetime] = Field(None, description="本次请求结束时间")
 
 
 class ToolResult(BaseModel):
@@ -116,19 +129,19 @@ class ToolResult(BaseModel):
 
 
 class ThinkingEvent(BaseModel):
-    """LLM 思考过程片段（仅 thinking 模型产生）。"""
+    """LLM 思考过程片段（仅 thinking 模型产生，通常用于前端实时展示调试过程）。"""
     type: Literal["thinking"] = "thinking"
     content: str
 
 
 class TextEvent(BaseModel):
-    """LLM 输出的文本片段。"""
+    """LLM 输出的文本片段（面向前端实时渲染的自然语言内容）。"""
     type: Literal["text"] = "text"
     content: str
 
 
 class ToolStartEvent(BaseModel):
-    """工具开始执行。"""
+    """工具开始执行事件（面向前端展示 Agent 正在调用哪个工具）。"""
     type: Literal["tool_start"] = "tool_start"
     tool_call_id: str
     tool_name: str
@@ -136,7 +149,7 @@ class ToolStartEvent(BaseModel):
 
 
 class ToolEndEvent(BaseModel):
-    """工具执行完毕。"""
+    """工具执行完毕事件（面向前端展示工具结果或错误）。"""
     type: Literal["tool_end"] = "tool_end"
     tool_call_id: str
     tool_name: str
@@ -145,7 +158,13 @@ class ToolEndEvent(BaseModel):
 
 
 class DoneEvent(BaseModel):
-    """流结束，携带完整 AgentResult。"""
+    """
+    流结束事件，携带完整 AgentResult。
+
+    约定上：
+    - 流式过程事件给前端实时消费
+    - DoneEvent.result 给业务代码读取最终结果
+    """
     type: Literal["done"] = "done"
     result: "AgentResult"
 

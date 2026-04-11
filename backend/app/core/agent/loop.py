@@ -18,6 +18,7 @@ from app.core.agent.base import (
 )
 from app.core.agent.llm import LLMAdapter
 from app.core.agent.tool import ToolExecutor
+from app.core.agent.usage import merge_usage
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ class AgentLoop:
 
     循环流程：
         1. Think: 调用 LLM 生成响应（LLMResponse，包含 content + tool_calls）
-        2. Check: 检查 finish_reason / stop signals / schema 完成
+        2. Check: 检查 finish_reason / stop signals
         3. Act: 执行工具（基于结构化 StructuredToolCall）
         4. Observe: 将工具结果加入消息历史（Provider 原生格式）
         5. 继续下一轮循环
@@ -43,7 +44,6 @@ class AgentLoop:
     结束条件：
         - finish_reason == "stop" 且无 tool_calls → 正常结束
         - finish_reason == "tool_calls" 但数量为 0 → 结束
-        - response_schema 模式下：LLM 输出了合法 JSON → 结束
         - 达到 max_loop 上限 → 超限退出
     """
 
@@ -75,25 +75,14 @@ class AgentLoop:
         if self._system_prompt is not None:
             return self._system_prompt
 
-        prompt = self.config.prompt
-
-        # 工具描述已通过 API native function calling 传递，无需重复注入 system prompt
-        if self.config.response_schema:
-            prompt = prompt + (
-                "\n\n## 输出格式要求\n"
-                "请严格按照以下 JSON Schema 输出最终结果：\n"
-                + json.dumps(self.config.response_schema, ensure_ascii=False, indent=2)
-                + "\n\n当完成所有分析后，直接输出 JSON 结果（不需要工具调用）。"
-            )
-
-        self._system_prompt = prompt
+        self._system_prompt = self.config.prompt
         return self._system_prompt
 
     def _check_finished(
         self,
         response: Any,
         text: str,
-    ) -> tuple[bool, Optional[Dict[str, Any]]]:
+    ) -> bool:
         """
         检查是否应该结束循环。
 
@@ -101,33 +90,59 @@ class AgentLoop:
         1. finish_reason == "stop" → 正常结束
         2. finish_reason == "tool_calls" 但无实际调用 → 结束
         3. 停止信号 → 结束（兼容旧模式）
-        4. response_schema 模式：解析 JSON → 结束
-
-        Returns:
-            (should_finish, schema_data)
         """
         finish_reason = getattr(response, "finish_reason", None)
         # 适配器层已归一化为标准字符串，这里只需比较 "stop"
         finish_reason_str = (finish_reason or "").lower()
         if finish_reason_str == "stop":
-            return True, None
+            return True
 
         # 停止信号（兼容纯文本模式）
         if is_stop_signal(text):
-            return True, None
+            return True
 
-        # response_schema 模式：仅在正常结束时解析，避免截断 JSON 被误当有效结果
-        if self.config.response_schema and text and finish_reason_str == "stop":
-            parsed = self.llm.parse_json(text)
-            if parsed is not None:
-                return True, parsed
-
-        return False, None
+        return False
 
     def _add_message(self, role: str, content: str, seq: int = 0, **kwargs) -> AgentMessage:
         msg = {"role": role, "content": content, "seq": seq, **kwargs}
         self.messages.append(msg)
         return AgentMessage(role=role, content=content, seq=seq, agent_name=self.config.agent_name, **kwargs)
+
+    @staticmethod
+    def _serialize_tool_calls(tool_calls: List[Any]) -> List[Dict[str, Any]]:
+        return [
+            {
+                "id": tc.id,
+                "name": tc.name,
+                "arguments": tc.arguments,
+            }
+            for tc in tool_calls
+        ]
+
+    @staticmethod
+    def _serialize_tool_result_content(result: Any) -> str:
+        return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+
+    @staticmethod
+    def _format_tool_result(tool_name: str, result: Any) -> str:
+        return f"[TOOL: {tool_name}] {json.dumps(result, ensure_ascii=False)}"
+
+    def _build_assistant_metadata(
+        self,
+        *,
+        thinking: str = "",
+        tool_calls: Optional[List[Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        metadata: Dict[str, Any] = {}
+        if thinking:
+            metadata["thinking"] = thinking
+        if tool_calls:
+            metadata["tool_calls"] = self._serialize_tool_calls(tool_calls)
+        return metadata or None
+
+    @staticmethod
+    def _add_usage(result: AgentResult, usage: Optional[Dict[str, Any]]) -> None:
+        result.usage = merge_usage(result.usage, usage)
 
     async def _persist(
         self,
@@ -135,6 +150,7 @@ class AgentLoop:
         content: str,
         tool_call_id: Optional[str] = None,
         tool_name: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """写入一条消息，seq 使用当前值后自增。"""
         if self.persist is None:
@@ -150,10 +166,11 @@ class AgentLoop:
             seq=seq,
             tool_call_id=tool_call_id,
             tool_name=tool_name,
+            metadata=metadata,
         )
 
     async def _flush(self) -> None:
-        """提交当前事务（仅 DB 策略需要；Redis 为空操作）。"""
+        """同步当前批次的待写入消息（具体事务边界由持久化策略决定）。"""
         if self.persist is not None:
             await self.persist.flush()
 
@@ -172,6 +189,7 @@ class AgentLoop:
 
         for msg in history:
             role = msg["role"]
+            metadata = msg.get("metadata") or {}
             if role == "tool":
                 self.messages.append({
                     "role": "tool",
@@ -180,10 +198,16 @@ class AgentLoop:
                     "content": msg["content"],
                 })
             else:
-                self.messages.append({
+                restored = {
                     "role": role,
                     "content": msg["content"],
-                })
+                }
+                if role == "assistant":
+                    if metadata.get("thinking"):
+                        restored["thinking"] = metadata["thinking"]
+                    if metadata.get("tool_calls"):
+                        restored["tool_calls"] = metadata["tool_calls"]
+                self.messages.append(restored)
 
         self._seq = max(msg.get("seq", 0) for msg in history) + 1
         logger.info(
@@ -218,9 +242,10 @@ class AgentLoop:
 
                 # Step 1: Think - 调用 LLM，返回 LLMResponse（结构化响应）
                 response = await self.llm.generate(
-                    messages=self.messages,
+                    messages=list(self.messages),
                     system_prompt=self._build_system_prompt(),
                 )
+                self._add_usage(result, response.usage)
 
                 # Step 2: 将 assistant 消息加入历史
                 # 注意：content 即使为空也要写入（content: ""），否则消息历史
@@ -252,7 +277,14 @@ class AgentLoop:
                         agent_name=self.config.agent_name,
                     )
                 )
-                await self._persist("assistant", response.content)
+                await self._persist(
+                    "assistant",
+                    response.content,
+                    metadata=self._build_assistant_metadata(
+                        thinking=response.thinking,
+                        tool_calls=response.tool_calls,
+                    ),
+                )
 
                 # Step 3: 有 tool_calls → 执行工具（优先于 finish_reason 判断）
                 if response.tool_calls:
@@ -283,18 +315,19 @@ class AgentLoop:
                         # 构建 Provider 原生格式的 tool 结果消息
                         # 注意：传原始 result 字符串，不传 json.dumps 过的字符串
                         for tr in tool_results:
+                            raw_content = self._serialize_tool_result_content(tr.result)
                             # 统一格式写入 self.messages，to_request() 负责转为 Provider 格式
                             self.messages.append({
                                 "role": "tool",
                                 "tool_call_id": tr.tool_call_id,
                                 "tool_name": tr.tool_name,
-                                "content": tr.result if isinstance(tr.result, str)
-                                           else json.dumps(tr.result, ensure_ascii=False),
+                                "content": raw_content,
                             })
 
                         for tr in tool_results:
                             # 格式化的 tool 消息用于展示/持久化，不参与 API 调用
-                            formatted = f"[TOOL: {tr.tool_name}] {json.dumps(tr.result, ensure_ascii=False)}"
+                            formatted = self._format_tool_result(tr.tool_name, tr.result)
+                            raw_content = self._serialize_tool_result_content(tr.result)
                             logger.info(
                                 f"[AgentLoop:{self.config.agent_name}] "
                                 f"[Loop {self.loop_count}] Tool result: {tr.tool_name} -> {tr.result!r}"
@@ -310,9 +343,10 @@ class AgentLoop:
                                 )
                             )
                             await self._persist(
-                                "tool", formatted,
+                                "tool", raw_content,
                                 tool_call_id=tr.tool_call_id,
                                 tool_name=tr.tool_name,
+                                metadata={"display_content": formatted, "is_error": tr.is_error},
                             )
 
                     # 工具执行完毕，本轮结束，继续循环让模型生成最终答案
@@ -321,11 +355,10 @@ class AgentLoop:
                     continue
 
                 # Step 4: 无 tool_calls → 检查是否可以结束
-                finished, schema_data = self._check_finished(response, response.content)
+                finished = self._check_finished(response, response.content)
                 if finished:
                     result.finished = True
                     result.finished_at = datetime.now(timezone.utc)
-                    result.schema_data = schema_data
                     result.raw_output = response.content
                     result.loop_count = self.loop_count
                     if self.on_loop_end is not None:
@@ -428,9 +461,10 @@ class AgentLoop:
                 final_chunk: Optional[Any] = None  # LLMResponse，终止 chunk
 
                 async for chunk in self.llm.generate_stream(
-                    messages=self.messages,
+                    messages=list(self.messages),
                     system_prompt=self._build_system_prompt(),
                 ):
+                    self._add_usage(result, chunk.usage)
                     if chunk.thinking:
                         accumulated_thinking += chunk.thinking
                         yield ThinkingEvent(content=chunk.thinking)
@@ -465,7 +499,14 @@ class AgentLoop:
                         agent_name=self.config.agent_name,
                     )
                 )
-                await self._persist("assistant", accumulated_content)
+                await self._persist(
+                    "assistant",
+                    accumulated_content,
+                    metadata=self._build_assistant_metadata(
+                        thinking=accumulated_thinking,
+                        tool_calls=final_chunk.tool_calls if final_chunk else None,
+                    ),
+                )
 
                 # --- Act：有 tool_calls ---
                 if final_chunk.tool_calls:
@@ -494,14 +535,14 @@ class AgentLoop:
                         tool_results = await self.tool_executor.execute_all(tool_calls)
 
                         for tr in tool_results:
+                            raw_content = self._serialize_tool_result_content(tr.result)
                             self.messages.append({
                                 "role": "tool",
                                 "tool_call_id": tr.tool_call_id,
                                 "tool_name": tr.tool_name,
-                                "content": tr.result if isinstance(tr.result, str)
-                                           else json.dumps(tr.result, ensure_ascii=False),
+                                "content": raw_content,
                             })
-                            formatted = f"[TOOL: {tr.tool_name}] {json.dumps(tr.result, ensure_ascii=False)}"
+                            formatted = self._format_tool_result(tr.tool_name, tr.result)
                             logger.info(
                                 f"[AgentLoop:{self.config.agent_name}] "
                                 f"[Loop {self.loop_count}] Tool result: {tr.tool_name} -> {tr.result!r}"
@@ -517,9 +558,10 @@ class AgentLoop:
                                 )
                             )
                             await self._persist(
-                                "tool", formatted,
+                                "tool", raw_content,
                                 tool_call_id=tr.tool_call_id,
                                 tool_name=tr.tool_name,
+                                metadata={"display_content": formatted, "is_error": tr.is_error},
                             )
                             yield ToolEndEvent(
                                 tool_call_id=tr.tool_call_id,
@@ -533,11 +575,10 @@ class AgentLoop:
                     continue
 
                 # --- 无 tool_calls：检查结束 ---
-                finished, schema_data = self._check_finished(final_chunk, accumulated_content)
+                finished = self._check_finished(final_chunk, accumulated_content)
                 if finished:
                     result.finished = True
                     result.finished_at = datetime.now(timezone.utc)
-                    result.schema_data = schema_data
                     result.raw_output = accumulated_content
                     result.loop_count = self.loop_count
                     if self.on_loop_end is not None:

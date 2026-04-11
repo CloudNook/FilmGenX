@@ -14,7 +14,12 @@ Middleware 系统 - Agent 调用拦截与链式执行。
             print(f"[{self.name}] After: {ctx.loop_count}")
 """
 
-from app.core.middleware.builtin import LoggingMiddleware
+from app.core.middleware.builtin import (
+    CreditMiddleware,
+    FinalSchemaResponseMiddleware,
+    LoggingMiddleware,
+    SummaryMiddleware,
+)
 from app.core.middleware.chain import AgentMiddleware, MiddlewareChain, MiddlewareContext, middleware_chain
 
 __all__ = [
@@ -23,4 +28,7 @@ __all__ = [
     "MiddlewareContext",
     "middleware_chain",
     "LoggingMiddleware",
+    "FinalSchemaResponseMiddleware",
+    "CreditMiddleware",
+    "SummaryMiddleware",
 ]

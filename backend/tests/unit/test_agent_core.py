@@ -16,6 +16,7 @@ Agent 框架核心单元测试。
 import asyncio
 import json
 import sys
+import types as python_types
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -42,9 +43,16 @@ from app.core.agent.base import (
     ToolResult,
     ToolStartEvent,
 )
+from app.core.agent.agent import Agent
 from app.core.agent.llm import LLMAdapter
 from app.core.agent.loop import AgentLoop
+from app.core.agent.persist.db_strategy import DBPersistStrategy
 from app.core.middleware.chain import AgentMiddleware, MiddlewareChain, MiddlewareContext
+from app.core.middleware.builtin import (
+    CreditMiddleware,
+    FinalSchemaResponseMiddleware,
+    SummaryMiddleware,
+)
 from app.core.tools.registry import ToolFunc, ToolRegistry, register_tool
 
 
@@ -91,6 +99,39 @@ class TestGeminiNormalizeFinishReason:
         mock.name = "OTHER_REASON"
         assert self.normalize(mock) == "other_reason"
 
+    @pytest.mark.asyncio
+    async def test_generate_with_empty_candidates_returns_empty_response(self):
+        from app.core.adapter.gemini import GeminiAdapter
+
+        fake_types = python_types.SimpleNamespace(
+            GenerateContentConfig=lambda **kwargs: python_types.SimpleNamespace(**kwargs),
+            ThinkingConfig=lambda **kwargs: python_types.SimpleNamespace(**kwargs),
+        )
+        fake_google = python_types.ModuleType("google")
+        fake_genai = python_types.ModuleType("google.genai")
+        fake_genai.types = fake_types
+        fake_google.genai = fake_genai
+
+        adapter = object.__new__(GeminiAdapter)
+        adapter._client = python_types.SimpleNamespace(
+            aio=python_types.SimpleNamespace(
+                models=python_types.SimpleNamespace(
+                    generate_content=AsyncMock(return_value=python_types.SimpleNamespace(
+                        candidates=[],
+                        usage_metadata=None,
+                    ))
+                )
+            )
+        )
+
+        with patch.dict(sys.modules, {"google": fake_google, "google.genai": fake_genai}):
+            response = await adapter.generate(messages=[{"role": "user", "content": "hi"}], model="gemini-3-pro-preview")
+
+        assert response.content == ""
+        assert response.thinking == ""
+        assert response.tool_calls == []
+        assert response.finish_reason == ""
+
 
 # ═══════════════════════════════════════════════════════════════════
 # 2. AgentLoop._check_finished
@@ -108,36 +149,34 @@ class TestCheckFinished:
 
     def test_stop_finishes(self, loop):
         resp = self._response("stop")
-        finished, data = loop._check_finished(resp, "hello")
+        finished = loop._check_finished(resp, "hello")
         assert finished is True
-        assert data is None
 
     def test_none_does_not_finish(self, loop):
         resp = self._response(None)
-        finished, _ = loop._check_finished(resp, "hello")
+        finished = loop._check_finished(resp, "hello")
         assert finished is False
 
     def test_tool_calls_does_not_finish(self, loop):
         resp = self._response("tool_calls")
-        finished, _ = loop._check_finished(resp, "")
+        finished = loop._check_finished(resp, "")
         assert finished is False
 
     def test_stop_signal_in_text(self, loop):
         resp = self._response(None)
-        finished, _ = loop._check_finished(resp, "<stop>")
+        finished = loop._check_finished(resp, "<stop>")
         assert finished is True
 
     def test_non_stop_finish_reason(self, loop):
         resp = self._response("length")
-        finished, _ = loop._check_finished(resp, "some text")
+        finished = loop._check_finished(resp, "some text")
         assert finished is False
 
     def test_gemini_finish_reason_dot_stop_no_longer_accepted(self, loop):
         """适配层归一化后，loop 不再接受 'finish_reason.stop'"""
         resp = self._response("finish_reason.stop")
-        finished, _ = loop._check_finished(resp, "some text")
+        finished = loop._check_finished(resp, "some text")
         assert finished is False  # 不再是有效停止信号
-
 
 # ═══════════════════════════════════════════════════════════════════
 # 3. AgentLoop.run() — 纯文本响应（无工具调用）
@@ -265,6 +304,80 @@ class TestAgentLoopRun:
 
         # user + assistant(loop1) + tool + assistant(loop2) = 4 条
         assert persist.append_message.call_count == 4
+
+    @pytest.mark.asyncio
+    async def test_persist_preserves_tool_context_for_history_replay(self):
+        persist = MagicMock()
+        persist.load_messages = AsyncMock(return_value=[])
+        persist.append_message = AsyncMock()
+        persist.flush = AsyncMock()
+
+        tool_call = StructuredToolCall(
+            id="tc1",
+            name="calculate",
+            arguments={"expression": "1+1"},
+        )
+        responses = [
+            LLMResponse(content="", tool_calls=[tool_call], finish_reason="tool_calls"),
+            LLMResponse(content="结果是2", finish_reason="stop"),
+        ]
+        config = AgentConfig(agent_name="test", prompt="", max_loop=10)
+        llm = MagicMock(spec=LLMAdapter)
+        llm.generate = AsyncMock(side_effect=responses)
+        llm.parse_json = MagicMock(return_value=None)
+
+        tool_executor = MagicMock()
+        tool_executor.execute_all = AsyncMock(return_value=[
+            ToolResult(tool_call_id="tc1", tool_name="calculate", result="2", is_error=False)
+        ])
+
+        loop = AgentLoop(
+            config=config,
+            llm=llm,
+            tool_executor=tool_executor,
+            persist=persist,
+            session_id="s1",
+            request_id="r1",
+        )
+        await loop.run("1+1等于几")
+
+        persisted = [call.kwargs for call in persist.append_message.await_args_list]
+        assistant_call = persisted[1]
+        tool_call_msg = persisted[2]
+
+        assert assistant_call["metadata"]["tool_calls"] == [
+            {
+                "id": "tc1",
+                "name": "calculate",
+                "arguments": {"expression": "1+1"},
+            }
+        ]
+        assert tool_call_msg["content"] == "2"
+
+        replay_persist = MagicMock()
+        replay_persist.load_messages = AsyncMock(return_value=[
+            {
+                "role": msg["role"],
+                "content": msg["content"],
+                "tool_call_id": msg.get("tool_call_id"),
+                "tool_name": msg.get("tool_name"),
+                "metadata": msg.get("metadata") or {},
+                "seq": msg["seq"],
+            }
+            for msg in persisted
+        ])
+
+        replay = AgentLoop(config=config, llm=llm, persist=replay_persist, session_id="s1")
+        await replay._load_history()
+
+        assert replay.messages[1]["tool_calls"] == [
+            {
+                "id": "tc1",
+                "name": "calculate",
+                "arguments": {"expression": "1+1"},
+            }
+        ]
+        assert replay.messages[2]["content"] == "2"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -459,6 +572,18 @@ class TestToolRegistry:
         assert "required_arg" in schema["required"]
         assert "optional_arg" not in schema["required"]
 
+    def test_schema_inference_typing_list_and_optional(self):
+        @register_tool(name="typing_tool")
+        def typing_tool(skill_names: List[str], fields: Optional[List[str]] = None):
+            pass
+
+        schema = ToolRegistry.get("typing_tool").parameters_schema
+        props = schema["properties"]
+        assert props["skill_names"]["type"] == "array"
+        assert props["fields"]["type"] == "array"
+        assert "skill_names" in schema["required"]
+        assert "fields" not in schema["required"]
+
     def test_db_param_excluded_from_schema(self):
         """框架注入参数 db 不暴露给 LLM"""
         @register_tool(name="db_tool")
@@ -633,9 +758,299 @@ class TestMiddlewareChain:
         result = await chain.run(_make_ctx(), handler)
         assert result == 42
 
+    @pytest.mark.asyncio
+    async def test_finalize_result_runs_in_order(self):
+        log = []
+
+        class FinalizingMiddleware(AgentMiddleware):
+            def __init__(self, label: str):
+                self.label = label
+                self.name = label
+
+            async def finalize_result(self, ctx, result):
+                log.append(f"{self.label}:finalize")
+                result.raw_output = f"{result.raw_output}|{self.label}"
+                return result
+
+        chain = MiddlewareChain([FinalizingMiddleware("m1"), FinalizingMiddleware("m2")])
+        result = AgentResult(agent_name="test", raw_output="base")
+
+        finalized = await chain.finalize_result(_make_ctx(), result)
+
+        assert finalized.raw_output == "base|m1|m2"
+        assert log == ["m1:finalize", "m2:finalize"]
+
 
 # ═══════════════════════════════════════════════════════════════════
-# 7. LLMAdapter — provider 委托
+# 7. Agent + Middleware 集成
+# ═══════════════════════════════════════════════════════════════════
+
+class InspectFinalizeMiddleware(AgentMiddleware):
+    name = "inspect_finalize"
+
+    def __init__(self, log: list[str]):
+        self.log = log
+
+    async def finalize_result(self, ctx, result):
+        self.log.append("finalize")
+        result.raw_output = f"{result.raw_output}!"
+        return result
+
+    async def after(self, ctx):
+        self.log.append(f"after:{ctx.result.raw_output}")
+
+
+class TestAgentMiddlewareIntegration:
+    @pytest.mark.asyncio
+    async def test_run_applies_finalize_result_before_after(self):
+        log: list[str] = []
+        llm = MagicMock(spec=LLMAdapter)
+        llm.generate = AsyncMock(return_value=LLMResponse(content="hello", finish_reason="stop"))
+
+        agent = Agent(
+            config=AgentConfig(agent_name="test", prompt=""),
+            session_id="s1",
+            middlewares=[InspectFinalizeMiddleware(log)],
+        )
+        agent._llm = llm
+        agent._tool_executor = MagicMock()
+
+        result = await agent.run("hi")
+
+        assert result.raw_output == "hello!"
+        assert log == ["finalize", "after:hello!"]
+
+    @pytest.mark.asyncio
+    async def test_stream_applies_finalize_result_before_done_event(self):
+        log: list[str] = []
+
+        async def _stream(*args, **kwargs):
+            yield LLMResponse(content="hello", finish_reason=None)
+            yield LLMResponse(content="", finish_reason="stop")
+
+        llm = MagicMock(spec=LLMAdapter)
+        llm.generate_stream = _stream
+
+        agent = Agent(
+            config=AgentConfig(agent_name="test", prompt=""),
+            session_id="s1",
+            middlewares=[InspectFinalizeMiddleware(log)],
+        )
+        agent._llm = llm
+        agent._tool_executor = MagicMock()
+
+        events = []
+        async for event in agent.stream("hi"):
+            events.append(event)
+
+        done = events[-1]
+        assert isinstance(done, DoneEvent)
+        assert done.result.raw_output == "hello!"
+        assert log == ["finalize", "after:hello!"]
+
+
+class TestBuiltinMiddlewares:
+    @pytest.mark.asyncio
+    async def test_final_schema_middleware_formats_result_and_merges_usage(self):
+        schema = {
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+        }
+        llm = MagicMock(spec=LLMAdapter)
+        llm.generate = AsyncMock(side_effect=[
+            LLMResponse(
+                content="天空是蓝色的，因为大气对短波长光散射更强。",
+                finish_reason="stop",
+                usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            ),
+            LLMResponse(
+                content='{"answer":"瑞利散射"}',
+                finish_reason="stop",
+                usage={"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+            ),
+        ])
+        llm.parse_json = MagicMock(return_value={"answer": "瑞利散射"})
+
+        agent = Agent(
+            config=AgentConfig(agent_name="test", prompt=""),
+            session_id="s1",
+            middlewares=[FinalSchemaResponseMiddleware(schema)],
+        )
+        agent._llm = llm
+        agent._tool_executor = MagicMock()
+
+        result = await agent.run("为什么天空是蓝色的？")
+
+        assert result.finished is True
+        assert result.raw_output == "天空是蓝色的，因为大气对短波长光散射更强。"
+        assert result.schema_data == {"answer": "瑞利散射"}
+        assert result.schema_error is None
+        assert result.usage == {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}
+
+        second_call = llm.generate.await_args_list[1].kwargs
+        assert second_call["response_schema"] == schema
+        assert second_call["tools"] == []
+
+    @pytest.mark.asyncio
+    async def test_final_schema_middleware_sets_schema_error_on_parse_failure(self):
+        schema = {
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+        }
+        llm = MagicMock(spec=LLMAdapter)
+        llm.generate = AsyncMock(side_effect=[
+            LLMResponse(content="自由文本答案", finish_reason="stop"),
+            LLMResponse(content="not-json", finish_reason="stop"),
+        ])
+        llm.parse_json = MagicMock(return_value=None)
+
+        agent = Agent(
+            config=AgentConfig(agent_name="test", prompt=""),
+            session_id="s1",
+            middlewares=[FinalSchemaResponseMiddleware(schema)],
+        )
+        agent._llm = llm
+        agent._tool_executor = MagicMock()
+
+        result = await agent.run("问题")
+
+        assert result.finished is True
+        assert result.schema_data is None
+        assert "Failed to parse" in result.schema_error
+
+    @pytest.mark.asyncio
+    async def test_final_schema_middleware_applies_before_stream_done_event(self):
+        schema = {
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+        }
+
+        async def _stream(*args, **kwargs):
+            yield LLMResponse(content="先给一段自由文本", finish_reason=None)
+            yield LLMResponse(
+                content="",
+                finish_reason="stop",
+                usage={"prompt_tokens": 6, "completion_tokens": 4, "total_tokens": 10},
+            )
+
+        llm = MagicMock(spec=LLMAdapter)
+        llm.generate_stream = _stream
+        llm.generate = AsyncMock(return_value=LLMResponse(
+            content='{"answer":"结构化结论"}',
+            finish_reason="stop",
+            usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        ))
+        llm.parse_json = MagicMock(return_value={"answer": "结构化结论"})
+
+        agent = Agent(
+            config=AgentConfig(agent_name="test", prompt=""),
+            session_id="s1",
+            middlewares=[FinalSchemaResponseMiddleware(schema)],
+        )
+        agent._llm = llm
+        agent._tool_executor = MagicMock()
+
+        events = []
+        async for event in agent.stream("问题"):
+            events.append(event)
+
+        done = events[-1]
+        assert isinstance(done, DoneEvent)
+        assert done.result.schema_data == {"answer": "结构化结论"}
+        assert done.result.usage == {"prompt_tokens": 7, "completion_tokens": 5, "total_tokens": 12}
+
+    @pytest.mark.asyncio
+    async def test_credit_middleware_records_final_usage(self):
+        records = []
+
+        async def recorder(ctx, usage):
+            records.append(
+                {
+                    "session_id": ctx.session_id,
+                    "request_id": ctx.request_id,
+                    "usage": usage,
+                }
+            )
+
+        llm = MagicMock(spec=LLMAdapter)
+        llm.generate = AsyncMock(return_value=LLMResponse(
+            content="hello",
+            finish_reason="stop",
+            usage={"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
+        ))
+
+        agent = Agent(
+            config=AgentConfig(agent_name="test", prompt=""),
+            session_id="s1",
+            middlewares=[CreditMiddleware(recorder=recorder)],
+        )
+        agent._llm = llm
+        agent._tool_executor = MagicMock()
+
+        result = await agent.run("hi")
+
+        assert result.usage == {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6}
+        assert records == [
+            {
+                "session_id": "s1",
+                "request_id": result.request_id,
+                "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_summary_middleware_replaces_old_messages_with_summary_context(self):
+        persist = MagicMock()
+        persist.load_messages = AsyncMock(return_value=[
+            {"role": "user", "content": "旧问题1", "seq": 0},
+            {"role": "assistant", "content": "旧回答1", "seq": 1},
+            {"role": "user", "content": "旧问题2", "seq": 2},
+            {"role": "assistant", "content": "旧回答2", "seq": 3},
+            {"role": "user", "content": "旧问题3", "seq": 4},
+            {"role": "assistant", "content": "旧回答3", "seq": 5},
+        ])
+        persist.append_message = AsyncMock()
+        persist.flush = AsyncMock()
+
+        summarized_batches = []
+
+        async def summarizer(ctx, messages):
+            summarized_batches.append(messages)
+            return "这是压缩后的历史摘要"
+
+        llm = MagicMock(spec=LLMAdapter)
+        llm.generate = AsyncMock(return_value=LLMResponse(content="最终回答", finish_reason="stop"))
+
+        agent = Agent(
+            config=AgentConfig(agent_name="test", prompt=""),
+            session_id="s1",
+            persist=persist,
+            middlewares=[SummaryMiddleware(
+                max_tokens=10,
+                keep_last_messages=2,
+                token_estimator=lambda messages: 999,
+                summarizer=summarizer,
+            )],
+        )
+        agent._llm = llm
+        agent._tool_executor = MagicMock()
+
+        await agent.run("当前问题")
+
+        generate_messages = llm.generate.await_args_list[0].kwargs["messages"]
+        assert len(summarized_batches) == 1
+        assert generate_messages[0]["role"] == "system"
+        assert "这是压缩后的历史摘要" in generate_messages[0]["content"]
+        assert generate_messages[-1]["role"] == "user"
+        assert generate_messages[-1]["content"] == "当前问题"
+        assert len(generate_messages) == 3
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 8. LLMAdapter — provider 委托
 # ═══════════════════════════════════════════════════════════════════
 
 class TestLLMAdapter:
@@ -658,6 +1073,26 @@ class TestLLMAdapter:
 
         assert result is expected
         provider.generate.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_generate_supports_one_off_response_schema(self):
+        expected = LLMResponse(content='{"ok": true}', finish_reason="stop")
+        provider = MagicMock()
+        provider.generate = AsyncMock(return_value=expected)
+        provider.to_tool_schema = MagicMock(return_value=[])
+
+        adapter = self._make_adapter(provider)
+        schema = {"type": "object"}
+        result = await adapter.generate(
+            messages=[{"role": "user", "content": "hi"}],
+            response_schema=schema,
+            tools=[],
+        )
+
+        assert result is expected
+        call_kwargs = provider.generate.await_args.kwargs
+        assert call_kwargs["response_schema"] == schema
+        assert call_kwargs["tools"] == []
 
     @pytest.mark.asyncio
     async def test_generate_stream_delegates_to_provider(self):
@@ -695,3 +1130,26 @@ class TestLLMAdapter:
         schemas = adapter.get_tool_schemas()
         provider.to_tool_schema.assert_called_once_with(tools)
         assert schemas == [{"type": "function"}]
+
+
+class TestAdapterFactory:
+    def test_unknown_model_fails_fast(self):
+        from app.core.adapter.factory import get_adapter
+
+        with patch.dict("app.core.adapter.factory._ADAPTER_CACHE", {}, clear=True):
+            with pytest.raises(ValueError, match="Unsupported model"):
+                get_adapter("my-custom-model")
+
+
+class TestDBPersistStrategy:
+    @pytest.mark.asyncio
+    async def test_flush_uses_session_flush_without_commit(self):
+        db = MagicMock()
+        db.flush = AsyncMock()
+        db.commit = AsyncMock()
+
+        strategy = DBPersistStrategy(db)
+        await strategy.flush()
+
+        db.flush.assert_awaited_once()
+        db.commit.assert_not_called()

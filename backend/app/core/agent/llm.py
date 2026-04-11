@@ -35,7 +35,11 @@ class LLMAdapter:
         self.tools = tools or []
         self._provider = get_adapter(config.model)
 
-    def _build_llm_kwargs(self) -> Dict[str, Any]:
+    def _build_llm_kwargs(
+        self,
+        *,
+        response_schema: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """构建 LLM 调用参数。"""
         kwargs = {
             "model": self.config.model,
@@ -44,8 +48,8 @@ class LLMAdapter:
             kwargs["temperature"] = self.config.temperature
         if self.config.max_tokens is not None:
             kwargs["max_tokens"] = self.config.max_tokens
-        if self.config.response_schema:
-            kwargs["response_schema"] = self.config.response_schema
+        if response_schema is not None:
+            kwargs["response_schema"] = response_schema
         return kwargs
 
     def get_tool_schemas(self) -> Any:
@@ -58,6 +62,9 @@ class LLMAdapter:
         self,
         messages: List[Dict[str, Any]],
         system_prompt: str = "",
+        *,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        response_schema: Optional[Dict[str, Any]] = None,
     ) -> LLMResponse:
         """
         非流式生成。
@@ -70,12 +77,12 @@ class LLMAdapter:
             LLMResponse 结构化响应（包含 content + 原生 tool_calls）
         """
         full_system = system_prompt or self.config.prompt
-        kwargs = self._build_llm_kwargs()
+        kwargs = self._build_llm_kwargs(response_schema=response_schema)
 
         return await self._provider.generate(
             messages=messages,
             system_prompt=full_system,
-            tools=self.tools,
+            tools=self.tools if tools is None else tools,
             **kwargs,
         )
 
@@ -83,6 +90,9 @@ class LLMAdapter:
         self,
         messages: List[Dict[str, Any]],
         system_prompt: str = "",
+        *,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        response_schema: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator[LLMResponse, None]:
         """
         流式生成。
@@ -93,12 +103,12 @@ class LLMAdapter:
             - finish_reason 非空 → 终止 chunk，携带完整 tool_calls
         """
         full_system = system_prompt or self.config.prompt
-        kwargs = self._build_llm_kwargs()
+        kwargs = self._build_llm_kwargs(response_schema=response_schema)
 
         async for chunk in self._provider.generate_stream(
             messages=messages,
             system_prompt=full_system,
-            tools=self.tools,
+            tools=self.tools if tools is None else tools,
             **kwargs,
         ):
             yield chunk
@@ -110,10 +120,9 @@ class LLMAdapter:
 
     def parse_json(self, text: str) -> Optional[Dict[str, Any]]:
         """
-        解析 LLM 输出中的 JSON（仅用于 response_schema 模式）。
+        解析 LLM 输出中的 JSON。
 
-        Deprecated: 当 finish_reason == "stop" 且 content 不为空时，
-        直接将 content 当作 JSON 解析即可。
+        保留给 middleware 级的一次性结构化后处理使用。
         """
         import re
 
