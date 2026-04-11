@@ -36,6 +36,7 @@ def create_supervisor(
     persist: PersistArg = "redis",
     middlewares: Optional[List[AgentMiddleware]] = None,
     sub_agent_configs: Optional[Dict[str, Any]] = None,
+    workflow_service=None,
 ) -> SupervisorAgent:
     """
     创建 SupervisorAgent 实例。
@@ -48,6 +49,7 @@ def create_supervisor(
         persist: 持久化策略（默认 "redis"）
         middlewares: 中间件列表
         sub_agent_configs: SubAgent 配置映射（预留，未来从 DB/Skill 加载）
+        workflow_service: SupervisorWorkflowService 实例（可选，用于 call_sub_agent DB 持久化）
 
     Returns:
         SupervisorAgent 实例
@@ -60,7 +62,7 @@ def create_supervisor(
         f"user_request={user_request[:50]}..., persist={persist}"
     )
 
-    return SupervisorAgent(
+    supervisor = SupervisorAgent(
         supervisor_session_id=supervisor_session_id,
         user_request=user_request,
         sub_agent_configs=sub_agent_configs or {},
@@ -69,3 +71,8 @@ def create_supervisor(
         model=model,
         max_loop=max_loop,
     )
+
+    # 注入 workflow_service，供 call_sub_agent 写入 DB
+    supervisor._tool_ctx["workflow_service"] = workflow_service
+
+    return supervisor

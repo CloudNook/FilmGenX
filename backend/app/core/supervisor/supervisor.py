@@ -94,6 +94,7 @@ class SupervisorAgent:
 
         self._tool_ctx: Dict[str, Any] = {
             "supervisor_context": self.context,
+            "workflow_service": None,  # 由 factory 或 API 层注入
         }
 
         self._agent = create_agent(

@@ -66,6 +66,7 @@ async def call_sub_agent(
     context_snapshot: str = "",
     supervisor_context: Optional[SupervisorContext] = None,
     db=None,
+    workflow_service=None,
 ) -> AsyncGenerator:
     """
     调用指定的 SubAgent 执行任务，实时 yield 所有流式事件。
@@ -155,6 +156,17 @@ async def call_sub_agent(
         logger.exception(f"[call_sub_agent] error in sub_agent={sub_agent_name}: {e}")
         yield ErrorEvent(error=str(e), source=sub_agent_name)
         accumulated_result = {"error": str(e)}
+
+    # SubAgent 执行完毕后，写入 DB
+    if workflow_service is not None and supervisor_context is not None:
+        try:
+            await workflow_service.append_artifacts(
+                supervisor_session_id=supervisor_context.supervisor_session_id,
+                stage=sub_agent_name,
+                artifact=accumulated_result.get("schema_data") or accumulated_result.get("raw_output") or {},
+            )
+        except Exception as e:
+            logger.warning(f"[call_sub_agent] failed to persist artifacts: {e}")
 
     yield SubAgentEndEvent(
         sub_agent_name=sub_agent_name,
