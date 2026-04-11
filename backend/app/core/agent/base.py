@@ -70,6 +70,7 @@ class AgentMessage(BaseModel):
     agent_name: Optional[str] = Field(None, description="所属 Agent 名称")
     tool_call_id: Optional[str] = Field(None, description="工具调用 ID")
     tool_name: Optional[str] = Field(None, description="调用的工具名称")
+    seq: int = Field(default=0, description="消息序号（用于跨请求排序）")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="附加元数据")
 
 

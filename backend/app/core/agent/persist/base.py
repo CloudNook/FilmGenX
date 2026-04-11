@@ -67,3 +67,11 @@ class PersistStrategy(ABC):
             metadata:      附加元数据
         """
         ...
+
+    async def flush(self) -> None:
+        """
+        提交当前事务（DB 策略需要；Redis 等立即写入的实现为空操作）。
+
+        在 AgentLoop.run() 结束时由调用方触发，确保所有消息落盘。
+        """
+        pass

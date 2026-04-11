@@ -161,8 +161,6 @@ class OpenAIAdapter(ProviderAdapter):
         文本 chunk 逐片 yield（content 非空，tool_calls 为空）。
         最终 chunk 携带完整 finish_reason 和 tool_calls（若有）。
         """
-        from app.core.agent.base import StructuredToolCall
-
         req = self.to_request(messages, system_prompt, tools=tools, **kwargs)
 
         # tool_calls 按 index 拼接（OpenAI 流式分片发送）

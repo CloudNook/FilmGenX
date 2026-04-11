@@ -26,10 +26,13 @@ _MODEL_PREFIX_MAP: list[tuple[list[str], str]] = [
     (["claude", "sonnet", "haiku"], "openai"),  # Claude 也走 OpenAI 兼容接口
 ]
 
+# Provider 实例缓存，避免重复创建 HTTP 客户端
+_ADAPTER_CACHE: dict[str, ProviderAdapter] = {}
+
 
 def get_adapter(model: str) -> ProviderAdapter:
     """
-    根据 model name 选择对应的适配器。
+    根据 model name 选择对应的适配器（带实例缓存）。
 
     Args:
         model: 模型名称，如 "gemini-3-flash-preview"、"gpt-4o"
@@ -44,13 +47,17 @@ def get_adapter(model: str) -> ProviderAdapter:
 
     for prefixes, provider in _MODEL_PREFIX_MAP:
         if any(model_lower.startswith(p) for p in prefixes):
-            adapter_cls = _PROVIDERS.get(provider)
-            if adapter_cls:
-                return adapter_cls()
+            if provider not in _ADAPTER_CACHE:
+                adapter_cls = _PROVIDERS.get(provider)
+                if adapter_cls:
+                    _ADAPTER_CACHE[provider] = adapter_cls()
+            return _ADAPTER_CACHE[provider]
 
     # 默认尝试 Gemini
     logger.warning(f"Unknown model '{model}', defaulting to GeminiAdapter")
-    return GeminiAdapter()
+    if "gemini" not in _ADAPTER_CACHE:
+        _ADAPTER_CACHE["gemini"] = GeminiAdapter()
+    return _ADAPTER_CACHE["gemini"]
 
 
 def register_provider(name: str, adapter_cls: type[ProviderAdapter]) -> None:

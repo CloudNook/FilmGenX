@@ -66,6 +66,12 @@ class DBPersistStrategy(PersistStrategy):
         tool_name: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
+        """
+        写入一条消息（不自动 commit）。
+
+        注意：事务管理由调用方负责。
+        需要手动调用 flush() 或自行 commit() 以确保写入生效。
+        """
         record = AgentMessageRecord(
             session_id=session_id,
             request_id=request_id,
@@ -78,4 +84,7 @@ class DBPersistStrategy(PersistStrategy):
             extra_metadata=metadata,
         )
         self.db.add(record)
+
+    async def flush(self) -> None:
+        """提交当前事务。"""
         await self.db.commit()

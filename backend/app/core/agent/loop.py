@@ -116,18 +116,18 @@ class AgentLoop:
         if is_stop_signal(text):
             return True, None
 
-        # response_schema 模式
-        if self.config.response_schema and text:
+        # response_schema 模式：仅在正常结束时解析，避免截断 JSON 被误当有效结果
+        if self.config.response_schema and text and finish_reason_str == "stop":
             parsed = self.llm.parse_json(text)
             if parsed is not None:
                 return True, parsed
 
         return False, None
 
-    def _add_message(self, role: str, content: str, **kwargs) -> AgentMessage:
-        msg = {"role": role, "content": content, **kwargs}
+    def _add_message(self, role: str, content: str, seq: int = 0, **kwargs) -> AgentMessage:
+        msg = {"role": role, "content": content, "seq": seq, **kwargs}
         self.messages.append(msg)
-        return AgentMessage(role=role, content=content, agent_name=self.config.agent_name, **kwargs)
+        return AgentMessage(role=role, content=content, seq=seq, agent_name=self.config.agent_name, **kwargs)
 
     async def _persist(
         self,
@@ -139,17 +139,23 @@ class AgentLoop:
         """写入一条消息，seq 使用当前值后自增。"""
         if self.persist is None:
             return
+        seq = self._seq
+        self._seq += 1
         await self.persist.append_message(
             session_id=self.session_id,
             request_id=self.request_id,
             agent_name=self.config.agent_name,
             role=role,
             content=content,
-            seq=self._seq,
+            seq=seq,
             tool_call_id=tool_call_id,
             tool_name=tool_name,
         )
-        self._seq += 1
+
+    async def _flush(self) -> None:
+        """提交当前事务（仅 DB 策略需要；Redis 为空操作）。"""
+        if self.persist is not None:
+            await self.persist.flush()
 
     async def _load_history(self) -> None:
         """从持久化存储加载历史消息，注入 self.messages，初始化 self._seq。"""
@@ -195,7 +201,7 @@ class AgentLoop:
 
         result = AgentResult(
             agent_name=self.config.agent_name,
-            messages=[self._add_message("user", initial_input)],
+            messages=[self._add_message("user", initial_input, seq=self._seq)],
         )
         await self._persist("user", initial_input)
 
@@ -242,6 +248,7 @@ class AgentLoop:
                         role="assistant",
                         content=response.content,
                         thinking=response.thinking,
+                        seq=self._seq,
                         agent_name=self.config.agent_name,
                     )
                 )
@@ -296,6 +303,7 @@ class AgentLoop:
                                 AgentMessage(
                                     role="tool",
                                     content=formatted,
+                                    seq=self._seq,
                                     agent_name=self.config.agent_name,
                                     tool_call_id=tr.tool_call_id,
                                     tool_name=tr.tool_name,
@@ -322,6 +330,7 @@ class AgentLoop:
                     result.loop_count = self.loop_count
                     if self.on_loop_end is not None:
                         await self.on_loop_end(result.messages)
+                    await self._flush()
                     return result
 
                 # Fallback：模型返回空内容且无法正常结束
@@ -353,6 +362,7 @@ class AgentLoop:
                         result.loop_count = self.loop_count
                         if self.on_loop_end is not None:
                             await self.on_loop_end(result.messages)
+                        await self._flush()
                         return result
 
                 # 无结束信号也无内容 → 继续循环
@@ -370,6 +380,7 @@ class AgentLoop:
             result.error = f"Max loop reached ({self.config.max_loop})"
             result.finished = False
             result.finished_at = datetime.now(timezone.utc)
+            await self._flush()
             return result
 
         except Exception as e:
@@ -378,6 +389,7 @@ class AgentLoop:
             result.loop_count = self.loop_count
             result.finished = False
             result.finished_at = datetime.now(timezone.utc)
+            await self._flush()
             return result
 
     async def stream_run(self, initial_input: str):
@@ -394,7 +406,7 @@ class AgentLoop:
 
         result = AgentResult(
             agent_name=self.config.agent_name,
-            messages=[self._add_message("user", initial_input)],
+            messages=[self._add_message("user", initial_input, seq=self._seq)],
         )
         await self._persist("user", initial_input)
 
@@ -449,6 +461,7 @@ class AgentLoop:
                         role="assistant",
                         content=accumulated_content,
                         thinking=accumulated_thinking,
+                        seq=self._seq,
                         agent_name=self.config.agent_name,
                     )
                 )
@@ -497,6 +510,7 @@ class AgentLoop:
                                 AgentMessage(
                                     role="tool",
                                     content=formatted,
+                                    seq=self._seq,
                                     agent_name=self.config.agent_name,
                                     tool_call_id=tr.tool_call_id,
                                     tool_name=tr.tool_name,
@@ -528,6 +542,7 @@ class AgentLoop:
                     result.loop_count = self.loop_count
                     if self.on_loop_end is not None:
                         await self.on_loop_end(result.messages)
+                    await self._flush()
                     yield DoneEvent(result=result)
                     return
 
@@ -555,6 +570,7 @@ class AgentLoop:
                         yield TextEvent(content=fallback_content)
                         if self.on_loop_end is not None:
                             await self.on_loop_end(result.messages)
+                        await self._flush()
                         yield DoneEvent(result=result)
                         return
 
@@ -568,6 +584,7 @@ class AgentLoop:
             result.error = f"Max loop reached ({self.config.max_loop})"
             result.finished = False
             result.finished_at = datetime.now(timezone.utc)
+            await self._flush()
             yield ErrorEvent(error=result.error)
             yield DoneEvent(result=result)
 
@@ -578,4 +595,5 @@ class AgentLoop:
             result.loop_count = self.loop_count
             result.finished = False
             result.finished_at = datetime.now(timezone.utc)
+            await self._flush()
             yield DoneEvent(result=result)

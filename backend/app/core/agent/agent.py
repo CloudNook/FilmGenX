@@ -9,7 +9,7 @@ import logging
 from typing import TYPE_CHECKING, List, Optional
 from uuid import uuid4
 
-from app.core.agent.base import AgentConfig, AgentMessage, AgentResult, DoneEvent
+from app.core.agent.base import AgentConfig, AgentResult, DoneEvent
 from app.core.agent.loop import AgentLoop
 from app.core.agent.llm import LLMAdapter
 from app.core.agent.tool import ToolExecutor
@@ -178,10 +178,3 @@ class Agent:
 
         async for event in self._chain.stream(ctx, _generate()):
             yield event
-
-    async def add_message(self, message: AgentMessage) -> None:
-        """
-        向 Agent 添加一条消息（用于恢复会话上下文）。
-        """
-        # TODO: 挂载消息历史到 AgentLoop
-        raise NotImplementedError("add_message() not implemented yet")

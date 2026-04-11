@@ -239,6 +239,7 @@ class TestAgentLoopRun:
         persist = MagicMock()
         persist.load_messages = AsyncMock(return_value=[])
         persist.append_message = AsyncMock()
+        persist.flush = AsyncMock()
 
         tool_call = StructuredToolCall(id="tc1", name="get_weather", arguments={"city": "北京"})
         responses = [
