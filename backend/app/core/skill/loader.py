@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.skill.service import SkillService
+from app.services.skill_service import SkillService
 
 logger = logging.getLogger(__name__)
 

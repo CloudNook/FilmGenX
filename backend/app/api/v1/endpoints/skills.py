@@ -12,8 +12,8 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_admin, get_db
-from app.core.skill.parser import parse_skill_markdown
-from app.core.skill.service import SkillService
+from app.services.skill_parser import parse_skill_markdown
+from app.services.skill_service import SkillService
 from app.models.user import User
 from app.schemas.base import PageResponse
 from app.schemas.skill import (

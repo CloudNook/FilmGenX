@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.skill.parser import ParseResult, parse_skill_markdown
+from app.services.skill_parser import ParseResult, parse_skill_markdown
 from app.models.skill import Skill
 from app.repositories.skill import SkillRepository
 from app.schemas.skill import SkillCreate, SkillUpdate

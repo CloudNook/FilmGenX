@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, use, useState } from 'react';
 import { AppLayout } from '@/components/layout';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -16,7 +16,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { ArrowLeft, Save, Loader2, RefreshCw, FileText, Trash2, Brain, CheckCircle } from 'lucide-react';
-import { skillsApi, type SkillResponse, type SkillParseResult, type SkillUploadResponse } from '@/lib/api';
+import { skillsApi, type SkillResponse } from '@/lib/api';
 import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 
@@ -45,14 +45,13 @@ const DIFFICULTIES = [
 // ===========================================================================
 // 主页面
 // ===========================================================================
-export default function SkillDetailPage({ params }: { params: { name: string } }) {
+export default function SkillDetailPage({ params }: { params: Promise<{ name: string }> }) {
+  const { name: skillName } = use(params);
   const router = useRouter();
   const [skill, setSkill] = useState<SkillResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [editMode, setEditMode] = useState(false);
-  const [form, setForm] = useState<Partial<SkillResponse>>({});
-
   // 编辑表单状态
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -68,17 +67,12 @@ export default function SkillDetailPage({ params }: { params: { name: string } }
   const [is_active, setIsActive] = useState(true);
   const [author, setAuthor] = useState('');
 
-  const initialLoad = useRef(false);
-
   const fetchSkill = useCallback(async () => {
-    if (initialLoad.current) return;
-    initialLoad.current = true;
     setLoading(true);
     try {
-      const res = await skillsApi.get(params.name);
+      const res = await skillsApi.get(skillName);
       setSkill(res);
       setEditMode(false);
-      // 初始化表单
       setTitle(res.title || '');
       setDescription(res.description || '');
       setContent(res.content || '');
@@ -95,7 +89,7 @@ export default function SkillDetailPage({ params }: { params: { name: string } }
     } finally {
       setLoading(false);
     }
-  }, [params.name]);
+  }, [skillName]);
 
   useEffect(() => {
     fetchSkill();
@@ -216,7 +210,7 @@ export default function SkillDetailPage({ params }: { params: { name: string } }
 
   if (loading) {
     return (
-      <AppLayout title={`Skill: ${params.name}`} description={loading ? '加载中...' : 'Skill 详情'}>
+      <AppLayout title={`Skill: ${skillName}`} description={loading ? '加载中...' : 'Skill 详情'}>
         <div className="flex items-center justify-center py-20">
           <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
         </div>
@@ -226,7 +220,7 @@ export default function SkillDetailPage({ params }: { params: { name: string } }
 
   if (!skill) {
     return (
-      <AppLayout title={`Skill: ${params.name}`} description="未找到">
+      <AppLayout title={`Skill: ${skillName}`} description="未找到">
         <div className="p-6">
           <p className="text-muted-foreground">Skill 不存在或已被删除。</p>
           <Button variant="outline" onClick={() => router.back()}>
