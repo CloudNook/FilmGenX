@@ -30,7 +30,6 @@ from app.core.agent import (
 from app.core.agent.persist.db_strategy import DBPersistStrategy
 from app.core.agent.tool import ToolExecutor
 from app.core.tools import ToolRegistry
-from app.core.skill.loader import load_skill_lite
 from app.models.workspace import Workspace
 from app.repositories.workspace import WorkspaceRepository
 from app.repositories.project import ProjectRepository
@@ -191,7 +190,6 @@ async def get_workspace(
 
     messages = []
     for r in records:
-        metadata = r.extra_metadata or {}
         messages.append(
             AgentMessageResponse(
                 role=r.role,
@@ -199,10 +197,8 @@ async def get_workspace(
                 seq=r.seq,
                 tool_call_id=r.tool_call_id,
                 tool_name=r.tool_name,
-                thinking=metadata.get("thinking"),
-                tool_calls=metadata.get("tool_calls"),
                 usage=r.usage,
-                accumulated_usage=metadata.get("accumulated_usage"),
+                extra_metadata=r.extra_metadata,
                 created_at=r.created_at,
             )
         )
@@ -284,16 +280,13 @@ async def chat_workspace(
     await _require_project(project_id, user_id, db)
     ws = await _require_workspace(workspace_id, project_id, db)
 
-    # 加载 Skill 摘要
-    skill_lite_list = await load_skill_lite(db=db, skill_names=[])
-
     # 确定使用的 prompt
     prompt = ws.system_prompt or DEFAULT_SYSTEM_PROMPT
 
     # 获取工具 schema
     tools = ToolRegistry.get_all_schemas()
 
-    # 构建 Agent
+    # 构建 Agent（skill_names 由 Agent 定义绑定，run/stream 时懒加载注入 prompt）
     persist = DBPersistStrategy(db=db)
     tool_executor = ToolExecutor(db=db)
 
@@ -304,7 +297,7 @@ async def chat_workspace(
         model=body.model or "gemini-3-flash-preview",
         temperature=body.temperature,
         tools=tools,
-        skill_lite_list=skill_lite_list,
+        skill_names=ws.skill_names if hasattr(ws, "skill_names") else [],
         persist=persist,
     )
     # 注入 db 到 tool_executor（工具可能需要数据库会话）

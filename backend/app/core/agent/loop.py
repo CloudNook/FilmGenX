@@ -111,15 +111,24 @@ class AgentLoop:
         return AgentMessage(role=role, content=content, seq=seq, agent_name=self.config.agent_name, **kwargs)
 
     @staticmethod
-    def _serialize_tool_calls(tool_calls: List[Any]) -> List[Dict[str, Any]]:
-        return [
-            {
-                "id": tc.id,
-                "name": tc.name,
-                "arguments": tc.arguments,
-            }
-            for tc in tool_calls
-        ]
+    def _serialize_tool_calls(
+        tool_calls: List[Any],
+        tool_results: Optional[List[Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """序列化工具调用列表，可选地注入执行结果。"""
+        results_by_id: Dict[str, Any] = {}
+        if tool_results:
+            for tr in tool_results:
+                results_by_id[tr.tool_call_id] = tr
+        out = []
+        for tc in tool_calls:
+            entry: Dict[str, Any] = {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+            if tc.id in results_by_id:
+                tr = results_by_id[tc.id]
+                entry["result"] = tr.result
+                entry["is_error"] = tr.is_error
+            out.append(entry)
+        return out
 
     @staticmethod
     def _serialize_tool_result_content(result: Any) -> str:
@@ -134,6 +143,7 @@ class AgentLoop:
         *,
         thinking: str = "",
         tool_calls: Optional[List[Any]] = None,
+        tool_results: Optional[List[Any]] = None,
         finish_reason: Optional[str] = None,
         accumulated_usage: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
@@ -141,7 +151,7 @@ class AgentLoop:
         if thinking:
             metadata["thinking"] = thinking
         if tool_calls:
-            metadata["tool_calls"] = self._serialize_tool_calls(tool_calls)
+            metadata["tool_calls"] = self._serialize_tool_calls(tool_calls, tool_results)
         if finish_reason:
             metadata["finish_reason"] = finish_reason
         if accumulated_usage:
@@ -154,6 +164,12 @@ class AgentLoop:
         result.usage = merge_usage(result.usage, usage)
         self._session_accumulated_usage = merge_usage(self._session_accumulated_usage, usage)
 
+    def _alloc_seq(self) -> int:
+        """预分配一个 seq，但不写入——用于需要延迟写入的消息占位。"""
+        seq = self._seq
+        self._seq += 1
+        return seq
+
     async def _persist(
         self,
         role: str,
@@ -162,12 +178,14 @@ class AgentLoop:
         tool_name: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         usage: Optional[Dict[str, Any]] = None,
+        seq: Optional[int] = None,
     ) -> None:
-        """写入一条消息，seq 使用当前值后自增。"""
+        """写入一条消息。seq 可预分配传入，否则自动分配并自增。"""
         if self.persist is None:
             return
-        seq = self._seq
-        self._seq += 1
+        if seq is None:
+            seq = self._seq
+            self._seq += 1
         await self.persist.append_message(
             session_id=self.session_id,
             request_id=self.request_id,
@@ -279,29 +297,19 @@ class AgentLoop:
 
                 self.messages.append(assistant_msg_dict)
                 current_assistant_msg_idx = len(result.messages)
+                _assistant_seq = self._alloc_seq()
                 result.messages.append(
                     AgentMessage(
                         role="assistant",
                         content=response.content,
                         thinking=response.thinking,
-                        seq=self._seq,
+                        seq=_assistant_seq,
                         agent_name=self.config.agent_name,
                     )
                 )
                 self._add_usage(result, response.usage)
-                await self._persist(
-                    "assistant",
-                    response.content,
-                    metadata=self._build_assistant_metadata(
-                        thinking=response.thinking,
-                        tool_calls=response.tool_calls,
-                        finish_reason=response.finish_reason,
-                        accumulated_usage=self._session_accumulated_usage,
-                    ),
-                    usage=response.usage,
-                )
 
-                # Step 3: 有 tool_calls → 执行工具（优先于 finish_reason 判断）
+                # Step 3: 有 tool_calls → 先执行工具，再写 assistant persist（以便携带 result）
                 if response.tool_calls:
                     # Step 5: Act - 执行工具
                     tool_calls = [
@@ -319,6 +327,7 @@ class AgentLoop:
                             f"[Loop {self.loop_count}] Calling tool: {tc.name}({tc.arguments})"
                         )
 
+                    _tool_results_for_persist: List[Any] = []
                     if self.tool_executor is None:
                         logger.warning(
                             f"[AgentLoop:{self.config.agent_name}] "
@@ -326,6 +335,7 @@ class AgentLoop:
                         )
                     else:
                         tool_results = await self.tool_executor.execute_all(tool_calls)
+                        _tool_results_for_persist = tool_results
 
                         # 构建 Provider 原生格式的 tool 结果消息
                         # 注意：传原始 result 字符串，不传 json.dumps 过的字符串
@@ -364,12 +374,38 @@ class AgentLoop:
                                 metadata={"display_content": formatted, "is_error": tr.is_error},
                             )
 
+                    # 工具执行完毕后写 assistant 消息（携带 tool_results，使用预分配 seq）
+                    await self._persist(
+                        "assistant",
+                        response.content,
+                        seq=_assistant_seq,
+                        metadata=self._build_assistant_metadata(
+                            thinking=response.thinking,
+                            tool_calls=response.tool_calls,
+                            tool_results=_tool_results_for_persist,
+                            finish_reason=response.finish_reason,
+                            accumulated_usage=self._session_accumulated_usage,
+                        ),
+                        usage=response.usage,
+                    )
+
                     # 工具执行完毕，本轮结束，继续循环让模型生成最终答案
                     if self.on_loop_end is not None:
                         await self.on_loop_end(result.messages)
                     continue
 
-                # Step 4: 无 tool_calls → 检查是否可以结束
+                # Step 4: 无 tool_calls → 写 assistant persist，再检查是否可以结束
+                await self._persist(
+                    "assistant",
+                    response.content,
+                    seq=_assistant_seq,
+                    metadata=self._build_assistant_metadata(
+                        thinking=response.thinking,
+                        finish_reason=response.finish_reason,
+                        accumulated_usage=self._session_accumulated_usage,
+                    ),
+                    usage=response.usage,
+                )
                 finished = self._check_finished(response, response.content)
                 if finished:
                     result.finished = True
@@ -506,34 +542,24 @@ class AgentLoop:
 
                 self.messages.append(assistant_msg_dict)
                 current_assistant_msg_idx = len(result.messages)
+                _assistant_seq = self._alloc_seq()
                 result.messages.append(
                     AgentMessage(
                         role="assistant",
                         content=accumulated_content,
                         thinking=accumulated_thinking,
-                        seq=self._seq,
+                        seq=_assistant_seq,
                         agent_name=self.config.agent_name,
                     )
                 )
-                await self._persist(
-                    "assistant",
-                    accumulated_content,
-                    metadata=self._build_assistant_metadata(
-                        thinking=accumulated_thinking,
-                        tool_calls=final_chunk.tool_calls if final_chunk else None,
-                        finish_reason=final_chunk.finish_reason if final_chunk else None,
-                        accumulated_usage=self._session_accumulated_usage,
-                    ),
-                    usage=final_chunk.usage if final_chunk else None,
-                )
-
-                # --- Act：有 tool_calls ---
+                # --- Act：有 tool_calls → 先执行工具，再写 assistant persist（携带 result）---
                 if final_chunk.tool_calls:
                     tool_calls = [
                         ToolCall(id=tc.id, name=tc.name, arguments=tc.arguments)
                         for tc in final_chunk.tool_calls
                     ]
 
+                    _tool_results_for_persist: List[Any] = []
                     if self.tool_executor is None:
                         logger.warning(
                             f"[AgentLoop:{self.config.agent_name}] "
@@ -552,6 +578,7 @@ class AgentLoop:
                             )
 
                         tool_results = await self.tool_executor.execute_all(tool_calls)
+                        _tool_results_for_persist = tool_results
 
                         for tr in tool_results:
                             raw_content = self._serialize_tool_result_content(tr.result)
@@ -589,11 +616,37 @@ class AgentLoop:
                                 is_error=tr.is_error,
                             )
 
+                    # 工具执行完毕后写 assistant 消息（携带 tool_results，使用预分配 seq）
+                    await self._persist(
+                        "assistant",
+                        accumulated_content,
+                        seq=_assistant_seq,
+                        metadata=self._build_assistant_metadata(
+                            thinking=accumulated_thinking,
+                            tool_calls=final_chunk.tool_calls,
+                            tool_results=_tool_results_for_persist,
+                            finish_reason=final_chunk.finish_reason if final_chunk else None,
+                            accumulated_usage=self._session_accumulated_usage,
+                        ),
+                        usage=final_chunk.usage if final_chunk else None,
+                    )
+
                     if self.on_loop_end is not None:
                         await self.on_loop_end(result.messages)
                     continue
 
-                # --- 无 tool_calls：检查结束 ---
+                # --- 无 tool_calls：写 assistant persist，再检查结束 ---
+                await self._persist(
+                    "assistant",
+                    accumulated_content,
+                    seq=_assistant_seq,
+                    metadata=self._build_assistant_metadata(
+                        thinking=accumulated_thinking,
+                        finish_reason=final_chunk.finish_reason if final_chunk else None,
+                        accumulated_usage=self._session_accumulated_usage,
+                    ),
+                    usage=final_chunk.usage if final_chunk else None,
+                )
                 finished = self._check_finished(final_chunk, accumulated_content)
                 if finished:
                     result.finished = True

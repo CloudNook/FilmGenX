@@ -9,7 +9,6 @@ from app.core.skill.base import Skill, SkillLite
 from app.core.skill.field import SkillField
 from app.core.skill.loader import (
     invalidate_cache,
-    list_active_skills,
     load_skill,
     load_skill_lite,
 )
@@ -22,6 +21,5 @@ __all__ = [
     # 加载接口
     "load_skill",
     "load_skill_lite",
-    "list_active_skills",
     "invalidate_cache",
 ]

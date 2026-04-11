@@ -83,9 +83,9 @@ function groupMessages(messages: AgentMessageResponse[]): DisplayGroup[] {
       });
       i++;
     } else if (msg.role === 'assistant') {
-      // 收集连续的 assistant 消息（thinking + content + tool_calls 是一个 assistant 消息）
-      const metadata = msg.tool_calls || [];
-      const thinking = msg.thinking;
+      const meta = msg.extra_metadata || {};
+      const thinking = meta.thinking;
+      const toolCallsMeta = meta.tool_calls;
 
       if (thinking) {
         groups.push({
@@ -97,28 +97,51 @@ function groupMessages(messages: AgentMessageResponse[]): DisplayGroup[] {
         });
       }
 
-      // 收集后续的 tool 消息
-      const toolResults: DisplayGroup['toolCalls'] = [];
-      let j = i + 1;
-      while (j < messages.length && messages[j].role === 'tool') {
-        toolResults.push({
-          id: messages[j].tool_call_id || `tool-${messages[j].seq}`,
-          name: messages[j].tool_name || 'unknown',
-          arguments: {},
-          result: messages[j].content,
-          isError: false,
-        });
-        j++;
-      }
-
-      if (toolResults.length > 0) {
+      // 优先从 extra_metadata.tool_calls 读取（含完整 arguments + result）
+      if (toolCallsMeta && toolCallsMeta.length > 0) {
         groups.push({
           id: `tools-${msg.seq}`,
           type: 'tool_calls',
           content: '',
-          toolCalls: toolResults,
+          toolCalls: toolCallsMeta.map((tc) => ({
+            id: tc.id,
+            name: tc.name,
+            arguments: tc.arguments || {},
+            result: tc.result,
+            isError: tc.is_error ?? false,
+          })),
           seq: msg.seq,
         });
+        // 跳过紧随其后的 tool 角色消息（它们已经合并进 extra_metadata）
+        let j = i + 1;
+        while (j < messages.length && messages[j].role === 'tool') {
+          j++;
+        }
+        i = j;
+      } else {
+        // 兼容旧数据：从后续 tool 消息拼装
+        const toolResults: DisplayGroup['toolCalls'] = [];
+        let j = i + 1;
+        while (j < messages.length && messages[j].role === 'tool') {
+          toolResults.push({
+            id: messages[j].tool_call_id || `tool-${messages[j].seq}`,
+            name: messages[j].tool_name || 'unknown',
+            arguments: {},
+            result: messages[j].content,
+            isError: false,
+          });
+          j++;
+        }
+        if (toolResults.length > 0) {
+          groups.push({
+            id: `tools-${msg.seq}`,
+            type: 'tool_calls',
+            content: '',
+            toolCalls: toolResults,
+            seq: msg.seq,
+          });
+        }
+        i = j;
       }
 
       if (msg.content) {
@@ -130,8 +153,6 @@ function groupMessages(messages: AgentMessageResponse[]): DisplayGroup[] {
           createdAt: msg.created_at,
         });
       }
-
-      i = j;
     } else if (msg.role === 'tool') {
       // 独立的 tool 消息（不应出现，但安全处理）
       groups.push({
@@ -235,8 +256,8 @@ export default function WorkspacePage({
       .get(projectIdNum, selectedWsId)
       .then((detail: WorkspaceDetailResponse) => {
         setMessages(detail.messages || []);
-        const lastAssistant = [...(detail.messages || [])].reverse().find((m) => m.role === 'assistant' && m.accumulated_usage);
-        if (lastAssistant?.accumulated_usage) setLastUsage(lastAssistant.accumulated_usage);
+        const lastAssistant = [...(detail.messages || [])].reverse().find((m) => m.role === 'assistant' && m.extra_metadata?.accumulated_usage);
+        if (lastAssistant?.extra_metadata?.accumulated_usage) setLastUsage(lastAssistant.extra_metadata.accumulated_usage);
       })
       .catch(() => setMessages([]));
   }, [selectedWsId, projectIdNum]);
@@ -307,8 +328,8 @@ export default function WorkspacePage({
       seq: messages.length,
       tool_call_id: null,
       tool_name: null,
-      thinking: null,
-      tool_calls: null,
+      usage: null,
+      extra_metadata: null,
       created_at: new Date().toISOString(),
     };
     setMessages((prev) => [...prev, tempUserMsg]);
@@ -378,8 +399,8 @@ export default function WorkspacePage({
           seq: prev.length,
           tool_call_id: null,
           tool_name: null,
-          thinking: null,
-          tool_calls: null,
+          usage: null,
+          extra_metadata: null,
           created_at: new Date().toISOString(),
         },
       ]);
@@ -888,22 +909,47 @@ function MessageGroup({
             <CollapsibleContent>
               <div className="space-y-1.5">
                 {group.toolCalls?.map((tc) => (
-                  <div key={tc.id} className="rounded-lg px-3 py-2 bg-primary/5 border border-primary/10 text-xs">
-                    <div className="flex items-center gap-1.5 mb-1">
-                      <Wrench className="h-3 w-3 text-primary" />
-                      <span className="font-medium text-foreground">{tc.name}</span>
-                      {tc.isError && (
-                        <Badge variant="outline" className="text-[10px] border-destructive/30 text-destructive">
-                          错误
-                        </Badge>
-                      )}
+                  <Collapsible key={tc.id} defaultOpen={false}>
+                    <div className="rounded-lg px-3 py-2 bg-primary/5 border border-primary/10 text-xs">
+                      <CollapsibleTrigger asChild>
+                        <button className="flex items-center gap-1.5 w-full text-left">
+                          <ChevronRight className="h-3 w-3 text-primary shrink-0 transition-transform [[data-state=open]>&]:rotate-90" />
+                          <Wrench className="h-3 w-3 text-primary shrink-0" />
+                          <span className="font-medium text-foreground">{tc.name}</span>
+                          {tc.isError && (
+                            <Badge variant="outline" className="text-[10px] border-destructive/30 text-destructive ml-1">
+                              错误
+                            </Badge>
+                          )}
+                          {tc.result != null && !tc.isError && (
+                            <Badge variant="outline" className="text-[10px] border-primary/30 text-primary ml-1">
+                              完成
+                            </Badge>
+                          )}
+                        </button>
+                      </CollapsibleTrigger>
+                      <CollapsibleContent>
+                        <div className="mt-2 space-y-2">
+                          {tc.arguments && Object.keys(tc.arguments).length > 0 && (
+                            <div>
+                              <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">参数</p>
+                              <pre className="text-muted-foreground bg-background/60 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">
+                                {JSON.stringify(tc.arguments, null, 2)}
+                              </pre>
+                            </div>
+                          )}
+                          {tc.result != null && (
+                            <div>
+                              <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">结果</p>
+                              <pre className={`bg-background/60 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all ${tc.isError ? 'text-destructive' : 'text-muted-foreground'}`}>
+                                {typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)}
+                              </pre>
+                            </div>
+                          )}
+                        </div>
+                      </CollapsibleContent>
                     </div>
-                    {tc.result != null && (
-                      <p className="text-muted-foreground line-clamp-3">
-                        {(typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result)).slice(0, 200)}
-                      </p>
-                    )}
-                  </div>
+                  </Collapsible>
                 ))}
               </div>
             </CollapsibleContent>
@@ -989,25 +1035,54 @@ function StreamingMessageGroup({
           </Avatar>
           <div className="max-w-[80%] space-y-1.5">
             {streaming.toolCalls.map((tc) => (
-              <div key={tc.id} className="rounded-lg px-3 py-2 bg-primary/5 border border-primary/10 text-xs">
-                <div className="flex items-center gap-1.5">
-                  {tc.finished ? (
-                    <Wrench className="h-3 w-3 text-primary" />
-                  ) : (
-                    <Loader2 className="h-3 w-3 animate-spin text-primary" />
-                  )}
-                  <span className="font-medium text-foreground">{tc.name}</span>
-                  {tc.finished ? (
-                    <Badge variant="outline" className="text-[10px] border-green-500/30 text-green-600">
-                      完成
-                    </Badge>
-                  ) : (
-                    <Badge variant="outline" className="text-[10px] border-yellow-500/30 text-yellow-600">
-                      执行中
-                    </Badge>
+              <Collapsible key={tc.id} defaultOpen={false}>
+                <div className="rounded-lg px-3 py-2 bg-primary/5 border border-primary/10 text-xs">
+                  <div className="flex items-center gap-1.5">
+                    {tc.finished ? (
+                      <CollapsibleTrigger asChild>
+                        <button className="flex items-center gap-1.5 w-full text-left">
+                          <ChevronRight className="h-3 w-3 text-primary shrink-0 transition-transform [[data-state=open]>&]:rotate-90" />
+                          <Wrench className="h-3 w-3 text-primary shrink-0" />
+                          <span className="font-medium text-foreground">{tc.name}</span>
+                          {tc.isError ? (
+                            <Badge variant="outline" className="text-[10px] border-destructive/30 text-destructive ml-1">错误</Badge>
+                          ) : (
+                            <Badge variant="outline" className="text-[10px] border-primary/30 text-primary ml-1">完成</Badge>
+                          )}
+                        </button>
+                      </CollapsibleTrigger>
+                    ) : (
+                      <>
+                        <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />
+                        <span className="font-medium text-foreground">{tc.name}</span>
+                        <Badge variant="outline" className="text-[10px] border-yellow-500/30 text-yellow-600 ml-1">执行中</Badge>
+                      </>
+                    )}
+                  </div>
+                  {tc.finished && (
+                    <CollapsibleContent>
+                      <div className="mt-2 space-y-2">
+                        {tc.arguments && Object.keys(tc.arguments).length > 0 && (
+                          <div>
+                            <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">参数</p>
+                            <pre className="text-muted-foreground bg-background/60 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">
+                              {JSON.stringify(tc.arguments, null, 2)}
+                            </pre>
+                          </div>
+                        )}
+                        {tc.result != null && (
+                          <div>
+                            <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">结果</p>
+                            <pre className={`bg-background/60 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all ${tc.isError ? 'text-destructive' : 'text-muted-foreground'}`}>
+                              {typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)}
+                            </pre>
+                          </div>
+                        )}
+                      </div>
+                    </CollapsibleContent>
                   )}
                 </div>
-              </div>
+              </Collapsible>
             ))}
           </div>
         </div>

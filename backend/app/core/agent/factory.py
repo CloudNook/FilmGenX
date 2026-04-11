@@ -71,7 +71,7 @@ def create_agent(
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     tools: Optional[List[Dict[str, Any]]] = None,
-    skill_lite_list: Optional[List[Dict[str, Any]]] = None,
+    skill_names: Optional[List[str]] = None,
     max_loop: int = 20,
     persist: PersistArg = None,
     middlewares: Optional[List[AgentMiddleware]] = None,
@@ -82,28 +82,28 @@ def create_agent(
     注意：此方法仅创建实例，不执行。
     实际执行需调用 agent.run() 或 agent.stream()。
 
+    Skill 加载时机：run() / stream() 开始时根据 skill_names 懒加载，
+    DB session 从 persist（DBPersistStrategy）中获取。
+
     Args:
-        agent_name:      Agent 名称
-        session_id:      会话 ID，用于多轮对话持久化
-        prompt:          系统提示词（基础部分）
-        model:           LLM 模型名称
-        temperature:     温度参数
-        max_tokens:      最大 token 数
-        tools:           工具列表
-        skill_lite_list: Skill 摘要列表（从 DB 加载，会注入到 system prompt）
-        max_loop:        最大循环次数
-        persist:         持久化策略，"redis" | PersistStrategy 实例 | None
-                          DB 持久化示例：persist=DBPersistStrategy(db=session)
-        middlewares:     中间件列表
+        agent_name:  Agent 名称
+        session_id:  会话 ID，用于多轮对话持久化
+        prompt:      系统提示词（基础部分）
+        model:       LLM 模型名称
+        temperature: 温度参数
+        max_tokens:  最大 token 数
+        tools:       工具列表
+        skill_names: 绑定的 Skill 名称列表，run/stream 时懒加载注入 prompt
+        max_loop:    最大循环次数
+        persist:     持久化策略，"redis" | PersistStrategy 实例 | None
+        middlewares: 中间件列表
 
     Returns:
         Agent 实例，需调用 run() / stream() 执行
     """
-    full_prompt = _build_system_prompt_with_skills(prompt, skill_lite_list or [])
-
     config = AgentConfig(
         agent_name=agent_name,
-        prompt=full_prompt,
+        prompt=prompt,
         model=model,
         temperature=temperature,
         max_tokens=max_tokens,
@@ -113,16 +113,10 @@ def create_agent(
 
     persist_strategy = _resolve_persist(persist)
 
-    if skill_lite_list:
-        logger.info(
-            f"[create_agent] agent={agent_name}, "
-            f"skills_injected={len(skill_lite_list)}, "
-            f"persist={persist_strategy.name if persist_strategy else 'none'}"
-        )
-
     return Agent(
         config=config,
         session_id=session_id,
+        skill_names=skill_names or [],
         persist=persist_strategy,
         middlewares=middlewares,
     )

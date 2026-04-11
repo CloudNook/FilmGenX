@@ -109,7 +109,7 @@ async def scenario_plain_text_final_schema() -> None:
     print("=" * 60)
 
     agent = create_agent(
-        agent_name="assistant",
+        agent_name="outline_agent",
         session_id=session_id,
         prompt=(
             "你是一个科普助手。"
@@ -123,6 +123,23 @@ async def scenario_plain_text_final_schema() -> None:
             FinalSchemaResponseMiddleware(ScienceAnswerSchema),
         ],
     )
+    
+    agent2 = create_agent(
+        agent_name="planner",
+        session_id=session_id,
+        prompt=(
+            "你是一个科普助手。"
+            "可以进行内部分析，但最终面向用户的文字回答要简洁清楚。"
+        ),
+        model="gemini-3-pro-preview",
+        max_loop=5,
+        persist=PERSIST,
+        middlewares=[
+            LoggingMiddleware(),
+            FinalSchemaResponseMiddleware(ScienceAnswerSchema),
+        ],
+    )
+    
 
     events = await stream_and_collect(
         agent,

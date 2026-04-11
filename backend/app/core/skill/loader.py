@@ -21,29 +21,20 @@ logger = logging.getLogger(__name__)
 
 async def load_skill_lite(
     db: "AsyncSession",
-    skill_names: List[str],
 ) -> List[Dict[str, Any]]:
     """
-    批量加载指定 Skill 的摘要（不含 content）。
+    加载所有 Skill 摘要（不含 content）。
 
     用于 Agent 启动时注入 Skill 基本信息到提示词。
 
     Args:
         db: 数据库会话
-        skill_names: Skill 名称列表
 
     Returns:
         SkillLite 列表（name, title, description, parameters）
     """
     service = SkillService(db)
-    all_lite = await service.list_lite()
-
-    if not skill_names:
-        return all_lite
-
-    # 按 name 过滤
-    name_set = set(skill_names)
-    return [s for s in all_lite if s["name"] in name_set]
+    return await service.list_lite()
 
 
 async def load_skill(
@@ -67,23 +58,6 @@ async def load_skill(
     service = SkillService(db)
     return await service.get_skill_fields(skill_name, fields=fields)
 
-
-async def list_active_skills(
-    db: "AsyncSession",
-) -> List[Dict[str, Any]]:
-    """
-    获取所有已启用的 Skill 摘要。
-
-    用于 AgentFactory 在构建 system prompt 时注入可用 Skill 列表。
-
-    Args:
-        db: 数据库会话
-
-    Returns:
-        所有活跃 Skill 的摘要列表
-    """
-    service = SkillService(db)
-    return await service.list_lite()
 
 
 async def invalidate_cache(skill_name: Optional[str] = None) -> None:

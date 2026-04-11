@@ -54,12 +54,10 @@ class AgentMessageResponse(BaseModel):
     seq: int
     tool_call_id: Optional[str] = None
     tool_name: Optional[str] = None
-    thinking: Optional[str] = Field(None, description="思考过程，从 metadata 中提取")
-    tool_calls: Optional[List[Dict[str, Any]]] = Field(
-        None, description="工具调用列表，从 metadata 中提取"
-    )
     usage: Optional[Dict[str, Any]] = Field(None, description="本条消息的 token 用量（assistant 消息）")
-    accumulated_usage: Optional[Dict[str, Any]] = Field(None, description="截至本条消息的会话累积 token 用量")
+    extra_metadata: Optional[Dict[str, Any]] = Field(
+        None, description="完整 metadata（含 thinking、tool_calls、accumulated_usage 等）"
+    )
     created_at: Optional[datetime] = None
 
 
