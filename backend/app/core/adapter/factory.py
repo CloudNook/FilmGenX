@@ -5,7 +5,6 @@ LLM Adapter 工厂。
 """
 
 import logging
-from typing import Optional
 
 from app.core.adapter.base import ProviderAdapter
 from app.core.adapter.gemini import GeminiAdapter
@@ -30,6 +29,17 @@ _MODEL_PREFIX_MAP: list[tuple[list[str], str]] = [
 _ADAPTER_CACHE: dict[str, ProviderAdapter] = {}
 
 
+def _get_or_create_adapter(provider: str) -> ProviderAdapter:
+    adapter_cls = _PROVIDERS.get(provider)
+    if adapter_cls is None:
+        raise ValueError(f"Provider '{provider}' is not registered")
+
+    if provider not in _ADAPTER_CACHE:
+        _ADAPTER_CACHE[provider] = adapter_cls()
+
+    return _ADAPTER_CACHE[provider]
+
+
 def get_adapter(model: str) -> ProviderAdapter:
     """
     根据 model name 选择对应的适配器（带实例缓存）。
@@ -47,17 +57,11 @@ def get_adapter(model: str) -> ProviderAdapter:
 
     for prefixes, provider in _MODEL_PREFIX_MAP:
         if any(model_lower.startswith(p) for p in prefixes):
-            if provider not in _ADAPTER_CACHE:
-                adapter_cls = _PROVIDERS.get(provider)
-                if adapter_cls:
-                    _ADAPTER_CACHE[provider] = adapter_cls()
-            return _ADAPTER_CACHE[provider]
+            return _get_or_create_adapter(provider)
 
-    # 默认尝试 Gemini
-    logger.warning(f"Unknown model '{model}', defaulting to GeminiAdapter")
-    if "gemini" not in _ADAPTER_CACHE:
-        _ADAPTER_CACHE["gemini"] = GeminiAdapter()
-    return _ADAPTER_CACHE["gemini"]
+    raise ValueError(
+        f"Unsupported model '{model}'. Register a provider or model prefix first."
+    )
 
 
 def register_provider(name: str, adapter_cls: type[ProviderAdapter]) -> None:

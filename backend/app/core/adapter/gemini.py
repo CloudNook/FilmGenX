@@ -212,10 +212,10 @@ class GeminiAdapter(ProviderAdapter):
         tool_calls = []
         text_parts = []
         thinking_parts = []
+        parts_info = []
 
-        for candidate in response.candidates:
-            parts_info = []
-            for part in candidate.content.parts:
+        for candidate in response.candidates or []:
+            for part in getattr(candidate.content, "parts", []):
                 if hasattr(part, "text") and part.text:
                     # Gemini thinking 模型：thought=True 的 part 是思考过程，不是最终回答
                     if getattr(part, "thought", False):

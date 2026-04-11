@@ -70,7 +70,7 @@ class DBPersistStrategy(PersistStrategy):
         写入一条消息（不自动 commit）。
 
         注意：事务管理由调用方负责。
-        需要手动调用 flush() 或自行 commit() 以确保写入生效。
+        调用 flush() 可使当前事务内的后续查询看到这些消息，最终提交仍需由外层事务决定。
         """
         record = AgentMessageRecord(
             session_id=session_id,
@@ -86,5 +86,5 @@ class DBPersistStrategy(PersistStrategy):
         self.db.add(record)
 
     async def flush(self) -> None:
-        """提交当前事务。"""
-        await self.db.commit()
+        """将待写入消息同步到当前事务，最终提交由调用方负责。"""
+        await self.db.flush()

@@ -8,7 +8,8 @@ Tool 注册表 - 装饰器式工具注册。
 
 import inspect
 import logging
-from typing import Any, Callable, Dict, Optional
+from types import UnionType
+from typing import Any, Callable, Dict, Optional, Union, get_args, get_origin
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,40 @@ class ToolFunc:
     # 框架运行时注入的参数，不属于工具接口，不暴露给 LLM
     _INJECTED_PARAMS = frozenset({"db"})
 
+    def _annotation_to_schema(self, annotation: Any) -> Dict[str, Any]:
+        if annotation == inspect.Parameter.empty:
+            return {"type": "string"}
+        if annotation in (int, "int"):
+            return {"type": "integer"}
+        if annotation in (float, "float"):
+            return {"type": "number"}
+        if annotation in (bool, "bool"):
+            return {"type": "boolean"}
+        if annotation in (list, "list", tuple, "tuple", set, "set"):
+            return {"type": "array", "items": {"type": "string"}}
+        if annotation in (dict, "dict"):
+            return {"type": "object"}
+
+        origin = get_origin(annotation)
+        args = get_args(annotation)
+
+        if origin in (list, tuple, set):
+            item_annotation = args[0] if args else inspect.Parameter.empty
+            return {
+                "type": "array",
+                "items": self._annotation_to_schema(item_annotation),
+            }
+
+        if origin is dict:
+            return {"type": "object"}
+
+        if origin in (UnionType, Union):
+            non_none_args = [arg for arg in args if arg is not type(None)]
+            if len(non_none_args) == 1:
+                return self._annotation_to_schema(non_none_args[0])
+
+        return {"type": "string"}
+
     def _infer_schema(self, func: Callable) -> Dict[str, Any]:
         """从函数签名推断 JSON Schema。"""
         sig = inspect.signature(func)
@@ -47,22 +82,8 @@ class ToolFunc:
             # db 等：ToolExecutor 运行时注入，不是工具接口的一部分
             if param_name in self._INJECTED_PARAMS:
                 continue
-            if param.annotation == inspect.Parameter.empty:
-                param_type = "string"
-            elif param.annotation in (int, "int"):
-                param_type = "integer"
-            elif param.annotation in (float, "float"):
-                param_type = "number"
-            elif param.annotation in (bool, "bool"):
-                param_type = "boolean"
-            elif param.annotation in (list, "list", tuple, "tuple"):
-                param_type = "array"
-            elif param.annotation in (dict, "dict"):
-                param_type = "object"
-            else:
-                param_type = "string"
 
-            properties[param_name] = {"type": param_type}
+            properties[param_name] = self._annotation_to_schema(param.annotation)
             if param.default == inspect.Parameter.empty:
                 required.append(param_name)
 

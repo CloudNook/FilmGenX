@@ -70,8 +70,8 @@ class PersistStrategy(ABC):
 
     async def flush(self) -> None:
         """
-        提交当前事务（DB 策略需要；Redis 等立即写入的实现为空操作）。
+        同步当前批次的待写入消息（DB 等事务型策略可选择 flush，最终提交由调用方决定）。
 
-        在 AgentLoop.run() 结束时由调用方触发，确保所有消息落盘。
+        在 AgentLoop.run() 结束时由调用方触发，确保后续读取能看到本批消息。
         """
         pass

@@ -19,16 +19,16 @@ from app.core.tools.registry import register_tool
         "Args:\n"
         "  skill_name: Skill 的唯一名称\n"
         "  fields: 可选，要查看的字段列表，如 ['content', 'parameters', 'examples']\n"
-        "        可选值：title, description, content, parameters, examples, constraints, metadata\n"
+        "        可选值：name, title, description, content, parameters, examples, constraints\n"
         "Returns:\n"
-        "  Skill 的完整信息或指定字段"
+        "  Skill 的完整信息或指定字段，未找到返回 None"
     ),
 )
 async def load_skill(
     skill_name: str,
     fields: Optional[List[str]] = None,
     db: Optional[Any] = None,
-) -> Dict[str, Any]:
+) -> Optional[Dict[str, Any]]:
     """
     按名称加载完整 Skill。
 
@@ -36,13 +36,16 @@ async def load_skill(
 
     Args:
         skill_name: Skill 名称
-        fields: 可选，指定要返回的字段列表（对应 SkillField 枚举值）
+        fields: 可选，指定要返回的字段列表
         db: 数据库会话
 
     Returns:
-        Skill 信息字典
+        Skill 信息字典，未找到返回 None
     """
-    from app.core.skill import load_skill as _load_skill
+    from app.core.skill.loader import load_skill as _load_skill
+
+    if db is None:
+        return {"error": "数据库会话未提供"}
 
     return await _load_skill(db=db, skill_name=skill_name, fields=fields)
 
@@ -50,12 +53,12 @@ async def load_skill(
 @register_tool(
     name="load_skill_lite",
     description=(
-        "按名称加载 Skill 摘要信息（title、description、parameters）。\n"
+        "批量加载 Skill 摘要信息（title、description、parameters）。\n"
         "用于 Agent 创建时注入 Skill 的基本信息到提示词中。\n"
         "Args:\n"
-        "  skill_names: Skill 名称列表\n"
+        "  skill_names: Skill 名称列表，为空则返回所有活跃 Skill\n"
         "Returns:\n"
-        "  每个 Skill 的基本信息"
+        "  每个 Skill 的基本信息列表"
     ),
 )
 async def load_skill_lite(
@@ -63,18 +66,20 @@ async def load_skill_lite(
     db: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     """
-    按名称加载 Skill 摘要。
+    批量加载 Skill 摘要。
 
     用于 Agent 初始化时获取 Skill 的基本信息，注入到提示词中。
 
     Args:
-        skill_names: Skill 名称列表
+        skill_names: Skill 名称列表，为空则返回所有活跃 Skill
         db: 数据库会话
 
     Returns:
         Skill 摘要列表
     """
-    from app.core.skill import load_skill_lite as _load_skill_lite
+    from app.core.skill.loader import load_skill_lite as _load_skill_lite
 
-    skills = await _load_skill_lite(db=db, skill_names=skill_names)
-    return [skill.model_dump() for skill in skills]
+    if db is None:
+        return [{"error": "数据库会话未提供"}]
+
+    return await _load_skill_lite(db=db, skill_names=skill_names)
