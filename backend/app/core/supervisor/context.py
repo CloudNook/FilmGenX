@@ -2,10 +2,18 @@
 Supervisor 流水线工作内存。
 """
 
-from typing import Any, Dict, List, Optional
-from uuid import uuid4
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
+
+
+class ReviewEntry(BaseModel):
+    """评估历史条目。"""
+    agent: str
+    score: float
+    passed: bool
+    feedback: str
+    suggestions: list[str] = []
 
 
 class SupervisorContext(BaseModel):
@@ -18,7 +26,7 @@ class SupervisorContext(BaseModel):
 
     supervisor_session_id: str = Field(..., description="Supervisor session ID")
     user_request: str = Field(..., description="用户原始需求")
-    current_phase: str = Field(
+    current_phase: Literal["init", "outline", "script", "storyboard", "review", "done"] = Field(
         default="init",
         description="当前流水线阶段：init | outline | script | storyboard | review | done",
     )
@@ -30,7 +38,7 @@ class SupervisorContext(BaseModel):
         default_factory=dict,
         description="sub_agent_name → session_id 的映射",
     )
-    review_history: List[Dict[str, Any]] = Field(
+    review_history: List[ReviewEntry] = Field(
         default_factory=list,
         description="评估历史：[{agent, score, passed, feedback}, ...]",
     )

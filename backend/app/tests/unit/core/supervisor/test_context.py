@@ -31,3 +31,13 @@ def test_supervisor_context_register_sub_session():
     )
     ctx.sub_agent_sessions["outline_writer"] = "sub-outline-001"
     assert ctx.sub_agent_sessions["outline_writer"] == "sub-outline-001"
+
+
+def test_supervisor_context_metadata():
+    ctx = SupervisorContext(
+        supervisor_session_id="sv-abc123",
+        user_request="测试",
+    )
+    assert ctx.metadata == {}
+    ctx.metadata["key"] = "value"
+    assert ctx.metadata["key"] == "value"
