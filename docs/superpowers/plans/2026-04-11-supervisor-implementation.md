@@ -8,6 +8,17 @@
 
 **Tech Stack:** Python 3.11+, FastAPI, Pydantic, Redis, asyncio
 
+**并发安全说明：**
+- `ProviderAdapter`（HTTP 客户端）在 `_ADAPTER_CACHE` 中全局缓存，每个进程每种 Provider 只创建一个 HTTP 客户端。SubAgent 之间复用，**不复制**。
+- 每个 SubAgent 内存占用约 ~200 KB（主要是 AgentLoop.messages，最大 20 轮对话历史）。
+- OOM 主要风险来源是 SubAgent 数量失控，而非单个实例。
+- LLM API Rate Limit 是真实瓶颈，高并发下 429 错误先于 OOM 触发。
+
+**防御措施（纳入 Task 15）：**
+- **Semaphore 限流**：全局 SubAgent 并发上限（默认 20），超限则排队，防止数量爆炸
+- **SubAgent 硬超时**：每个 SubAgent 最大执行时间 5 分钟，超时强制中断
+- **messages 裁剪**：Supervisor 可通过 middleware 在 SubAgent 调用前压缩历史消息
+
 ---
 
 ## 文件结构
@@ -28,6 +39,9 @@ backend/app/core/
 ├── agent/tool.py       # MODIFY: ToolExecutor 新增 execute_streaming_tool() 方法
 └── agent/persist/
     └── models.py       # MODIFY: agent_messages 表新增 supervisor_session_id 字段
+
+backend/app/core/supervisor/
+├── concurrency.py      # SubAgent 并发控制（Semaphore + 超时）
 
 backend/app/core/tools/
 └── supervisor_tools.py  # 导入 supervisor.tools 以触发 @register_tool 装饰器
@@ -53,7 +67,8 @@ backend/app/core/tools/
 | 12 | `supervisor_workflows` 表 | `agent/persist/models.py` |
 | 13 | `agent_messages` 表加字段 | `agent/persist/models.py` |
 | 14 | SupervisorWorkflow Service | `supervisor/workflow_service.py` |
-| 15 | DB 持久化改造 `call_sub_agent` | `supervisor/tools.py` |
+| 15 | SubAgent 并发控制（Semaphore + 超时） | `supervisor/concurrency.py` |
+| 16 | DB 持久化改造 `call_sub_agent` | `supervisor/tools.py` |
 
 ---
 
@@ -2225,7 +2240,195 @@ cd backend && git add app/core/supervisor/workflow_service.py app/tests/unit/cor
 ```
 ---
 
-## Task 15: `call_sub_agent` 工具集成 DB 持久化
+## Task 15: SubAgent 并发控制（Semaphore + 超时）
+
+**Files:**
+- Create: `backend/app/core/supervisor/concurrency.py`
+- Tests: `backend/app/tests/unit/core/supervisor/test_concurrency.py`
+
+**目标**：防止 SubAgent 数量失控，保护 LLM API Rate Limit 配额。
+
+- [ ] **Step 1: 编写测试**
+
+```python
+# backend/app/tests/unit/core/supervisor/test_concurrency.py
+import pytest
+import asyncio
+from app.core.supervisor.concurrency import SubAgentConcurrencyLimiter
+
+
+def test_semaphore_blocks_when_full():
+    limiter = SubAgentConcurrencyLimiter(max_concurrent=2)
+
+    async def fake_subagent(name: str, delay: float = 0.1):
+        async with limiter.acquire(name):
+            await asyncio.sleep(delay)
+            return f"done:{name}"
+
+    async def run():
+        results = []
+
+        async def runner():
+            for i in range(4):
+                r = await fake_subagent(f"sub-{i}", delay=0.05)
+                results.append(r)
+
+        await asyncio.gather(runner())
+        return results
+
+    results = asyncio.run(run())
+    assert len(results) == 4
+
+
+def test_timeout_raises():
+    limiter = SubAgentConcurrencyLimiter(max_concurrent=1, timeout_seconds=0.1)
+
+    async def slow_task():
+        async with limiter.acquire("slow"):
+            await asyncio.sleep(1.0)
+            return "done"
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(slow_task())
+
+
+def test_active_count():
+    limiter = SubAgentConcurrencyLimiter(max_concurrent=3)
+
+    async def fake(name: str):
+        async with limiter.acquire(name):
+            assert limiter.active_count() >= 1
+            await asyncio.sleep(0.01)
+
+    async def run():
+        await asyncio.gather(fake("a"), fake("b"))
+
+    asyncio.run(run())
+    assert limiter.active_count() == 0
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+```bash
+cd backend && python -m pytest app/tests/unit/core/supervisor/test_concurrency.py -v
+```
+Expected: FAIL — module not found
+
+- [ ] **Step 3: 编写实现**
+
+```python
+# backend/app/core/supervisor/concurrency.py
+"""
+SubAgent 并发控制：Semaphore 限流 + 超时保护。
+"""
+
+import asyncio
+import logging
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_MAX_CONCURRENT = 20
+DEFAULT_TIMEOUT_SECONDS = 300  # 5 分钟
+
+
+class SubAgentConcurrencyLimiter:
+    """
+    全局 SubAgent 并发控制（进程级别单例）。
+
+    - Semaphore 控制同时运行的 SubAgent 数量上限（默认 20）
+    - 超时保护防止单个 SubAgent 长时间占用资源（默认 5 分钟）
+    """
+
+    _instance: Optional["SubAgentConcurrencyLimiter"] = None
+
+    def __init__(
+        self,
+        max_concurrent: int = DEFAULT_MAX_CONCURRENT,
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    ):
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._max_concurrent = max_concurrent
+        self._timeout_seconds = timeout_seconds
+        self._active: int = 0
+        self._active_lock = asyncio.Lock()
+
+    @classmethod
+    def get_instance(
+        cls,
+        max_concurrent: int = DEFAULT_MAX_CONCURRENT,
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    ) -> "SubAgentConcurrencyLimiter":
+        """获取全局单例。"""
+        if cls._instance is None:
+            cls._instance = cls(max_concurrent=max_concurrent, timeout_seconds=timeout_seconds)
+        return cls._instance
+
+    async def acquire(self, sub_agent_name: str):
+        """获取 SubAgent 执行许可，超时则抛出 asyncio.TimeoutError。"""
+        logger.info(
+            f"[ConcurrencyLimiter] acquiring permit for {sub_agent_name}, "
+            f"active={self._active}/{self._max_concurrent}"
+        )
+        try:
+            await asyncio.wait_for(
+                self._semaphore.acquire(),
+                timeout=self._timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                f"[ConcurrencyLimiter] timeout acquiring permit for {sub_agent_name} "
+                f"({self._timeout_seconds}s), active={self._active}"
+            )
+            raise
+
+        async with self._active_lock:
+            self._active += 1
+        return _SubAgentPermit(self, sub_agent_name)
+
+    def release(self, sub_agent_name: str) -> None:
+        self._semaphore.release()
+        self._active -= 1
+        logger.info(
+            f"[ConcurrencyLimiter] released for {sub_agent_name}, "
+            f"active={self._active}/{self._max_concurrent}"
+        )
+
+    def active_count(self) -> int:
+        return self._active
+
+
+class _SubAgentPermit:
+    __slots__ = ("_limiter", "_name")
+
+    def __init__(self, limiter: SubAgentConcurrencyLimiter, name: str):
+        self._limiter = limiter
+        self._name = name
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        self._limiter.release(self._name)
+        return False
+```
+
+- [ ] **Step 4: 运行测试，确认通过**
+
+```bash
+cd backend && python -m pytest app/tests/unit/core/supervisor/test_concurrency.py -v
+```
+Expected: PASS
+
+- [ ] **Step 5: 提交**
+
+```bash
+cd backend && git add app/core/supervisor/concurrency.py app/tests/unit/core/supervisor/test_concurrency.py && git commit -m "feat(supervisor): add SubAgentConcurrencyLimiter with Semaphore + timeout"
+```
+
+---
+
+## Task 16: `call_sub_agent` 工具集成 DB 持久化
 
 **Files:**
 - Modify: `backend/app/core/supervisor/tools.py`（call_sub_agent 写入 DB）
@@ -2323,15 +2526,17 @@ cd backend && git add app/core/supervisor/tools.py app/core/supervisor/superviso
 
 ## 自检清单
 
-- [ ] 所有测试路径存在：`test_context.py`, `test_session.py`, `test_events.py`, `test_tools.py`, `test_reviewer.py`, `test_supervisor.py`, `test_factory.py`, `test_workflow.py`, `test_workflow_service.py`, `test_db_persist.py`
-- [ ] Task 1-15 所有步骤完成并提交
+- [ ] 所有测试路径存在：`test_context.py`, `test_session.py`, `test_events.py`, `test_tools.py`, `test_reviewer.py`, `test_supervisor.py`, `test_factory.py`, `test_workflow.py`, `test_workflow_service.py`, `test_db_persist.py`, `test_concurrency.py`
+- [ ] Task 1-16 所有步骤完成并提交
 - [ ] `call_sub_agent`, `call_reviewer`, `get_workflow_state` 均已注册到 ToolRegistry
 - [ ] API 路由 `/supervisor/stream` 可访问
 - [ ] `supervisor_workflows` 表已创建（含 artifacts/review_history/status 字段）
 - [ ] `agent_messages` 表已加 `supervisor_session_id` 字段
 - [ ] SubAgent 完成后产物写入 `supervisor_workflows.artifacts`
 - [ ] 每个 Review 结果追加到 `supervisor_workflows.review_history`
+- [ ] `SubAgentConcurrencyLimiter` 已实现，全局 Semaphore 上限生效
 - [ ] 无 "TBD"/"TODO" 占位符
 - [ ] SupervisorContext 不被 SubAgent 直接访问（隔离原则）
 - [ ] SubAgent 工具支持 async generator 流式事件透传
 - [ ] 多用户并发无数据串扰（每个 Supervisor 独立 session_id）
+- [ ] HTTP 客户端已复用（_ADAPTER_CACHE 全局缓存），SubAgent 无重复 HTTP 客户端
