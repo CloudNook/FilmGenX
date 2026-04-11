@@ -35,3 +35,4 @@ backend/storage/
 docs/img/
 backend/test_*.py
 backend/test_image*.py
+.worktrees/
