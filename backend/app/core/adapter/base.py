@@ -75,9 +75,13 @@ class ProviderAdapter(ABC):
         messages: List[Dict[str, Any]],
         system_prompt: str = "",
         **kwargs,
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[LLMResponse, None]:
         """
         流式生成。
+
+        每个 chunk 是一个 LLMResponse：
+        - content 非空：文本片段，立刻 yield 给调用方
+        - tool_calls 非空 + finish_reason 非空：本轮完整响应，包含工具调用
 
         Args:
             messages: 消息列表
@@ -85,7 +89,7 @@ class ProviderAdapter(ABC):
             **kwargs: 其他参数
 
         Yields:
-            文本片段
+            LLMResponse chunk
         """
         ...
 

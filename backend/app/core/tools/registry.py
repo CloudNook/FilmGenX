@@ -32,13 +32,20 @@ class ToolFunc:
         self.description = description or func.__doc__ or ""
         self.parameters_schema = parameters_schema or self._infer_schema(func)
 
+    # 框架运行时注入的参数，不属于工具接口，不暴露给 LLM
+    _INJECTED_PARAMS = frozenset({"db"})
+
     def _infer_schema(self, func: Callable) -> Dict[str, Any]:
         """从函数签名推断 JSON Schema。"""
         sig = inspect.signature(func)
         properties = {}
         required = []
         for param_name, param in sig.parameters.items():
+            # self/cls：Python 语言层面，不是参数
             if param_name in ("self", "cls"):
+                continue
+            # db 等：ToolExecutor 运行时注入，不是工具接口的一部分
+            if param_name in self._INJECTED_PARAMS:
                 continue
             if param.annotation == inspect.Parameter.empty:
                 param_type = "string"
@@ -116,7 +123,6 @@ class ToolRegistry:
 
             if tool_name in cls._tools:
                 logger.warning(f"Tool '{tool_name}' already registered, overwriting")
-
             cls._tools[tool_name] = ToolFunc(
                 func=fn,
                 name=tool_name,
@@ -170,14 +176,15 @@ class ToolRegistry:
             attr = getattr(mod, attr_name)
             if callable(attr) and hasattr(attr, "_tool_name"):
                 tool_name = getattr(attr, "_tool_name") or attr_name
-                if tool_name not in cls._tools:
-                    cls._tools[tool_name] = ToolFunc(
-                        func=attr,
-                        name=tool_name,
-                        description=getattr(attr, "_tool_description", "") or (attr.__doc__ or ""),
-                        parameters_schema=getattr(attr, "_tool_schema", None),
-                    )
-                    logger.info(f"[ToolRegistry] Discovered tool: {tool_name}")
+                if tool_name in cls._tools:
+                    continue
+                cls._tools[tool_name] = ToolFunc(
+                    func=attr,
+                    name=tool_name,
+                    description=getattr(attr, "_tool_description", "") or (attr.__doc__ or ""),
+                    parameters_schema=getattr(attr, "_tool_schema", None),
+                )
+                logger.info(f"[ToolRegistry] Discovered tool: {tool_name}")
 
 
 def register_tool(

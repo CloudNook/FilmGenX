@@ -36,62 +36,15 @@ class LLMResponse(BaseModel):
     LLM 结构化响应。
 
     替代原来 generate() 返回纯文本的设计，
-    包含文本内容和结构化工具调用（原生 API 返回）。
+    包含文本内容、思考过程和结构化工具调用（原生 API 返回）。
     """
 
-    content: str = Field(default="", description="文本内容")
+    content: str = Field(default="", description="文本内容（最终回答）")
+    thinking: str = Field(default="", description="思考过程（仅 thinking 模型填充，如 Gemini Flash Thinking）")
     tool_calls: List[StructuredToolCall] = Field(default_factory=list, description="结构化工具调用列表")
     finish_reason: Optional[str] = Field(None, description="停止原因（stop / tool_calls 等）")
     usage: Optional[Dict[str, Any]] = Field(None, description="Token 用量")
     raw: Optional[Dict[str, Any]] = Field(default=None, description="Provider 原生响应数据")
-
-
-# ----------------------------------------------------------------------
-# 消息格式（统一格式，各 Provider 适配器负责转换）
-# ----------------------------------------------------------------------
-
-
-class UnifiedToolMessage(BaseModel):
-    """
-    统一的 tool 角色消息。
-
-    用于将工具结果加入消息历史时构建的标准格式。
-    各 Provider 适配器在 build_request 时转换为 Provider 原生格式。
-
-    OpenAI 格式: {"role": "tool", "tool_call_id": "...", "content": "..."}
-    Gemini 格式: {"role": "user", "parts": [{"functionResponse": {...}}]
-    """
-
-    role: Literal["tool"] = "tool"
-    tool_call_id: str = Field(..., description="工具调用 ID（必须与请求中的 tool_call.id 对应）")
-    tool_name: str = Field(..., description="工具名称")
-    content: str = Field(default="", description="工具执行结果（序列化后的字符串）")
-
-    def to_provider_format(self, provider: str) -> Dict[str, Any]:
-        """转换为 Provider 原生消息格式。"""
-        if provider == "openai":
-            return {
-                "role": "tool",
-                "tool_call_id": self.tool_call_id,
-                "content": self.content,
-            }
-        elif provider == "gemini":
-            return {
-                "role": "user",
-                "parts": [{
-                    "functionResponse": {
-                        "name": self.tool_name,
-                        "response": {"result": self.content},
-                    }
-                }],
-            }
-        else:
-            # 默认 OpenAI 兼容格式
-            return {
-                "role": "tool",
-                "tool_call_id": self.tool_call_id,
-                "content": self.content,
-            }
 
 
 class AgentConfig(BaseModel):
@@ -106,7 +59,6 @@ class AgentConfig(BaseModel):
     max_loop: int = Field(default=20, ge=1, le=100, description="最大循环次数")
     tools: List[Dict[str, Any]] = Field(default_factory=list, description="工具列表")
     skill_names: List[str] = Field(default_factory=list, description="引用的 Skill 名称列表")
-    middleware: List[str] = Field(default_factory=list, description="中间件名称列表")
 
 
 class AgentMessage(BaseModel):
@@ -114,6 +66,7 @@ class AgentMessage(BaseModel):
 
     role: str = Field(..., description="user | assistant | system | tool")
     content: str = Field(default="", description="消息内容")
+    thinking: str = Field(default="", description="思考过程（assistant 消息专用）")
     agent_name: Optional[str] = Field(None, description="所属 Agent 名称")
     tool_call_id: Optional[str] = Field(None, description="工具调用 ID")
     tool_name: Optional[str] = Field(None, description="调用的工具名称")
@@ -154,3 +107,53 @@ class ToolResult(BaseModel):
     tool_name: str = Field(..., description="工具名称")
     result: Any = Field(..., description="执行结果")
     is_error: bool = Field(default=False, description="是否错误")
+
+
+# ----------------------------------------------------------------------
+# 流式事件模型
+# ----------------------------------------------------------------------
+
+
+class ThinkingEvent(BaseModel):
+    """LLM 思考过程片段（仅 thinking 模型产生）。"""
+    type: Literal["thinking"] = "thinking"
+    content: str
+
+
+class TextEvent(BaseModel):
+    """LLM 输出的文本片段。"""
+    type: Literal["text"] = "text"
+    content: str
+
+
+class ToolStartEvent(BaseModel):
+    """工具开始执行。"""
+    type: Literal["tool_start"] = "tool_start"
+    tool_call_id: str
+    tool_name: str
+    arguments: Dict[str, Any]
+
+
+class ToolEndEvent(BaseModel):
+    """工具执行完毕。"""
+    type: Literal["tool_end"] = "tool_end"
+    tool_call_id: str
+    tool_name: str
+    result: Any
+    is_error: bool = False
+
+
+class DoneEvent(BaseModel):
+    """流结束，携带完整 AgentResult。"""
+    type: Literal["done"] = "done"
+    result: "AgentResult"
+
+
+class ErrorEvent(BaseModel):
+    """执行出错。"""
+    type: Literal["error"] = "error"
+    error: str
+
+
+# 所有事件类型的联合，用于类型标注
+StreamEvent = ThinkingEvent | TextEvent | ToolStartEvent | ToolEndEvent | DoneEvent | ErrorEvent

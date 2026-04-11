@@ -24,6 +24,10 @@ class OpenAIAdapter(ProviderAdapter):
 
     provider_name = "openai"
 
+    def __init__(self) -> None:
+        import openai
+        self._client = openai.AsyncOpenAI()
+
     def to_request(
         self,
         messages: List[Dict[str, Any]],
@@ -44,11 +48,21 @@ class OpenAIAdapter(ProviderAdapter):
                     "content": msg.get("content", ""),
                 })
             elif msg.get("role") == "assistant" and msg.get("tool_calls"):
-                # Assistant 消息带原生 tool_calls
+                # 统一格式 {id, name, arguments} → OpenAI 原生格式
                 formatted_messages.append({
                     "role": "assistant",
                     "content": msg.get("content") or None,
-                    "tool_calls": msg["tool_calls"],
+                    "tool_calls": [
+                        {
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tc["name"],
+                                "arguments": json.dumps(tc["arguments"], ensure_ascii=False),
+                            },
+                        }
+                        for tc in msg["tool_calls"]
+                    ],
                 })
             else:
                 formatted_messages.append({
@@ -83,12 +97,9 @@ class OpenAIAdapter(ProviderAdapter):
         **kwargs,
     ) -> LLMResponse:
         """OpenAI 非流式生成，使用原生 function calling。"""
-        import openai
-
         req = self.to_request(messages, system_prompt, tools=tools, **kwargs)
-        client = openai.AsyncOpenAI()
 
-        response = await client.chat.completions.create(
+        response = await self._client.chat.completions.create(
             messages=req["messages"],
             **req["config"],
         )
@@ -143,22 +154,72 @@ class OpenAIAdapter(ProviderAdapter):
         system_prompt: str = "",
         tools: Optional[List[Dict[str, Any]]] = None,
         **kwargs,
-    ) -> AsyncGenerator[str, None]:
-        """OpenAI 流式生成。"""
-        import openai
+    ) -> AsyncGenerator[LLMResponse, None]:
+        """
+        OpenAI 流式生成。
+
+        文本 chunk 逐片 yield（content 非空，tool_calls 为空）。
+        最终 chunk 携带完整 finish_reason 和 tool_calls（若有）。
+        """
+        from app.core.agent.base import StructuredToolCall
 
         req = self.to_request(messages, system_prompt, tools=tools, **kwargs)
-        client = openai.AsyncOpenAI()
 
-        stream = await client.chat.completions.create(
+        # tool_calls 按 index 拼接（OpenAI 流式分片发送）
+        accumulated_tool_calls: dict[int, dict] = {}
+        finish_reason = None
+
+        async for chunk in await self._client.chat.completions.create(
             messages=req["messages"],
             stream=True,
             **req["config"],
-        )
+        ):
+            if not chunk.choices:
+                continue
 
-        async for chunk in stream:
-            if chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+            delta = chunk.choices[0].delta
+            finish_reason = chunk.choices[0].finish_reason or finish_reason
+
+            # 文本片段立刻 yield
+            if delta.content:
+                yield LLMResponse(content=delta.content, finish_reason=None)
+
+            # 积累 tool_call 分片
+            if delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    if idx not in accumulated_tool_calls:
+                        accumulated_tool_calls[idx] = {
+                            "id": tc_delta.id or "",
+                            "name": "",
+                            "arguments": "",
+                        }
+                    if tc_delta.id:
+                        accumulated_tool_calls[idx]["id"] = tc_delta.id
+                    if tc_delta.function:
+                        if tc_delta.function.name:
+                            accumulated_tool_calls[idx]["name"] += tc_delta.function.name
+                        if tc_delta.function.arguments:
+                            accumulated_tool_calls[idx]["arguments"] += tc_delta.function.arguments
+
+        # 流结束：构建完整 tool_calls
+        tool_calls = []
+        for tc in sorted(accumulated_tool_calls.values(), key=lambda x: x.get("index", 0)):
+            try:
+                args = json.loads(tc["arguments"]) if tc["arguments"] else {}
+            except json.JSONDecodeError:
+                args = {"_raw": tc["arguments"]}
+            tool_calls.append(StructuredToolCall(
+                id=tc["id"],
+                name=tc["name"],
+                arguments=args,
+            ))
+
+        yield LLMResponse(
+            content="",
+            tool_calls=tool_calls,
+            finish_reason=finish_reason or "stop",
+        )
 
     def to_tool_schema(self, tools: List[Dict[str, Any]]) -> Any:
         """

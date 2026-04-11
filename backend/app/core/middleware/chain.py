@@ -94,6 +94,22 @@ class MiddlewareChain:
 
         return await _execute(0)
 
+    async def stream(self, ctx: MiddlewareContext, generator):
+        """
+        包裹 async generator，在首个 yield 前执行所有 before，结束后执行所有 after。
+        无论正常结束还是异常，after 都保证触发（类似 try/finally）。
+        """
+        for mw in self.middlewares:
+            logger.debug(f"[MiddlewareChain] before: {mw.name}")
+            await mw.before(ctx)
+        try:
+            async for event in generator:
+                yield event
+        finally:
+            for mw in reversed(self.middlewares):
+                await mw.after(ctx)
+                logger.debug(f"[MiddlewareChain] after: {mw.name}")
+
     async def on_loop_start(self, ctx: MiddlewareContext) -> None:
         for mw in self.middlewares:
             await mw.on_loop_start(ctx)

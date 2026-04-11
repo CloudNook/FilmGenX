@@ -10,6 +10,9 @@ import json
 
 from app.core.agent.persist.base import PersistStrategy
 
+# 会话消息默认保留 7 天
+_DEFAULT_TTL_SECONDS = 7 * 24 * 3600
+
 
 class RedisPersistStrategy(PersistStrategy):
     """
@@ -24,6 +27,9 @@ class RedisPersistStrategy(PersistStrategy):
     """
 
     name = "redis"
+
+    def __init__(self, ttl: int = _DEFAULT_TTL_SECONDS) -> None:
+        self.ttl = ttl
 
     async def load_messages(
         self,
@@ -50,6 +56,7 @@ class RedisPersistStrategy(PersistStrategy):
     ) -> None:
         from app.utils import redis_client
 
+        key = f"agent:messages:{session_id}"
         msg = {
             "session_id": session_id,
             "request_id": request_id,
@@ -61,7 +68,6 @@ class RedisPersistStrategy(PersistStrategy):
             "tool_name": tool_name,
             "metadata": metadata or {},
         }
-        await redis_client.rpush(
-            f"agent:messages:{session_id}",
-            json.dumps(msg, ensure_ascii=False),
-        )
+        await redis_client.rpush(key, json.dumps(msg, ensure_ascii=False))
+        # 每次写入后刷新 TTL，保证活跃会话不过期
+        await redis_client.expire(key, self.ttl)

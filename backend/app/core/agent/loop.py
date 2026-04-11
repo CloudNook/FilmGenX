@@ -12,7 +12,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from app.core.agent.base import AgentConfig, AgentMessage, AgentResult, ToolCall, ToolResult
+from app.core.agent.base import (
+    AgentConfig, AgentMessage, AgentResult, ToolCall,
+    ThinkingEvent, TextEvent, ToolStartEvent, ToolEndEvent, DoneEvent, ErrorEvent,
+)
 from app.core.agent.llm import LLMAdapter
 from app.core.agent.tool import ToolExecutor
 
@@ -66,33 +69,15 @@ class AgentLoop:
         self.messages: List[Dict[str, Any]] = []
         self.loop_count = 0
         self._seq = 0  # 全局序号，run() 开始时从历史最大 seq + 1 初始化
+        self._system_prompt: Optional[str] = None  # 缓存，内容不随循环变化
 
     def _build_system_prompt(self) -> str:
+        if self._system_prompt is not None:
+            return self._system_prompt
+
         prompt = self.config.prompt
 
-        tool_schemas = self.llm.get_tool_schemas()
-        if tool_schemas:
-            tool_section = (
-                "\n\n## 可用工具\n"
-                "当需要完成特定任务时，你可以调用以下工具：\n"
-            )
-            for schema in tool_schemas:
-                if "function_declarations" in schema:
-                    for fn in schema["function_declarations"]:
-                        tool_section += f"- {fn['name']}: {fn.get('description', '')}\n"
-                elif "type" in schema and schema["type"] == "function":
-                    fn = schema["function"]
-                    tool_section += f"- {fn['name']}: {fn.get('description', '')}\n"
-                else:
-                    tool_section += f"- {schema.get('name', '')}: {schema.get('description', '')}\n"
-
-            tool_section += (
-                "\n\n## 工具使用规则\n"
-                "- 当你需要完成特定任务时，请主动调用合适的工具\n"
-                "- 工具调用结果返回后，继续分析或汇总结果\n"
-            )
-            prompt = prompt + tool_section
-
+        # 工具描述已通过 API native function calling 传递，无需重复注入 system prompt
         if self.config.response_schema:
             prompt = prompt + (
                 "\n\n## 输出格式要求\n"
@@ -101,7 +86,8 @@ class AgentLoop:
                 + "\n\n当完成所有分析后，直接输出 JSON 结果（不需要工具调用）。"
             )
 
-        return prompt
+        self._system_prompt = prompt
+        return self._system_prompt
 
     def _check_finished(
         self,
@@ -121,7 +107,9 @@ class AgentLoop:
             (should_finish, schema_data)
         """
         finish_reason = getattr(response, "finish_reason", None)
-        if finish_reason == "stop":
+        # 适配器层已归一化为标准字符串，这里只需比较 "stop"
+        finish_reason_str = (finish_reason or "").lower()
+        if finish_reason_str == "stop":
             return True, None
 
         # 停止信号（兼容纯文本模式）
@@ -168,17 +156,28 @@ class AgentLoop:
         if self.persist is None:
             return
 
+        # 防止同一实例多次 run() 时重复加载
+        if self.messages:
+            return
+
         history = await self.persist.load_messages(self.session_id)
         if not history:
             return
 
         for msg in history:
-            self.messages.append({
-                "role": msg["role"],
-                "content": msg["content"],
-                **({"tool_call_id": msg["tool_call_id"]} if msg.get("tool_call_id") else {}),
-                **({"tool_name": msg["tool_name"]} if msg.get("tool_name") else {}),
-            })
+            role = msg["role"]
+            if role == "tool":
+                self.messages.append({
+                    "role": "tool",
+                    "tool_call_id": msg.get("tool_call_id") or "",
+                    "tool_name": msg.get("tool_name") or "",
+                    "content": msg["content"],
+                })
+            else:
+                self.messages.append({
+                    "role": role,
+                    "content": msg["content"],
+                })
 
         self._seq = max(msg.get("seq", 0) for msg in history) + 1
         logger.info(
@@ -226,13 +225,13 @@ class AgentLoop:
                     "role": "assistant",
                     "content": response.content or "",
                 }
+                if response.thinking:
+                    assistant_msg_dict["thinking"] = response.thinking
                 if response.tool_calls:
+                    # 统一格式存储，Provider 转换由各自的 to_request() 负责
+                    # raw 保留原始 Provider 数据（如 Gemini thought_signature），不参与持久化
                     assistant_msg_dict["tool_calls"] = [
-                        {
-                            "id": tc.id,
-                            "name": tc.name,
-                            "arguments": tc.arguments,
-                        }
+                        {"id": tc.id, "name": tc.name, "arguments": tc.arguments, "raw": tc.raw}
                         for tc in response.tool_calls
                     ]
 
@@ -242,6 +241,7 @@ class AgentLoop:
                     AgentMessage(
                         role="assistant",
                         content=response.content,
+                        thinking=response.thinking,
                         agent_name=self.config.agent_name,
                     )
                 )
@@ -275,18 +275,15 @@ class AgentLoop:
 
                         # 构建 Provider 原生格式的 tool 结果消息
                         # 注意：传原始 result 字符串，不传 json.dumps 过的字符串
-                        tool_result_dicts = [
-                            {
+                        for tr in tool_results:
+                            # 统一格式写入 self.messages，to_request() 负责转为 Provider 格式
+                            self.messages.append({
+                                "role": "tool",
                                 "tool_call_id": tr.tool_call_id,
                                 "tool_name": tr.tool_name,
-                                "result": tr.result,  # 原始字符串，如 "600" 或 '{"key": "value"}'
-                            }
-                            for tr in tool_results
-                        ]
-                        tool_messages = self.llm.build_tool_messages(tool_result_dicts)
-
-                        for i, tm in enumerate(tool_messages):
-                            self.messages.append(tm)
+                                "content": tr.result if isinstance(tr.result, str)
+                                           else json.dumps(tr.result, ensure_ascii=False),
+                            })
 
                         for tr in tool_results:
                             # 格式化的 tool 消息用于展示/持久化，不参与 API 调用
@@ -327,48 +324,41 @@ class AgentLoop:
                         await self.on_loop_end(result.messages)
                     return result
 
-                # Fallback：当工具执行完毕后，模型返回空 parts（无 text 无 tool_calls）
-                # 说明模型拒绝生成文字，此时直接用工具结果汇总作为最终答案
-                if not response.content and not response.tool_calls:
-                    # 从历史消息中提取本轮所有 tool 结果
-                    tool_results_texts = []
-                    for msg in self.messages[-20:]:  # 看最近 20 条
-                        if msg.get("role") == "user" and msg.get("parts"):
-                            for part in msg["parts"]:
-                                if part.get("functionResponse"):
-                                    name = part["functionResponse"].get("name", "?")
-                                    res = part["functionResponse"].get("response", {}).get("result", "")
-                                    tool_results_texts.append(f"{name}: {res}")
-
+                # Fallback：模型返回空内容且无法正常结束
+                # 常见于工具执行完毕后模型拒绝生成文字的边缘场景
+                if not response.content:
+                    tool_results_texts = [
+                        msg.content
+                        for msg in result.messages
+                        if msg.role == "tool" and msg.content
+                    ]
                     fallback_content = (
                         "根据工具执行结果，汇总如下：\n"
                         + "\n".join(f"- {t}" for t in tool_results_texts)
-                    )
-                    logger.warning(
-                        f"[AgentLoop:{self.config.agent_name}] "
-                        f"[Loop {self.loop_count}] Model returned empty parts after tool execution. "
-                        f"Using fallback: {fallback_content[:100]}"
-                    )
-                    # 把 fallback 内容写入 result.messages（替换当前轮次刚添加的空 assistant 消息）
-                    # 注意：不调用 _persist，因为这条消息已在上一步用空 content 持久化了，
-                    # 重复追加会导致 Redis List 中出现重复 seq 条目。
-                    result.messages[current_assistant_msg_idx] = AgentMessage(
-                        role="assistant",
-                        content=fallback_content,
-                        agent_name=self.config.agent_name,
-                    )
-                    result.finished = True
-                    result.finished_at = datetime.now(timezone.utc)
-                    result.raw_output = fallback_content
-                    result.loop_count = self.loop_count
-                    if self.on_loop_end is not None:
-                        await self.on_loop_end(result.messages)
-                    return result
+                    ) if tool_results_texts else ""
 
-                # 无 tool_calls、无结束信号、也无内容 → 继续循环
+                    if fallback_content:
+                        logger.warning(
+                            f"[AgentLoop:{self.config.agent_name}] "
+                            f"[Loop {self.loop_count}] Empty response after tool execution, using fallback"
+                        )
+                        result.messages[current_assistant_msg_idx] = AgentMessage(
+                            role="assistant",
+                            content=fallback_content,
+                            agent_name=self.config.agent_name,
+                        )
+                        result.finished = True
+                        result.finished_at = datetime.now(timezone.utc)
+                        result.raw_output = fallback_content
+                        result.loop_count = self.loop_count
+                        if self.on_loop_end is not None:
+                            await self.on_loop_end(result.messages)
+                        return result
+
+                # 无结束信号也无内容 → 继续循环
                 logger.warning(
                     f"[AgentLoop:{self.config.agent_name}] "
-                    f"[Loop {self.loop_count}] No tool_calls, no content, no stop signal — continuing"
+                    f"[Loop {self.loop_count}] No content, no stop signal — continuing"
                 )
 
             # 达到最大循环
@@ -389,3 +379,203 @@ class AgentLoop:
             result.finished = False
             result.finished_at = datetime.now(timezone.utc)
             return result
+
+    async def stream_run(self, initial_input: str):
+        """
+        执行 Agent 循环（流式）。
+
+        每轮：
+          1. 流式调用 LLM，文本 chunk 实时 yield TextEvent
+          2. 终止 chunk 到达后判断：
+             - 有 tool_calls → yield ToolStartEvent → 执行 → yield ToolEndEvent → 继续循环
+             - 无 tool_calls → 检查结束条件 → yield DoneEvent
+        """
+        await self._load_history()
+
+        result = AgentResult(
+            agent_name=self.config.agent_name,
+            messages=[self._add_message("user", initial_input)],
+        )
+        await self._persist("user", initial_input)
+
+        try:
+            while self.loop_count < self.config.max_loop:
+                self.loop_count += 1
+                logger.info(
+                    f"[AgentLoop:{self.config.agent_name}] "
+                    f"Loop {self.loop_count}/{self.config.max_loop}"
+                )
+
+                if self.on_loop_start is not None:
+                    await self.on_loop_start()
+
+                # --- Think（真正流式）---
+                # 边流边 yield ThinkingEvent / TextEvent，终止 chunk 收集完整 tool_calls 和 finish_reason
+                accumulated_content = ""
+                accumulated_thinking = ""
+                final_chunk: Optional[Any] = None  # LLMResponse，终止 chunk
+
+                async for chunk in self.llm.generate_stream(
+                    messages=self.messages,
+                    system_prompt=self._build_system_prompt(),
+                ):
+                    if chunk.thinking:
+                        accumulated_thinking += chunk.thinking
+                        yield ThinkingEvent(content=chunk.thinking)
+                    if chunk.content:
+                        accumulated_content += chunk.content
+                        yield TextEvent(content=chunk.content)
+                    if chunk.finish_reason is not None:
+                        # 终止 chunk，不再有文本，携带完整 tool_calls
+                        final_chunk = chunk
+
+                # --- 写入 assistant 消息 ---
+                assistant_msg_dict: Dict[str, Any] = {
+                    "role": "assistant",
+                    "content": accumulated_content,
+                }
+                if accumulated_thinking:
+                    assistant_msg_dict["thinking"] = accumulated_thinking
+                if final_chunk.tool_calls:
+                    assistant_msg_dict["tool_calls"] = [
+                        {"id": tc.id, "name": tc.name, "arguments": tc.arguments, "raw": tc.raw}
+                        for tc in final_chunk.tool_calls
+                    ]
+
+                self.messages.append(assistant_msg_dict)
+                current_assistant_msg_idx = len(result.messages)
+                result.messages.append(
+                    AgentMessage(
+                        role="assistant",
+                        content=accumulated_content,
+                        thinking=accumulated_thinking,
+                        agent_name=self.config.agent_name,
+                    )
+                )
+                await self._persist("assistant", accumulated_content)
+
+                # --- Act：有 tool_calls ---
+                if final_chunk.tool_calls:
+                    tool_calls = [
+                        ToolCall(id=tc.id, name=tc.name, arguments=tc.arguments)
+                        for tc in final_chunk.tool_calls
+                    ]
+
+                    if self.tool_executor is None:
+                        logger.warning(
+                            f"[AgentLoop:{self.config.agent_name}] "
+                            f"No tool_executor configured, skipping {len(tool_calls)} tool calls"
+                        )
+                    else:
+                        for tc in tool_calls:
+                            logger.info(
+                                f"[AgentLoop:{self.config.agent_name}] "
+                                f"[Loop {self.loop_count}] Calling tool: {tc.name}({tc.arguments})"
+                            )
+                            yield ToolStartEvent(
+                                tool_call_id=tc.id,
+                                tool_name=tc.name,
+                                arguments=tc.arguments,
+                            )
+
+                        tool_results = await self.tool_executor.execute_all(tool_calls)
+
+                        for tr in tool_results:
+                            self.messages.append({
+                                "role": "tool",
+                                "tool_call_id": tr.tool_call_id,
+                                "tool_name": tr.tool_name,
+                                "content": tr.result if isinstance(tr.result, str)
+                                           else json.dumps(tr.result, ensure_ascii=False),
+                            })
+                            formatted = f"[TOOL: {tr.tool_name}] {json.dumps(tr.result, ensure_ascii=False)}"
+                            logger.info(
+                                f"[AgentLoop:{self.config.agent_name}] "
+                                f"[Loop {self.loop_count}] Tool result: {tr.tool_name} -> {tr.result!r}"
+                            )
+                            result.messages.append(
+                                AgentMessage(
+                                    role="tool",
+                                    content=formatted,
+                                    agent_name=self.config.agent_name,
+                                    tool_call_id=tr.tool_call_id,
+                                    tool_name=tr.tool_name,
+                                )
+                            )
+                            await self._persist(
+                                "tool", formatted,
+                                tool_call_id=tr.tool_call_id,
+                                tool_name=tr.tool_name,
+                            )
+                            yield ToolEndEvent(
+                                tool_call_id=tr.tool_call_id,
+                                tool_name=tr.tool_name,
+                                result=tr.result,
+                                is_error=tr.is_error,
+                            )
+
+                    if self.on_loop_end is not None:
+                        await self.on_loop_end(result.messages)
+                    continue
+
+                # --- 无 tool_calls：检查结束 ---
+                finished, schema_data = self._check_finished(final_chunk, accumulated_content)
+                if finished:
+                    result.finished = True
+                    result.finished_at = datetime.now(timezone.utc)
+                    result.schema_data = schema_data
+                    result.raw_output = accumulated_content
+                    result.loop_count = self.loop_count
+                    if self.on_loop_end is not None:
+                        await self.on_loop_end(result.messages)
+                    yield DoneEvent(result=result)
+                    return
+
+                # Fallback：模型返回空内容
+                if not accumulated_content:
+                    tool_results_texts = [
+                        msg.content
+                        for msg in result.messages
+                        if msg.role == "tool" and msg.content
+                    ]
+                    if tool_results_texts:
+                        fallback_content = (
+                            "根据工具执行结果，汇总如下：\n"
+                            + "\n".join(f"- {t}" for t in tool_results_texts)
+                        )
+                        result.messages[current_assistant_msg_idx] = AgentMessage(
+                            role="assistant",
+                            content=fallback_content,
+                            agent_name=self.config.agent_name,
+                        )
+                        result.finished = True
+                        result.finished_at = datetime.now(timezone.utc)
+                        result.raw_output = fallback_content
+                        result.loop_count = self.loop_count
+                        yield TextEvent(content=fallback_content)
+                        if self.on_loop_end is not None:
+                            await self.on_loop_end(result.messages)
+                        yield DoneEvent(result=result)
+                        return
+
+                logger.warning(
+                    f"[AgentLoop:{self.config.agent_name}] "
+                    f"[Loop {self.loop_count}] No content, no stop signal — continuing"
+                )
+
+            # 达到最大循环
+            result.loop_count = self.loop_count
+            result.error = f"Max loop reached ({self.config.max_loop})"
+            result.finished = False
+            result.finished_at = datetime.now(timezone.utc)
+            yield ErrorEvent(error=result.error)
+            yield DoneEvent(result=result)
+
+        except Exception as e:
+            logger.exception(f"[AgentLoop:{self.config.agent_name}] stream_run error: {e}")
+            yield ErrorEvent(error=str(e))
+            result.error = str(e)
+            result.loop_count = self.loop_count
+            result.finished = False
+            result.finished_at = datetime.now(timezone.utc)
+            yield DoneEvent(result=result)

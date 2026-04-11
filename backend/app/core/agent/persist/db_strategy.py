@@ -22,7 +22,7 @@ class DBPersistStrategy(PersistStrategy):
     需在构造时注入 AsyncSession，生命周期由调用方管理。
 
     使用方式：
-        agent = create_agent(..., persist="db", db=db_session)
+        agent = create_agent(..., persist=DBPersistStrategy(db=session))
     """
 
     name = "db"
@@ -78,4 +78,4 @@ class DBPersistStrategy(PersistStrategy):
             extra_metadata=metadata,
         )
         self.db.add(record)
-        await self.db.flush()
+        await self.db.commit()

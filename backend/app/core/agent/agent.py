@@ -9,7 +9,7 @@ import logging
 from typing import TYPE_CHECKING, List, Optional
 from uuid import uuid4
 
-from app.core.agent.base import AgentConfig, AgentMessage, AgentResult
+from app.core.agent.base import AgentConfig, AgentMessage, AgentResult, DoneEvent
 from app.core.agent.loop import AgentLoop
 from app.core.agent.llm import LLMAdapter
 from app.core.agent.tool import ToolExecutor
@@ -116,12 +116,11 @@ class Agent:
             result = await loop.run(initial_input)
             result.agent_id = self.agent_id
             result.request_id = rid
+            # 在 chain.run() 的 after 钩子触发前写入 ctx，确保 middleware.after() 能读到结果
+            ctx.result = result
             return result
 
-        result = await self._chain.run(ctx, _do_run)
-        ctx.result = result
-
-        return result
+        return await self._chain.run(ctx, _do_run)
 
     async def stream(
         self,
@@ -130,18 +129,55 @@ class Agent:
         request_id: str | None = None,
     ):
         """
-        执行 Agent 循环（流式）。
+        执行 Agent 循环（流式），yield StreamEvent。
+
+        事件顺序：
+            TextEvent      — LLM 文本片段（逐字实时）
+            ToolStartEvent — 工具开始执行
+            ToolEndEvent   — 工具执行完毕
+            DoneEvent      — 循环结束（携带 AgentResult）
+            ErrorEvent     — 出错
         """
         self._init_llm()
+        self._init_tool_executor()
 
         rid = request_id or str(uuid4())
         ctx = self._build_context(rid, initial_input)
 
-        await self._chain.run(ctx, lambda: None)
-        ctx.result = None
+        prev_msg_count = 0
 
-        # TODO: 实现流式循环
-        raise NotImplementedError("stream() not implemented yet")
+        async def on_loop_start() -> None:
+            ctx.loop_count = loop.loop_count
+            await self._chain.on_loop_start(ctx)
+
+        async def on_loop_end(messages: list) -> None:
+            nonlocal prev_msg_count
+            ctx.loop_count = loop.loop_count
+            ctx.loop_messages = messages[prev_msg_count:]
+            prev_msg_count = len(messages)
+            await self._chain.on_loop_end(ctx)
+
+        loop = AgentLoop(
+            config=self.config,
+            llm=self._llm,
+            tool_executor=self._tool_executor,
+            persist=self.persist,
+            session_id=self.session_id,
+            request_id=rid,
+            on_loop_start=on_loop_start,
+            on_loop_end=on_loop_end,
+        )
+
+        async def _generate():
+            async for event in loop.stream_run(initial_input):
+                if isinstance(event, DoneEvent):
+                    event.result.agent_id = self.agent_id
+                    event.result.request_id = rid
+                    ctx.result = event.result
+                yield event
+
+        async for event in self._chain.stream(ctx, _generate()):
+            yield event
 
     async def add_message(self, message: AgentMessage) -> None:
         """

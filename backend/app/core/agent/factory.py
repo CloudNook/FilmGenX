@@ -8,40 +8,27 @@ import logging
 from typing import Any, Dict, List, Literal, Optional, Type, Union
 
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.agent.agent import Agent
 from app.core.agent.base import AgentConfig
 from app.core.agent.persist.base import PersistStrategy
 from app.core.agent.persist.redis_strategy import RedisPersistStrategy
-from app.core.agent.persist.db_strategy import DBPersistStrategy
 from app.core.middleware.chain import AgentMiddleware
 
 logger = logging.getLogger(__name__)
 
-PersistArg = Union[Literal["redis", "db"], PersistStrategy, None]
+# "redis" 是框架内置快捷方式；DB 持久化需调用方自行构造 DBPersistStrategy 实例传入
+PersistArg = Union[Literal["redis"], PersistStrategy, None]
 
 
-def _resolve_persist(persist: PersistArg, db: Optional[AsyncSession]) -> Optional[PersistStrategy]:
-    """
-    将 persist 参数解析为 PersistStrategy 实例。
-
-    - "redis"           → RedisPersistStrategy()
-    - "db"              → DBPersistStrategy(db=db)，需同时传 db
-    - PersistStrategy   → 直接使用
-    - None              → 不持久化
-    """
+def _resolve_persist(persist: PersistArg) -> Optional[PersistStrategy]:
     if persist is None:
         return None
     if isinstance(persist, PersistStrategy):
         return persist
     if persist == "redis":
         return RedisPersistStrategy()
-    if persist == "db":
-        if db is None:
-            raise ValueError('persist="db" 需要传入 db 参数（AsyncSession）')
-        return DBPersistStrategy(db=db)
-    raise ValueError(f"未知的 persist 参数：{persist!r}，可选值：'redis' | 'db' | None")
+    raise ValueError(f"未知的 persist 参数：{persist!r}，可选值：'redis' | PersistStrategy 实例 | None")
 
 
 def create_agent(
@@ -57,7 +44,6 @@ def create_agent(
     skills: Optional[List[str]] = None,
     max_loop: int = 20,
     persist: PersistArg = None,
-    db: Optional[AsyncSession] = None,
     middlewares: Optional[List[AgentMiddleware]] = None,
 ) -> Agent:
     """
@@ -68,7 +54,7 @@ def create_agent(
 
     Args:
         agent_name:      Agent 名称
-        session_id:      会话 ID，绑定在 Agent 实例上，用于多轮对话持久化
+        session_id:      会话 ID，用于多轮对话持久化
         prompt:          系统提示词
         model:           LLM 模型名称
         temperature:     温度参数
@@ -77,14 +63,13 @@ def create_agent(
         tools:           工具列表
         skills:          Skill 名称列表
         max_loop:        最大循环次数
-        persist:         持久化方式，"redis" | "db" | PersistStrategy 实例 | None
-        db:              persist="db" 时必传的 AsyncSession
+        persist:         持久化策略，"redis" | PersistStrategy 实例 | None
+                         DB 持久化示例：persist=DBPersistStrategy(db=session)
         middlewares:     中间件列表
 
     Returns:
         Agent 实例，需调用 run() / stream() 执行
     """
-    # 序列化 response_schema
     schema_dict: Optional[Dict[str, Any]] = None
     if response_schema is not None:
         if isinstance(response_schema, type) and issubclass(response_schema, BaseModel):
@@ -104,13 +89,12 @@ def create_agent(
         tools=tools or [],
         skill_names=skills or [],
         max_loop=max_loop,
-        middleware=[mw.name for mw in (middlewares or [])],
     )
 
-    persist_strategy = _resolve_persist(persist, db)
+    persist_strategy = _resolve_persist(persist)
 
     logger.info(
-        f"[create_agent] Created agent: {agent_name}, "
+        f"[create_agent] agent={agent_name}, "
         f"persist={persist_strategy.name if persist_strategy else 'none'}"
     )
 

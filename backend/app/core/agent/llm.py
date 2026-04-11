@@ -11,7 +11,7 @@ import logging
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from app.core.adapter import get_adapter
-from app.core.agent.base import AgentConfig, LLMResponse, StructuredToolCall, UnifiedToolMessage
+from app.core.agent.base import AgentConfig, LLMResponse, StructuredToolCall
 
 logger = logging.getLogger(__name__)
 
@@ -54,32 +54,6 @@ class LLMAdapter:
             return []
         return self._provider.to_tool_schema(self.tools)
 
-    def build_tool_messages(
-        self,
-        tool_results: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """
-        将工具执行结果构建为 Provider 原生 tool 消息格式。
-
-        Args:
-            tool_results: 工具结果列表，每项包含 tool_call_id / tool_name / result
-
-        Returns:
-            Provider 原生格式的 tool 消息列表
-        """
-        provider = self._provider.provider_name
-        messages = []
-        for tr in tool_results:
-            # tr["result"] 已经是原始字符串，直接传给 UnifiedToolMessage
-            # 不要在这里 json.dumps，避免双重序列化
-            msg = UnifiedToolMessage(
-                tool_call_id=tr["tool_call_id"],
-                tool_name=tr["tool_name"],
-                content=tr["result"],
-            )
-            messages.append(msg.to_provider_format(provider))
-        return messages
-
     async def generate(
         self,
         messages: List[Dict[str, Any]],
@@ -109,16 +83,14 @@ class LLMAdapter:
         self,
         messages: List[Dict[str, Any]],
         system_prompt: str = "",
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[LLMResponse, None]:
         """
         流式生成。
 
-        Args:
-            messages: 消息历史
-            system_prompt: 系统提示词
-
         Yields:
-            文本片段
+            LLMResponse chunk：
+            - content 非空 → 文本片段，立刻输出
+            - finish_reason 非空 → 终止 chunk，携带完整 tool_calls
         """
         full_system = system_prompt or self.config.prompt
         kwargs = self._build_llm_kwargs()

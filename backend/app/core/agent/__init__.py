@@ -11,7 +11,13 @@ from app.core.agent.base import (
     StructuredToolCall,
     ToolCall,
     ToolResult,
-    UnifiedToolMessage,
+    ThinkingEvent,
+    TextEvent,
+    ToolStartEvent,
+    ToolEndEvent,
+    DoneEvent,
+    ErrorEvent,
+    StreamEvent,
 )
 from app.core.agent.factory import create_agent
 from app.core.agent.loop import AgentLoop
@@ -40,7 +46,14 @@ __all__ = [
     "StructuredToolCall",
     "ToolCall",
     "ToolResult",
-    "UnifiedToolMessage",
+    # 流式事件
+    "ThinkingEvent",
+    "TextEvent",
+    "ToolStartEvent",
+    "ToolEndEvent",
+    "DoneEvent",
+    "ErrorEvent",
+    "StreamEvent",
     # 核心组件
     "AgentLoop",
     "LLMAdapter",
