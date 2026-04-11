@@ -39,15 +39,18 @@ class Agent:
         session_id: str,
         middlewares: List[AgentMiddleware] | None = None,
         persist: "PersistStrategy | None" = None,
+        skill_names: List[str] | None = None,
     ):
         self.agent_id = str(uuid4())
         self.config = config
         self.session_id = session_id
         self.middlewares = middlewares or []
         self.persist = persist
+        self.skill_names = skill_names or []
         self._chain = MiddlewareChain(self.middlewares)
         self._llm: Optional[LLMAdapter] = None
         self._tool_executor: Optional[ToolExecutor] = None
+        self._skills_injected = False
 
     def _init_llm(self) -> None:
         if self._llm is not None:
@@ -58,6 +61,28 @@ class Agent:
         if self._tool_executor is not None:
             return
         self._tool_executor = ToolExecutor()
+
+    async def _inject_skills(self) -> None:
+        """根据 skill_names 从 DB 加载 Skill 摘要并注入 system prompt（只执行一次）。"""
+        if self._skills_injected or not self.skill_names:
+            return
+        # 从 DBPersistStrategy 拿 db session（duck typing）
+        db = getattr(self.persist, "db", None)
+        if db is None:
+            logger.warning(
+                f"[Agent:{self.config.agent_name}] skill_names 非空但 persist 无 db session，跳过 skill 注入"
+            )
+            return
+        from app.core.skill.loader import load_skill_lite
+        from app.core.agent.factory import _build_system_prompt_with_skills
+        all_lite = await load_skill_lite(db=db)
+        name_set = set(self.skill_names)
+        skill_lite_list = [s for s in all_lite if s["name"] in name_set]
+        self.config.prompt = _build_system_prompt_with_skills(self.config.prompt, skill_lite_list)
+        self._skills_injected = True
+        logger.info(
+            f"[Agent:{self.config.agent_name}] injected {len(skill_lite_list)} skills: {self.skill_names}"
+        )
 
     def _build_context(
         self,
@@ -94,6 +119,7 @@ class Agent:
             - 保存数据库
             - 作为下游流程输入
         """
+        await self._inject_skills()
         self._init_llm()
         self._init_tool_executor()
 
@@ -162,6 +188,7 @@ class Agent:
             DoneEvent      — 循环结束（携带最终 AgentResult）
             ErrorEvent     — 出错
         """
+        await self._inject_skills()
         self._init_llm()
         self._init_tool_executor()
 

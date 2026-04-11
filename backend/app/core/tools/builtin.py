@@ -82,4 +82,8 @@ async def load_skill_lite(
     if db is None:
         return [{"error": "数据库会话未提供"}]
 
-    return await _load_skill_lite(db=db, skill_names=skill_names)
+    all_lite = await _load_skill_lite(db=db)
+    if not skill_names:
+        return all_lite
+    name_set = set(skill_names)
+    return [s for s in all_lite if s["name"] in name_set]

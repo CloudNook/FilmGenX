@@ -1356,16 +1356,32 @@ export interface WorkspaceResponse {
   updated_at: string;
 }
 
+export interface AgentMessageExtraMetadata {
+  thinking?: string | null;
+  tool_calls?: {
+    id: string;
+    name: string;
+    arguments: Record<string, unknown>;
+    result?: unknown;
+    is_error?: boolean;
+  }[] | null;
+  accumulated_usage?: {
+    prompt_tokens?: number | null;
+    completion_tokens?: number | null;
+    thinking_tokens?: number | null;
+    total_tokens?: number | null;
+  } | null;
+  [key: string]: unknown;
+}
+
 export interface AgentMessageResponse {
   role: string;
   content: string;
   seq: number;
   tool_call_id: string | null;
   tool_name: string | null;
-  thinking: string | null;
-  tool_calls: Record<string, unknown>[] | null;
   usage: { prompt_tokens?: number | null; completion_tokens?: number | null; thinking_tokens?: number | null; total_tokens?: number | null } | null;
-  accumulated_usage: { prompt_tokens?: number | null; completion_tokens?: number | null; thinking_tokens?: number | null; total_tokens?: number | null } | null;
+  extra_metadata: AgentMessageExtraMetadata | null;
   created_at: string | null;
 }
 

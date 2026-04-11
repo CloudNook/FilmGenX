@@ -50,6 +50,8 @@ class LLMResponse(BaseModel):
 class AgentConfig(BaseModel):
     """Agent 配置参数。"""
 
+    model_config = {"frozen": False}
+
     agent_name: str = Field(..., description="Agent 名称")
     prompt: str = Field(default="", description="系统提示词")
     model: str = Field(default="gemini-3-flash-preview", description="LLM 模型")
