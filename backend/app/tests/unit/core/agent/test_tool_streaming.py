@@ -37,7 +37,7 @@ def test_execute_streaming_tool_yields_events():
 
 def test_execute_streaming_tool_sync_fallback():
     """工具返回同步结果时，execute_streaming_tool 转为 yield 单个 ToolEndEvent。"""
-    async def fake_sync_tool():
+    def fake_sync_tool():
         return {"result": "ok"}
 
     executor = ToolExecutor()

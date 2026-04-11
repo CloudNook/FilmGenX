@@ -8,7 +8,8 @@ from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
     auth, projects, scenes, storyboards, shots, shot_groups, characters, character_images,
-    assets, tasks, conversations, locations, location_images, dashboard, skills, workspaces
+    assets, tasks, conversations, locations, location_images, dashboard, skills, workspaces,
+    supervisor,
 )
 
 api_router = APIRouter()
@@ -39,3 +40,6 @@ api_router.include_router(tasks.router,          prefix="/tasks",               
 
 # Admin 路由
 api_router.include_router(skills.router, prefix="/admin/skills", tags=["Admin - Skill 管理"])
+
+# Supervisor 路由
+api_router.include_router(supervisor.router, prefix="/supervisor", tags=["Supervisor 流水线"])
