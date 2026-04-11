@@ -272,8 +272,8 @@ export default function WorkspacePage({
     if (!selectedWsId) return;
     const detail = await workspacesApi.get(projectIdNum, selectedWsId);
     setMessages(detail.messages || []);
-    const lastAssistant = [...(detail.messages || [])].reverse().find((m) => m.role === 'assistant' && m.accumulated_usage);
-    if (lastAssistant?.accumulated_usage) setLastUsage(lastAssistant.accumulated_usage);
+    const lastAssistant = [...(detail.messages || [])].reverse().find((m) => m.role === 'assistant' && m.extra_metadata?.accumulated_usage);
+    if (lastAssistant?.extra_metadata?.accumulated_usage) setLastUsage(lastAssistant.extra_metadata.accumulated_usage);
     // Update workspace in list (token count, last_message_at)
     setWorkspaces((prev) =>
       prev.map((w) =>
