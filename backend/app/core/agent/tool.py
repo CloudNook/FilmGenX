@@ -11,7 +11,7 @@ import logging
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from app.core.agent.base import ToolCall, ToolResult
+from app.core.agent.base import ToolCall, ToolResult, ToolEndEvent
 from app.core.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -102,3 +102,56 @@ class ToolExecutor:
 
         results = await asyncio.gather(*[_run(tc) for tc in tool_calls])
         return list(results)
+
+    async def execute_streaming_tool(self, tool_call: ToolCall):
+        """
+        执行返回 AsyncGenerator[StreamEvent] 的流式工具。
+
+        透传所有事件，不缓冲。
+        用于 call_sub_agent 等需要实时流式输出的工具。
+
+        Args:
+            tool_call: ToolCall，包含 name 和 arguments
+
+        Yields:
+            StreamEvent: 工具产生的每个事件
+        """
+        tool_func = self.get_tool(tool_call.name)
+        if tool_func is None:
+            yield ToolEndEvent(
+                tool_call_id=tool_call.id,
+                tool_name=tool_call.name,
+                result={"error": f"Tool '{tool_call.name}' not found"},
+                is_error=True,
+            )
+            return
+
+        kwargs = dict(tool_call.arguments)
+        if self.db is not None and "db" not in kwargs:
+            kwargs["db"] = self.db
+
+        try:
+            # 调用 execute()，不立即 await — 因为 async generator 函数
+            # 返回的是 async_generator 对象（不是 awaitable）
+            raw_result = tool_func.execute(**kwargs)
+
+            if hasattr(raw_result, "__aiter__"):
+                # 新工具：返回 AsyncGenerator，实时透传事件
+                async for event in raw_result:
+                    yield event
+            else:
+                # 旧工具：返回同步结果，转为 ToolEndEvent
+                yield ToolEndEvent(
+                    tool_call_id=tool_call.id,
+                    tool_name=tool_call.name,
+                    result=raw_result,
+                    is_error=False,
+                )
+        except Exception as e:
+            logger.exception(f"Tool '{tool_call.name}' streaming execution failed: {e}")
+            yield ToolEndEvent(
+                tool_call_id=tool_call.id,
+                tool_name=tool_call.name,
+                result={"error": str(e)},
+                is_error=True,
+            )
