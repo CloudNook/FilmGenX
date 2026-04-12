@@ -235,3 +235,103 @@ class Agent:
 
         async for event in self._chain.stream(ctx, _generate()):
             yield event
+
+    async def resume(
+        self,
+        action: str,
+        feedback: Optional[str] = None,
+        edited_content: Optional[str] = None,
+        *,
+        request_id: Optional[str] = None,
+    ):
+        """
+        Resume from interrupt checkpoint (streaming).
+
+        Loads checkpoint from persist, patches messages based on action,
+        then continues the Agent loop from restored state.
+
+        Args:
+            action: "approve" | "reject" | "edit" | "skip" | "abort"
+            feedback: Optional feedback text (used with reject)
+            edited_content: Replacement content (used with edit)
+            request_id: Optional request ID
+        """
+        if self.persist is None:
+            raise ValueError("Cannot resume without a persist strategy")
+
+        self._init_llm()
+        self._init_tool_executor()
+
+        rid = request_id or str(uuid4())
+
+        # Load checkpoint
+        checkpoint = await self.persist.load_checkpoint(self.session_id)
+        if checkpoint is None:
+            from app.core.agent.base import ErrorEvent
+            yield ErrorEvent(error=f"No checkpoint found for session {self.session_id}")
+            return
+
+        # Handle abort immediately
+        if action == "abort":
+            from app.core.agent.base import DoneEvent
+            result = AgentResult(
+                agent_name=self.config.agent_name,
+                error="Aborted by user",
+                finished=False,
+            )
+            yield DoneEvent(result=result)
+            await self.persist.clear_checkpoint(self.session_id)
+            return
+
+        # Patch messages based on action
+        messages = list(checkpoint.messages)
+
+        if action == "approve":
+            pass
+        elif action == "reject":
+            messages.append({
+                "role": "user",
+                "content": f"[Human Review Feedback] {feedback or 'Please revise.'}",
+            })
+        elif action == "edit":
+            if edited_content is not None:
+                for msg in reversed(messages):
+                    if msg.get("role") == "tool":
+                        msg["content"] = edited_content
+                        break
+        elif action == "skip":
+            messages.append({
+                "role": "user",
+                "content": "[Human Review] Skip this step, proceed to next.",
+            })
+
+        # Create new AgentLoop with restored state
+        from app.core.agent.loop import AgentLoop
+        loop = AgentLoop(
+            config=self.config,
+            llm=self._llm,
+            tool_executor=self._tool_executor,
+            persist=self.persist,
+            session_id=self.session_id,
+            request_id=rid,
+            interrupt_config=self.config.interrupt_config,
+            initial_messages=messages,
+            initial_loop_count=checkpoint.loop_count,
+        )
+
+        ctx = self._build_context(rid, "")
+        ctx.llm = self._llm
+        ctx.loop = loop
+
+        async def _generate():
+            from app.core.agent.base import DoneEvent
+            async for event in loop.stream_run(""):
+                if isinstance(event, DoneEvent):
+                    event.result.agent_id = self.agent_id
+                    event.result.request_id = rid
+                    ctx.result = event.result
+                    await self.persist.clear_checkpoint(self.session_id)
+                yield event
+
+        async for event in self._chain.stream(ctx, _generate()):
+            yield event
