@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 from app.core.agent.base import (
     AgentConfig, AgentMessage, AgentResult, ToolCall, ToolResult,
     ThinkingEvent, TextEvent, ToolStartEvent, ToolEndEvent, DoneEvent, ErrorEvent,
+    InterruptEvent,
 )
 from app.core.agent.llm import LLMAdapter
 from app.core.agent.persist.base import PersistStrategy
@@ -58,6 +59,9 @@ class AgentLoop:
         request_id: str = "",
         on_loop_start: Optional[Any] = None,
         on_loop_end: Optional[Any] = None,
+        interrupt_config=None,
+        initial_messages=None,
+        initial_loop_count: int = 0,
     ):
         self.config = config
         self.llm = llm
@@ -68,10 +72,13 @@ class AgentLoop:
         self.on_loop_start = on_loop_start
         self.on_loop_end = on_loop_end
         self.messages: List[Dict[str, Any]] = []
-        self.loop_count = 0
+        self.loop_count = initial_loop_count
         self._seq = 0  # 全局序号，run() 开始时从历史最大 seq + 1 初始化
         self._system_prompt: Optional[str] = None  # 缓存，内容不随循环变化
         self._session_accumulated_usage: Optional[Dict[str, Any]] = None  # 会话历史累积 usage
+        self.interrupt_config = interrupt_config
+        if initial_messages is not None:
+            self.messages = initial_messages
 
     def _build_system_prompt(self) -> str:
         if self._system_prompt is not None:
@@ -104,6 +111,46 @@ class AgentLoop:
             return True
 
         return False
+
+    def _should_interrupt(
+        self,
+        tool_name: str,
+        tool_result: Any = None,
+    ) -> bool:
+        """Check if this tool execution should trigger an interrupt."""
+        if self.interrupt_config is None or not self.interrupt_config.enabled:
+            return False
+        if self.interrupt_config.mode.value != "after_tool":
+            return False
+        if not self.interrupt_config.tool_names:
+            pass
+        elif tool_name not in self.interrupt_config.tool_names:
+            return False
+        review_filter = self.interrupt_config.context.get("review_sub_agents")
+        if review_filter and tool_result is not None:
+            if isinstance(tool_result, dict):
+                sub_name = tool_result.get("sub_agent_name", "")
+                if sub_name and sub_name not in review_filter:
+                    return False
+        return True
+
+    async def _save_checkpoint(self, tool_name: str) -> None:
+        """Save interrupt checkpoint via persist strategy."""
+        if self.persist is None or self.interrupt_config is None:
+            return
+        from app.core.agent.checkpoint import AgentCheckpoint
+        checkpoint = AgentCheckpoint(
+            session_id=self.session_id,
+            messages=list(self.messages),
+            loop_count=self.loop_count,
+            interrupt_tool_name=tool_name,
+            interrupt_config=self.interrupt_config,
+        )
+        await self.persist.save_checkpoint(checkpoint)
+        logger.info(
+            f"[AgentLoop:{self.config.agent_name}] "
+            f"Checkpoint saved for session={self.session_id}, tool={tool_name}"
+        )
 
     def _add_message(self, role: str, content: str, seq: int = 0, **kwargs) -> AgentMessage:
         msg = {"role": role, "content": content, "seq": seq, **kwargs}
@@ -646,6 +693,18 @@ class AgentLoop:
                                 result=tr.result,
                                 is_error=tr.is_error,
                             )
+                            # --- Framework-level HITL interrupt check ---
+                            if self._should_interrupt(tr.tool_name, tr.result):
+                                yield InterruptEvent(
+                                    session_id=self.session_id,
+                                    tool_name=tr.tool_name,
+                                    tool_call_id=tr.tool_call_id,
+                                    tool_result=tr.result,
+                                    arguments=tc.arguments,
+                                    context=self.interrupt_config.context if self.interrupt_config else {},
+                                )
+                                await self._save_checkpoint(tr.tool_name)
+                                return
 
                     # 工具执行完毕后写 assistant 消息（携带 tool_results，使用预分配 seq）
                     await self._persist(
