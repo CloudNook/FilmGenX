@@ -87,3 +87,19 @@ class TestInterruptEvent:
             tool_call_id="tc-1",
         )
         assert isinstance(ev, StreamEvent)
+
+
+def test_create_agent_with_interrupt_config():
+    """create_agent passes interrupt_config to AgentConfig."""
+    from app.core.agent.factory import create_agent
+    from app.core.agent.base import InterruptConfig as RealInterruptConfig
+
+    cfg = RealInterruptConfig(enabled=True, tool_names=["call_sub_agent"])
+    agent = create_agent(
+        agent_name="test",
+        session_id="s1",
+        interrupt_config=cfg,
+    )
+    assert agent.config.interrupt_config is not None
+    assert agent.config.interrupt_config.enabled is True
+    assert agent.config.interrupt_config.tool_names == ["call_sub_agent"]
