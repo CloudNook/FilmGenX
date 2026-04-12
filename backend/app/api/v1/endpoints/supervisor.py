@@ -7,7 +7,7 @@ Supervisor 流式 API 端点。
 
 import json
 import logging
-from typing import Any, AsyncGenerator, Dict, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
@@ -39,6 +39,22 @@ class SupervisorStartRequest(BaseModel):
         default_factory=dict,
         description="SubAgent 配置映射（预留）",
     )
+    human_review: bool = Field(False, description="Enable human-in-the-loop")
+    review_nodes: Optional[List[str]] = Field(None, description="Nodes to review (empty = all)")
+
+
+class SupervisorResumeRequest(BaseModel):
+    """Resume Supervisor pipeline after human review."""
+    action: str = Field(..., description="approve | reject | edit | skip | abort")
+    feedback: Optional[str] = Field(None, description="Feedback text (for reject)")
+    edited_content: Optional[str] = Field(None, description="Edited content (for edit)")
+
+
+class SupervisorInterruptState(BaseModel):
+    """Interrupt state response."""
+    status: str
+    interrupt: Optional[Dict[str, Any]] = None
+    artifacts: Optional[Dict[str, Any]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +121,16 @@ async def start_supervisor_pipeline(
 
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
+                # Mark workflow as waiting_review on interrupt
+                if payload.get("type") == "interrupt":
+                    try:
+                        await service.update_status(
+                            supervisor.supervisor_session_id, "waiting_review"
+                        )
+                        await db.commit()
+                    except Exception as e:
+                        logger.warning(f"[supervisor/stream] failed to update status: {e}")
+
             yield "data: [DONE]\n\n"
 
         except Exception as e:
@@ -130,10 +156,21 @@ def _create_supervisor(body: SupervisorStartRequest, user_id: int, workflow_serv
     延迟导入以避免循环依赖。
     """
     from app.core.supervisor.factory import create_supervisor
+    from app.core.agent.base import InterruptConfig
 
     persist: Any = None
     if body.persist and body.persist != "none":
         persist = body.persist  # "redis" → factory 内部解析
+
+    interrupt_config = None
+    if body.human_review:
+        interrupt_config = InterruptConfig(
+            enabled=True,
+            tool_names=["call_sub_agent"],
+            context={
+                "review_sub_agents": body.review_nodes or [],
+            },
+        )
 
     return create_supervisor(
         user_request=body.user_request,
@@ -142,4 +179,134 @@ def _create_supervisor(body: SupervisorStartRequest, user_id: int, workflow_serv
         persist=persist,
         sub_agent_configs=body.sub_agent_configs,
         workflow_service=workflow_service,
+        interrupt_config=interrupt_config,
+    )
+
+
+# ---------------------------------------------------------------------------
+# HITL endpoints: state query + resume
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/{session_id}/state",
+    summary="Query interrupt state",
+)
+async def get_interrupt_state(
+    session_id: str,
+    user_id: int = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return current interrupt state for a paused pipeline."""
+    from app.services.supervisor_workflow_service import SupervisorWorkflowService
+    from fastapi import HTTPException, status as http_status
+
+    service = SupervisorWorkflowService(db)
+    workflow = await service.get_workflow_by_session(session_id)
+    if not workflow:
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Session not found")
+    if workflow.status != "waiting_review":
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail=f"Session status is '{workflow.status}', not 'waiting_review'",
+        )
+
+    from app.core.agent.persist.redis_strategy import RedisPersistStrategy
+    persist = RedisPersistStrategy()
+    checkpoint = await persist.load_checkpoint(session_id)
+
+    return SupervisorInterruptState(
+        status=workflow.status,
+        interrupt={
+            "tool_name": checkpoint.interrupt_tool_name if checkpoint else None,
+            "context": checkpoint.interrupt_config.context if checkpoint else {},
+            "loop_count": checkpoint.loop_count if checkpoint else None,
+        },
+        artifacts=workflow.artifacts,
+    )
+
+
+@router.post(
+    "/{session_id}/resume",
+    summary="Resume pipeline after human review",
+)
+async def resume_supervisor_pipeline(
+    session_id: str,
+    body: SupervisorResumeRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """Resume a paused Supervisor pipeline with human review decision."""
+    from app.services.supervisor_workflow_service import SupervisorWorkflowService
+    from fastapi import HTTPException, status as http_status
+
+    service = SupervisorWorkflowService(db)
+    workflow = await service.get_workflow_by_session(session_id)
+    if not workflow:
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Session not found")
+    if workflow.status != "waiting_review":
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail=f"Session status is '{workflow.status}', expected 'waiting_review'",
+        )
+
+    await service.update_status(session_id, "running")
+    await db.commit()
+
+    from app.core.agent.persist.redis_strategy import RedisPersistStrategy
+    from app.core.supervisor.factory import create_supervisor
+
+    persist = RedisPersistStrategy()
+    checkpoint = await persist.load_checkpoint(session_id)
+    if not checkpoint:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="No checkpoint found for session",
+        )
+
+    interrupt_config = checkpoint.interrupt_config
+    supervisor = create_supervisor(
+        user_request=workflow.user_request,
+        model=workflow.model,
+        persist="redis",
+        interrupt_config=interrupt_config,
+    )
+
+    if workflow.artifacts:
+        supervisor.context.artifacts.update(workflow.artifacts)
+
+    async def event_stream():
+        try:
+            async for event in supervisor.resume(
+                action=body.action,
+                feedback=body.feedback,
+                edited_content=body.edited_content,
+            ):
+                if hasattr(event, "model_dump"):
+                    payload = event.model_dump()
+                else:
+                    payload = {"type": "unknown", "repr": str(event)}
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+                # Update workflow status on next interrupt or completion
+                if payload.get("type") == "interrupt":
+                    try:
+                        await service.update_status(session_id, "waiting_review")
+                        await db.commit()
+                    except Exception as e:
+                        logger.warning(f"[supervisor/resume] failed to update status: {e}")
+
+            yield "data: [DONE]\n\n"
+        except Exception as e:
+            logger.exception("[supervisor/resume] stream error")
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e)}, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
