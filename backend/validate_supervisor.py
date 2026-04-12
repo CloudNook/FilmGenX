@@ -556,14 +556,16 @@ try:
     from app.api.v1.endpoints.supervisor import SupervisorStartRequest
 
     req = SupervisorStartRequest(
+        project_id=1,
         user_request="生成科幻短片",
         model="gemini-3-flash-preview",
         max_loop=10,
     )
+    assert req.project_id == 1
     assert req.user_request == "生成科幻短片"
     assert req.model == "gemini-3-flash-preview"
     assert req.max_loop == 10
-    green(f"SupervisorStartRequest OK — max_loop={req.max_loop}")
+    green(f"SupervisorStartRequest OK — project_id={req.project_id}, max_loop={req.max_loop}")
 except Exception as e:
     red(f"Supervisor API Schema 失败: {e}")
 

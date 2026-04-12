@@ -9,11 +9,12 @@ import json
 import logging
 from typing import Any, AsyncGenerator, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user_id
+from app.api.deps import get_current_user_id, get_db
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ router = APIRouter()
 
 class SupervisorStartRequest(BaseModel):
     """启动 Supervisor 流水线请求。"""
+    project_id: int = Field(..., description="所属项目 ID（用于流水线记录）")
     user_request: str = Field(..., description="用户原始需求描述")
     model: str = Field("gemini-3-flash-preview", description="LLM 模型")
     max_loop: int = Field(30, ge=1, le=100, description="最大循环次数")
@@ -55,18 +57,41 @@ class SupervisorStartRequest(BaseModel):
 async def start_supervisor_pipeline(
     body: SupervisorStartRequest,
     user_id: int = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     启动 Supervisor 视频生成流水线，流式返回 SSE 事件。
 
     权限：任何已登录用户均可调用。
     """
-    logger.info(
-        f"[supervisor/stream] user_id={user_id}, "
-        f"user_request={body.user_request[:50]}..."
-    )
+    from app.services.supervisor_workflow_service import SupervisorWorkflowService
 
-    supervisor = _create_supervisor(body, user_id)
+    service = SupervisorWorkflowService(db)
+    workflow_service = service  # SupervisorWorkflowService 实例，供 call_sub_agent 持久化
+
+    supervisor = _create_supervisor(body, user_id, workflow_service)
+
+    # 在流式开始前创建 DB 记录（使用与 supervisor 相同的 session_id）
+    try:
+        await service.create_workflow(
+            project_id=body.project_id,
+            owner_id=user_id,
+            supervisor_session_id=supervisor.supervisor_session_id,
+            user_request=body.user_request,
+            model=body.model,
+        )
+        await db.commit()
+        logger.info(
+            f"[supervisor/stream] workflow created: session={supervisor.supervisor_session_id}"
+        )
+    except Exception as e:
+        logger.warning(f"[supervisor/stream] failed to create workflow record: {e}")
+        # 不阻断流式，workflow 记录是可选的
+
+    logger.info(
+        f"[supervisor/stream] user_id={user_id}, project_id={body.project_id}, "
+        f"user_request={body.user_request[:50]}..., supervisor_session={supervisor.supervisor_session_id}"
+    )
 
     async def event_stream() -> AsyncGenerator[str, None]:
         try:
@@ -98,7 +123,7 @@ async def start_supervisor_pipeline(
     )
 
 
-def _create_supervisor(body: SupervisorStartRequest, user_id: int):
+def _create_supervisor(body: SupervisorStartRequest, user_id: int, workflow_service):
     """
     创建 SupervisorAgent 实例。
 
@@ -116,4 +141,5 @@ def _create_supervisor(body: SupervisorStartRequest, user_id: int):
         max_loop=body.max_loop,
         persist=persist,
         sub_agent_configs=body.sub_agent_configs,
+        workflow_service=workflow_service,
     )
