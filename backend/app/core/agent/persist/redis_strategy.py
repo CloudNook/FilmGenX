@@ -6,10 +6,13 @@ Redis 持久化策略实现。
 """
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from app.core.agent.persist.base import PersistStrategy
 from app.core.agent.persist.models import MessageRecord
+
+if TYPE_CHECKING:
+    from app.core.agent.checkpoint import AgentCheckpoint
 
 # 会话消息默认保留 7 天
 _DEFAULT_TTL_SECONDS = 7 * 24 * 3600
@@ -88,3 +91,27 @@ class RedisPersistStrategy(PersistStrategy):
         }
         await redis_client.rpush(key, json.dumps(msg, ensure_ascii=False))
         await redis_client.expire(key, self.ttl)
+
+    async def save_checkpoint(self, checkpoint: "AgentCheckpoint") -> None:
+        from app.utils import redis_client
+
+        key = f"agent:checkpoint:{checkpoint.session_id}"
+        await redis_client.set(key, checkpoint.model_dump_json().encode())
+        await redis_client.expire(key, self.ttl)
+
+    async def load_checkpoint(self, session_id: str) -> "Optional[AgentCheckpoint]":
+        from app.utils import redis_client
+        from app.core.agent.checkpoint import AgentCheckpoint
+
+        key = f"agent:checkpoint:{session_id}"
+        raw = await redis_client.get(key)
+        if raw is None:
+            return None
+        data = json.loads(raw)
+        return AgentCheckpoint(**data)
+
+    async def clear_checkpoint(self, session_id: str) -> None:
+        from app.utils import redis_client
+
+        key = f"agent:checkpoint:{session_id}"
+        await redis_client.delete(key)

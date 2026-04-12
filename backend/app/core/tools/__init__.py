@@ -13,8 +13,13 @@ Tools 系统 - 装饰器式工具注册与调用。
 """
 
 from app.core.tools.builtin import load_skill, load_skill_lite
-from app.core.tools import supervisor_tools  # noqa: F401 — 触发 Supervisor 工具注册
 from app.core.tools.registry import ToolRegistry, get_tool_registry, register_tool
+
+
+def _ensure_supervisor_tools():
+    """Lazy import to avoid circular import with app.core.agent."""
+    from app.core.tools import supervisor_tools  # noqa: F401 — 触发 Supervisor 工具注册
+    return supervisor_tools
 
 __all__ = [
     "ToolRegistry",
@@ -22,5 +27,5 @@ __all__ = [
     "register_tool",
     "load_skill",
     "load_skill_lite",
-    "supervisor_tools",
+    "_ensure_supervisor_tools",
 ]

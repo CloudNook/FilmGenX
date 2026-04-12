@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
     from app.core.agent.persist.models import AgentMessageRecord, MessageRecord
+    from app.core.agent.checkpoint import AgentCheckpoint
 
 
 class PersistStrategy(ABC):
@@ -73,5 +74,20 @@ class PersistStrategy(ABC):
             metadata:      附加元数据
             supervisor_session_id: Supervisor session ID（sv- 前缀），SubAgent 消息追溯到 Supervisor 流水线
         """
+        ...
+
+    @abstractmethod
+    async def save_checkpoint(self, checkpoint: "AgentCheckpoint") -> None:
+        """Save interrupt checkpoint for later resume."""
+        ...
+
+    @abstractmethod
+    async def load_checkpoint(self, session_id: str) -> "Optional[AgentCheckpoint]":
+        """Load interrupt checkpoint by session_id. Returns None if not found."""
+        ...
+
+    @abstractmethod
+    async def clear_checkpoint(self, session_id: str) -> None:
+        """Delete checkpoint after successful resume."""
         ...
 
