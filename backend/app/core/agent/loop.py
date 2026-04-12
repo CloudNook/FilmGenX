@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.core.agent.base import (
-    AgentConfig, AgentMessage, AgentResult, ToolCall,
+    AgentConfig, AgentMessage, AgentResult, ToolCall, ToolResult,
     ThinkingEvent, TextEvent, ToolStartEvent, ToolEndEvent, DoneEvent, ErrorEvent,
 )
 from app.core.agent.llm import LLMAdapter
@@ -334,7 +334,17 @@ class AgentLoop:
                             f"No tool_executor configured, skipping {len(tool_calls)} tool calls"
                         )
                     else:
-                        tool_results = await self.tool_executor.execute_all(tool_calls)
+                        # execute_all yields: intermediate events + list[ToolResult] (last)
+                        tool_results: List[Any] = []
+                        pending_list: List[Any] = []
+                        async for ev in self.tool_executor.execute_all(tool_calls):
+                            if isinstance(ev, list):
+                                pending_list.append(ev)
+                            elif isinstance(ev, (ToolEndEvent, ToolResult)):
+                                tool_results.append(ev)
+                        # 最后一个 list 是完整结果
+                        if pending_list:
+                            tool_results = pending_list[-1]
                         _tool_results_for_persist = tool_results
 
                         # 构建 Provider 原生格式的 tool 结果消息
@@ -563,7 +573,7 @@ class AgentLoop:
                     if self.tool_executor is None:
                         logger.warning(
                             f"[AgentLoop:{self.config.agent_name}] "
-                            f"No tool_executor configured, skipping {len(tool_calls)} tool calls"
+                            f"[Loop {self.loop_count}] No tool_executor configured, skipping {len(tool_calls)} tool calls"
                         )
                     else:
                         for tc in tool_calls:
@@ -577,10 +587,31 @@ class AgentLoop:
                                 arguments=tc.arguments,
                             )
 
-                        tool_results = await self.tool_executor.execute_all(tool_calls)
-                        _tool_results_for_persist = tool_results
+                        tool_results: List[Any] = []
+                        pending_list: List[Any] = []
+                        async for ev in self.tool_executor.execute_all(tool_calls):
+                            if isinstance(ev, list):
+                                pending_list.append(ev)
+                                continue
+                            elif isinstance(ev, ToolResult):
+                                tr = ev
+                                tool_results.append(ev)
+                                _tool_results_for_persist.append(ev)
+                            elif isinstance(ev, ToolEndEvent):
+                                tr = ToolResult(
+                                    tool_call_id=ev.tool_call_id,
+                                    tool_name=ev.tool_name,
+                                    result=ev.result,
+                                    is_error=ev.is_error,
+                                )
+                                tool_results.append(tr)
+                                _tool_results_for_persist.append(tr)
+                            else:
+                                # Intermediate event (e.g. SubAgentStartEvent) — yield directly
+                                yield ev
+                                continue
 
-                        for tr in tool_results:
+                            # Process ToolResult
                             raw_content = self._serialize_tool_result_content(tr.result)
                             self.messages.append({
                                 "role": "tool",

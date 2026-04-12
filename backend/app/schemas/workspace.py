@@ -71,9 +71,24 @@ class WorkspaceDetailResponse(WorkspaceResponse):
 # Chat 请求
 # ---------------------------------------------------------------------------
 
+class SupervisorPipelineRequest(BaseModel):
+    """触发 Supervisor 流水线（可覆盖 workspace 消息内容）。"""
+
+    user_request: Optional[str] = Field(
+        None,
+        description="流水线需求描述（优先级高于 chat.content）",
+    )
+    model: Optional[str] = Field(None, description="LLM 模型，默认 gemini-3-flash-preview")
+    max_loop: int = Field(30, ge=1, le=100, description="最大循环次数")
+
+
 class WorkspaceChatRequest(BaseModel):
     """发送工作台聊天消息请求。"""
 
     content: str = Field(..., description="用户消息内容")
     model: Optional[str] = Field(None, description="LLM 模型，默认使用系统配置")
     temperature: Optional[float] = Field(None, ge=0, le=2)
+    pipeline: Optional[SupervisorPipelineRequest] = Field(
+        None,
+        description="触发 Supervisor 流水线（设置此字段则走流水线模式）",
+    )

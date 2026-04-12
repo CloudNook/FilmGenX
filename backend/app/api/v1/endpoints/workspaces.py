@@ -41,6 +41,7 @@ from app.schemas.workspace import (
     WorkspaceDetailResponse,
     WorkspaceChatRequest,
     AgentMessageResponse,
+    SupervisorPipelineRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -276,17 +277,23 @@ async def chat_workspace(
       - tool_end: 工具执行完毕
       - done: 对话结束（含 usage 统计）
       - error: 执行出错
+
+    若请求包含 pipeline 字段，则触发 Supervisor 流水线，
+    事件类型变为 pipeline_* 前缀（pipeline_start | sub_agent_* | ...）。
     """
     await _require_project(project_id, user_id, db)
     ws = await _require_workspace(workspace_id, project_id, db)
 
-    # 确定使用的 prompt
-    prompt = ws.system_prompt or DEFAULT_SYSTEM_PROMPT
+    # ── Supervisor 流水线模式 ───────────────────────────────────────
+    if body.pipeline is not None:
+        return await _chat_workspace_supervisor(
+            project_id, ws, body, db, user_id
+        )
 
-    # 获取工具 schema
+    # ── 普通 Agent 对话模式 ─────────────────────────────────────────
+    prompt = ws.system_prompt or DEFAULT_SYSTEM_PROMPT
     tools = ToolRegistry.get_all_schemas()
 
-    # 构建 Agent（skill_names 由 Agent 定义绑定，run/stream 时懒加载注入 prompt）
     persist = DBPersistStrategy(db=db)
     tool_executor = ToolExecutor(db=db)
 
@@ -300,7 +307,6 @@ async def chat_workspace(
         skill_names=ws.skill_names if hasattr(ws, "skill_names") else [],
         persist=persist,
     )
-    # 注入 db 到 tool_executor（工具可能需要数据库会话）
     agent._tool_executor = tool_executor
 
     async def stream_agent() -> AsyncGenerator[str, None]:
@@ -311,7 +317,6 @@ async def chat_workspace(
                 data = _serialize_agent_event(event)
                 yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
-                # 累计 token
                 if isinstance(event, DoneEvent) and event.result.usage:
                     usage = event.result.usage
                     total_tokens_delta = usage.get("total_tokens") or 0
@@ -322,7 +327,6 @@ async def chat_workspace(
             yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
             await db.rollback()
 
-        # 更新 token 统计
         if total_tokens_delta > 0:
             try:
                 await WorkspaceRepository(db).update_tokens(workspace_id, total_tokens_delta)
@@ -338,4 +342,105 @@ async def chat_workspace(
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+async def _chat_workspace_supervisor(
+    project_id: int,
+    ws,
+    body: WorkspaceChatRequest,
+    db: AsyncSession,
+    user_id: int,
+):
+    """
+    Supervisor 流水线模式：workspace chat 触发完整的流水线执行。
+
+    流水线产物通过 SupervisorStreamEvent 实时透传，
+    最终 SupervisorDoneEvent 携带完整 artifacts 结束。
+    """
+    from app.services.supervisor_workflow_service import SupervisorWorkflowService
+
+    # 确定 user_request：pipeline.user_request > body.content
+    user_request = (
+        body.pipeline.user_request
+        if body.pipeline.user_request
+        else body.content
+    )
+    pipeline_model = body.pipeline.model or body.model or "gemini-3-flash-preview"
+    max_loop = body.pipeline.max_loop
+
+    workflow_service = SupervisorWorkflowService(db)
+
+    supervisor = _create_supervisor_for_workspace(
+        user_request=user_request,
+        model=pipeline_model,
+        max_loop=max_loop,
+        workflow_service=workflow_service,
+    )
+
+    # 在流式开始前创建 workflow DB 记录
+    try:
+        await workflow_service.create_workflow(
+            project_id=project_id,
+            owner_id=user_id,
+            supervisor_session_id=supervisor.supervisor_session_id,
+            user_request=user_request,
+            model=pipeline_model,
+        )
+        await db.commit()
+        logger.info(
+            f"[supervisor/workspace:{ws.id}] workflow created: "
+            f"session={supervisor.supervisor_session_id}"
+        )
+    except Exception as e:
+        logger.warning(f"[supervisor/workspace:{ws.id}] failed to create workflow record: {e}")
+
+    async def stream_supervisor() -> AsyncGenerator[str, None]:
+        try:
+            async for event in supervisor.stream(initial_input=user_request):
+                # 透传 Supervisor 事件，source 字段标记为 "supervisor"
+                if hasattr(event, "model_dump"):
+                    payload = event.model_dump()
+                else:
+                    payload = {"type": "unknown", "repr": str(event)}
+                payload["source"] = "supervisor"
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+            yield "data: [DONE]\n\n"
+
+        except Exception as e:
+            logger.exception(f"[supervisor/workspace:{ws.id}] stream error: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'source': 'supervisor', 'error': str(e)}, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        stream_supervisor(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _create_supervisor_for_workspace(
+    user_request: str,
+    model: str,
+    max_loop: int,
+    workflow_service,
+):
+    """
+    在 workspace 上下文中创建 SupervisorAgent。
+
+    延迟导入以避免循环依赖。
+    """
+    from app.core.supervisor.factory import create_supervisor
+
+    return create_supervisor(
+        user_request=user_request,
+        model=model,
+        max_loop=max_loop,
+        persist="redis",
+        workflow_service=workflow_service,
     )

@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from app.models.conversation import Conversation
     from app.models.location import Location
     from app.models.workspace import Workspace
+    from app.models.supervisor_workflow import SupervisorWorkflow
 
 
 class Project(Base):
@@ -41,3 +42,4 @@ class Project(Base):
     assets: Mapped[List["Asset"]] = relationship("Asset", back_populates="project", cascade="all, delete-orphan")
     conversations: Mapped[List["Conversation"]] = relationship("Conversation", back_populates="project", cascade="all, delete-orphan")
     workspaces: Mapped[List["Workspace"]] = relationship("Workspace", back_populates="project", cascade="all, delete-orphan")
+    supervisor_workflows: Mapped[List["SupervisorWorkflow"]] = relationship("SupervisorWorkflow", back_populates="project", cascade="all, delete-orphan")
