@@ -5,6 +5,7 @@ Agent 核心数据模型。
 """
 
 from datetime import datetime
+from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
@@ -47,6 +48,31 @@ class LLMResponse(BaseModel):
     raw: Optional[Dict[str, Any]] = Field(default=None, description="Provider 原生响应数据")
 
 
+class InterruptMode(str, Enum):
+    """Interrupt mode for HITL."""
+    AFTER_TOOL = "after_tool"
+    BEFORE_TOOL = "before_tool"
+
+
+class InterruptConfig(BaseModel):
+    """
+    Framework-level HITL interrupt configuration.
+
+    Any Agent created via create_agent() can configure interrupt strategy.
+    AgentLoop auto-detects interrupts when conditions match.
+    """
+    enabled: bool = False
+    mode: InterruptMode = InterruptMode.AFTER_TOOL
+    tool_names: List[str] = Field(
+        default_factory=list,
+        description="Tool names that trigger interrupt. Empty = all tools.",
+    )
+    context: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Business-layer context attached to InterruptEvent.",
+    )
+
+
 class AgentConfig(BaseModel):
     """Agent 配置参数。"""
 
@@ -59,6 +85,7 @@ class AgentConfig(BaseModel):
     max_tokens: Optional[int] = Field(None, gt=0, description="最大 token 数")
     max_loop: int = Field(default=20, ge=1, le=100, description="最大循环次数")
     tools: List[Dict[str, Any]] = Field(default_factory=list, description="工具列表")
+    interrupt_config: Optional[InterruptConfig] = None
 
 
 class AgentMessage(BaseModel):
@@ -176,5 +203,23 @@ class ErrorEvent(BaseModel):
     error: str
 
 
+class InterruptEvent(BaseModel):
+    """
+    Agent execution interrupted, waiting for external input.
+
+    Framework-level event produced by any Agent with interrupt_config.
+    """
+    type: Literal["interrupt"] = "interrupt"
+    session_id: str
+    tool_name: str
+    tool_call_id: str
+    tool_result: Any = None
+    arguments: Dict[str, Any] = Field(default_factory=dict)
+    available_actions: List[str] = Field(
+        default_factory=lambda: ["approve", "reject", "edit", "skip", "abort"]
+    )
+    context: Dict[str, Any] = Field(default_factory=dict)
+
+
 # 所有事件类型的联合，用于类型标注
-StreamEvent = ThinkingEvent | TextEvent | ToolStartEvent | ToolEndEvent | DoneEvent | ErrorEvent
+StreamEvent = ThinkingEvent | TextEvent | ToolStartEvent | ToolEndEvent | DoneEvent | ErrorEvent | InterruptEvent
