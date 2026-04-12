@@ -55,15 +55,18 @@ interface DisplayGroup {
   type: 'user' | 'assistant' | 'thinking' | 'tool_calls';
   content: string;
   thinking?: string;
-  toolCalls?: {
-    id: string;
-    name: string;
-    arguments: Record<string, unknown>;
-    result?: unknown;
-    isError?: boolean;
-  }[];
+  toolCalls?: ToolCallDisplay[];
   seq: number;
   createdAt?: string | null;
+}
+
+interface ToolCallDisplay {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+  result?: unknown;
+  isError?: boolean;
+  finished?: boolean;
 }
 
 function groupMessages(messages: AgentMessageResponse[]): DisplayGroup[] {
@@ -184,14 +187,7 @@ function groupMessages(messages: AgentMessageResponse[]): DisplayGroup[] {
 interface StreamingState {
   thinking: string;
   text: string;
-  toolCalls: {
-    id: string;
-    name: string;
-    arguments: Record<string, unknown>;
-    result?: unknown;
-    isError?: boolean;
-    finished: boolean;
-  }[];
+  toolCalls: ToolCallDisplay[];
   usage: { prompt_tokens?: number | null; completion_tokens?: number | null; thinking_tokens?: number | null; total_tokens?: number | null } | null;
   loopCount: number;
 }
@@ -891,71 +887,18 @@ function MessageGroup({
 
   if (group.type === 'tool_calls') {
     return (
-      <Collapsible defaultOpen={false}>
-        <div className="flex gap-4">
-          <Avatar className="h-8 w-8 shrink-0">
-            <AvatarFallback className="bg-primary/10 text-primary">
-              <Wrench className="h-4 w-4" />
-            </AvatarFallback>
-          </Avatar>
-          <div className="max-w-[80%]">
-            <CollapsibleTrigger asChild>
-              <button className="flex items-center gap-1.5 text-xs text-primary/70 hover:text-primary transition-colors mb-1">
-                <ChevronRight className="h-3 w-3 transition-transform [[data-state=open]>&]:rotate-90" />
-                <Wrench className="h-3 w-3" />
-                工具调用 ({group.toolCalls?.length || 0})
-              </button>
-            </CollapsibleTrigger>
-            <CollapsibleContent>
-              <div className="space-y-1.5">
-                {group.toolCalls?.map((tc) => (
-                  <Collapsible key={tc.id} defaultOpen={false}>
-                    <div className="rounded-lg px-3 py-2 bg-primary/5 border border-primary/10 text-xs">
-                      <CollapsibleTrigger asChild>
-                        <button className="flex items-center gap-1.5 w-full text-left">
-                          <ChevronRight className="h-3 w-3 text-primary shrink-0 transition-transform [[data-state=open]>&]:rotate-90" />
-                          <Wrench className="h-3 w-3 text-primary shrink-0" />
-                          <span className="font-medium text-foreground">{tc.name}</span>
-                          {tc.isError && (
-                            <Badge variant="outline" className="text-[10px] border-destructive/30 text-destructive ml-1">
-                              错误
-                            </Badge>
-                          )}
-                          {tc.result != null && !tc.isError && (
-                            <Badge variant="outline" className="text-[10px] border-primary/30 text-primary ml-1">
-                              完成
-                            </Badge>
-                          )}
-                        </button>
-                      </CollapsibleTrigger>
-                      <CollapsibleContent>
-                        <div className="mt-2 space-y-2">
-                          {tc.arguments && Object.keys(tc.arguments).length > 0 && (
-                            <div>
-                              <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">参数</p>
-                              <pre className="text-muted-foreground bg-background/60 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">
-                                {JSON.stringify(tc.arguments, null, 2)}
-                              </pre>
-                            </div>
-                          )}
-                          {tc.result != null && (
-                            <div>
-                              <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">结果</p>
-                              <pre className={`bg-background/60 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all ${tc.isError ? 'text-destructive' : 'text-muted-foreground'}`}>
-                                {typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)}
-                              </pre>
-                            </div>
-                          )}
-                        </div>
-                      </CollapsibleContent>
-                    </div>
-                  </Collapsible>
-                ))}
-              </div>
-            </CollapsibleContent>
-          </div>
+      <div className="flex gap-4">
+        <Avatar className="h-8 w-8 shrink-0">
+          <AvatarFallback className="bg-primary/10 text-primary">
+            <Wrench className="h-4 w-4" />
+          </AvatarFallback>
+        </Avatar>
+        <div className="max-w-[80%] space-y-1.5">
+          {group.toolCalls?.map((tc) => (
+            <ToolCallDisclosure key={tc.id} toolCall={tc} />
+          ))}
         </div>
-      </Collapsible>
+      </div>
     );
   }
 
@@ -982,6 +925,76 @@ function MessageGroup({
         )}
       </div>
     </div>
+  );
+}
+
+function ToolCallDisclosure({
+  toolCall,
+}: {
+  toolCall: ToolCallDisplay;
+}) {
+  const isFinished = toolCall.finished ?? true;
+  const hasArguments = Object.keys(toolCall.arguments || {}).length > 0;
+
+  return (
+    <Collapsible defaultOpen={false}>
+      <div className="rounded-lg px-3 py-2 bg-primary/5 border border-primary/10 text-xs">
+        <CollapsibleTrigger asChild>
+          <button className="flex items-center gap-1.5 w-full text-left">
+            <ChevronRight className="h-3 w-3 text-primary shrink-0 transition-transform [[data-state=open]>&]:rotate-90" />
+            {isFinished ? (
+              <Wrench className="h-3 w-3 text-primary shrink-0" />
+            ) : (
+              <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />
+            )}
+            <span className="font-medium text-foreground">{toolCall.name}</span>
+            {toolCall.isError ? (
+              <Badge variant="outline" className="text-[10px] border-destructive/30 text-destructive ml-1">
+                错误
+              </Badge>
+            ) : isFinished ? (
+              <Badge variant="outline" className="text-[10px] border-primary/30 text-primary ml-1">
+                完成
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="text-[10px] border-yellow-500/30 text-yellow-600 ml-1">
+                执行中
+              </Badge>
+            )}
+          </button>
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <div className="mt-2 space-y-2">
+            {hasArguments && (
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">参数</p>
+                <pre className="text-muted-foreground bg-background/60 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">
+                  {JSON.stringify(toolCall.arguments, null, 2)}
+                </pre>
+              </div>
+            )}
+            {toolCall.result != null ? (
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">结果</p>
+                <pre
+                  className={`bg-background/60 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all ${
+                    toolCall.isError ? 'text-destructive' : 'text-muted-foreground'
+                  }`}
+                >
+                  {typeof toolCall.result === 'string'
+                    ? toolCall.result
+                    : JSON.stringify(toolCall.result, null, 2)}
+                </pre>
+              </div>
+            ) : (
+              !isFinished && (
+                <p className="text-[11px] text-muted-foreground">正在等待工具返回结果...</p>
+              )
+            )}
+          </div>
+        </CollapsibleContent>
+      </div>
+    </Collapsible>
   );
 }
 
@@ -1035,54 +1048,7 @@ function StreamingMessageGroup({
           </Avatar>
           <div className="max-w-[80%] space-y-1.5">
             {streaming.toolCalls.map((tc) => (
-              <Collapsible key={tc.id} defaultOpen={false}>
-                <div className="rounded-lg px-3 py-2 bg-primary/5 border border-primary/10 text-xs">
-                  <div className="flex items-center gap-1.5">
-                    {tc.finished ? (
-                      <CollapsibleTrigger asChild>
-                        <button className="flex items-center gap-1.5 w-full text-left">
-                          <ChevronRight className="h-3 w-3 text-primary shrink-0 transition-transform [[data-state=open]>&]:rotate-90" />
-                          <Wrench className="h-3 w-3 text-primary shrink-0" />
-                          <span className="font-medium text-foreground">{tc.name}</span>
-                          {tc.isError ? (
-                            <Badge variant="outline" className="text-[10px] border-destructive/30 text-destructive ml-1">错误</Badge>
-                          ) : (
-                            <Badge variant="outline" className="text-[10px] border-primary/30 text-primary ml-1">完成</Badge>
-                          )}
-                        </button>
-                      </CollapsibleTrigger>
-                    ) : (
-                      <>
-                        <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />
-                        <span className="font-medium text-foreground">{tc.name}</span>
-                        <Badge variant="outline" className="text-[10px] border-yellow-500/30 text-yellow-600 ml-1">执行中</Badge>
-                      </>
-                    )}
-                  </div>
-                  {tc.finished && (
-                    <CollapsibleContent>
-                      <div className="mt-2 space-y-2">
-                        {tc.arguments && Object.keys(tc.arguments).length > 0 && (
-                          <div>
-                            <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">参数</p>
-                            <pre className="text-muted-foreground bg-background/60 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">
-                              {JSON.stringify(tc.arguments, null, 2)}
-                            </pre>
-                          </div>
-                        )}
-                        {tc.result != null && (
-                          <div>
-                            <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">结果</p>
-                            <pre className={`bg-background/60 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all ${tc.isError ? 'text-destructive' : 'text-muted-foreground'}`}>
-                              {typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)}
-                            </pre>
-                          </div>
-                        )}
-                      </div>
-                    </CollapsibleContent>
-                  )}
-                </div>
-              </Collapsible>
+              <ToolCallDisclosure key={tc.id} toolCall={tc} />
             ))}
           </div>
         </div>
