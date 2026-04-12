@@ -245,7 +245,7 @@ async def call_reviewer(
     )
 
     try:
-        result = await reviewer_agent.run(initial_input="")
+        result = await reviewer_agent.run(initial_input="请根据 system prompt 中的评审标准和内容，输出评审结果。")
         raw = result.raw_output or ""
 
         import re

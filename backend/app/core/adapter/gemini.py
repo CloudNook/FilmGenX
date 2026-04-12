@@ -122,12 +122,16 @@ class GeminiAdapter(ProviderAdapter):
                 continue
 
             text = msg.get("content", "")
+            if not text:
+                continue
             contents.append({
                 "role": "user" if role == "user" else "model",
-                "parts": [{"text": text}] if text else [],
+                "parts": [{"text": text}],
             })
 
         config: Dict[str, Any] = {}
+        if not contents:
+            contents.append({"role": "user", "parts": [{"text": "请继续。"}]})
         if system_prompt:
             config["system_instruction"] = {"parts": [{"text": system_prompt}]}
         if "temperature" in kwargs:
