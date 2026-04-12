@@ -147,8 +147,10 @@ class SupervisorAgent:
         - SupervisorDoneEvent：最后 yield
         """
         from app.core.supervisor.events import SupervisorDoneEvent
+        from app.core.agent.base import InterruptEvent
 
         accumulated_result = ""
+        was_interrupted = False
 
         try:
             async for event in self._agent.stream(initial_input):
@@ -158,14 +160,19 @@ class SupervisorAgent:
                 if hasattr(event, "content") and getattr(event, "type", None) == "text":
                     accumulated_result += event.content
 
+                if isinstance(event, InterruptEvent):
+                    was_interrupted = True
+
                 yield event
 
-            final_artifacts = dict(self.context.artifacts)
-            yield SupervisorDoneEvent(
-                supervisor_session_id=self.supervisor_session_id,
-                artifacts=final_artifacts,
-                final_result=accumulated_result or "流水线执行完毕",
-            )
+            # Only yield SupervisorDoneEvent if stream ended normally (not interrupted)
+            if not was_interrupted:
+                final_artifacts = dict(self.context.artifacts)
+                yield SupervisorDoneEvent(
+                    supervisor_session_id=self.supervisor_session_id,
+                    artifacts=final_artifacts,
+                    final_result=accumulated_result or "流水线执行完毕",
+                )
 
         except Exception as e:
             logger.exception(f"[SupervisorAgent] stream error: {e}")
