@@ -51,7 +51,6 @@ from app.core.supervisor.events import (
     SubAgentStartEvent,
     SubAgentEndEvent,
     SupervisorDoneEvent,
-    HumanReviewEvent,
 )
 from app.core.agent.base import (
     ThinkingEvent,
@@ -60,6 +59,8 @@ from app.core.agent.base import (
     ToolEndEvent,
     ErrorEvent,
     DoneEvent,
+    InterruptEvent,
+    InterruptConfig,
 )
 
 import app.core.tools.supervisor_tools  # noqa: F401
@@ -104,7 +105,10 @@ async def run_supervisor_pipeline(user_request: str) -> None:
         model="gemini-3-flash-preview",
         max_loop=30,
         persist=None,
-        human_review=True,  # 启用人工审阅
+        interrupt_config=InterruptConfig(
+            enabled=True,
+            tool_names=["call_sub_agent"],
+        ),
     )
 
     print(f"{_tag(C.BLUE, 'INIT')} session = {supervisor.supervisor_session_id}")
@@ -150,25 +154,44 @@ async def run_supervisor_pipeline(user_request: str) -> None:
                 if isinstance(ev.result, dict) and "output" in ev.result:
                     print(f"  {C.DIM}output:{C.RESET}\n{ev.result['output']}")
 
-            # ── 用户审阅 ──
-            elif isinstance(ev, HumanReviewEvent):
+            # ── 中断事件（用户审阅） ──
+            elif isinstance(ev, InterruptEvent):
+                tool_label = ev.tool_name
+                sub_name = ev.context.get("sub_agent_name", tool_label)
                 print(f"\n{'─'*70}")
-                print(f"{C.YELLOW}{C.BOLD}  审阅: {ev.sub_agent_name} 输出{C.RESET}")
+                print(f"{C.YELLOW}{C.BOLD}  审阅: {sub_name} 输出{C.RESET}")
                 print(f"{'─'*70}")
-                print(ev.output)
+                if ev.tool_result and isinstance(ev.tool_result, dict):
+                    print(ev.tool_result.get("output", ev.tool_result))
+                else:
+                    print(ev.tool_result or "(无输出)")
                 print(f"{'─'*70}")
 
                 feedback = await ainput(
-                    f"{C.YELLOW}请审阅 [{ev.sub_agent_name}]: "
+                    f"{C.YELLOW}请审阅 [{sub_name}]: "
                     f"(回车=通过 / 输入修改意见): {C.RESET}"
                 )
 
                 if feedback.strip():
                     print(f"{_tag(C.RED, 'FEEDBACK')} 注入反馈: {feedback}")
-                    supervisor.submit_review(feedback=feedback.strip())
+                    async for resume_ev in supervisor.resume(
+                        action="reject",
+                        feedback=feedback.strip(),
+                    ):
+                        _count(getattr(resume_ev, "type", type(resume_ev).__name__))
+                        # Print resumed-stream events for visibility
+                        if isinstance(resume_ev, TextEvent):
+                            source = getattr(resume_ev, "source", "supervisor")
+                            print(f"  {_tag(C.CYAN, f'TEXT:{source}')} {resume_ev.content}", end="")
+                        elif isinstance(resume_ev, ThinkingEvent):
+                            source = getattr(resume_ev, "source", "supervisor")
+                            print(f"  {_tag(C.DIM, f'THINK:{source}')} {resume_ev.content}")
+                        elif isinstance(resume_ev, ErrorEvent):
+                            print(f"  {_tag(C.RED, 'ERROR')} {resume_ev.error}")
                 else:
                     print(f"{_tag(C.GREEN, 'APPROVED')} 通过，继续下一阶段")
-                    supervisor.submit_review(feedback=None)
+                    async for resume_ev in supervisor.resume(action="approve"):
+                        _count(getattr(resume_ev, "type", type(resume_ev).__name__))
 
                 print(f"{_tag(C.BLUE, 'RESUMING')} Supervisor 正在接收反馈并继续决策，请稍候...")
                 print()
