@@ -695,6 +695,10 @@ class AgentLoop:
                             )
                             # --- Framework-level HITL interrupt check ---
                             if self._should_interrupt(tr.tool_name, tr.result):
+                                # Save checkpoint BEFORE yielding, because
+                                # the caller may switch to resume() generator
+                                # and abandon this one (code after yield won't run).
+                                await self._save_checkpoint(tr.tool_name)
                                 yield InterruptEvent(
                                     session_id=self.session_id,
                                     tool_name=tr.tool_name,
@@ -703,7 +707,6 @@ class AgentLoop:
                                     arguments=tc.arguments,
                                     context=self.interrupt_config.context if self.interrupt_config else {},
                                 )
-                                await self._save_checkpoint(tr.tool_name)
                                 return
 
                     # 工具执行完毕后写 assistant 消息（携带 tool_results，使用预分配 seq）

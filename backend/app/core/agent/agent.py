@@ -147,6 +147,7 @@ class Agent:
                 persist=self.persist,
                 session_id=self.session_id,
                 request_id=rid,
+                interrupt_config=self.config.interrupt_config,
                 on_loop_start=on_loop_start,
                 on_loop_end=on_loop_end,
             )
@@ -215,6 +216,7 @@ class Agent:
             persist=self.persist,
             session_id=self.session_id,
             request_id=rid,
+            interrupt_config=self.config.interrupt_config,
             on_loop_start=on_loop_start,
             on_loop_end=on_loop_end,
         )
