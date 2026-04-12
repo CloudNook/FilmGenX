@@ -328,6 +328,9 @@ class GeminiAdapter(ProviderAdapter):
                     "total_tokens": getattr(um, "total_token_count", None),
                 }
 
+            if not candidate.content or not candidate.content.parts:
+                continue
+
             text_parts = []
             chunk_tool_calls = []
 
