@@ -21,6 +21,7 @@ from app.core.agent.base import (
 )
 from app.core.supervisor.context import SupervisorContext
 from app.core.supervisor.reviewer import build_reviewer_prompt
+from app.core.tools.registry import register_tool
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,17 @@ def _build_call_sub_agent_schema() -> Dict[str, Any]:
     }
 
 
+@register_tool(
+    name="call_sub_agent",
+    description=(
+        "调用指定的 SubAgent 执行任务，实时返回流式事件。\n"
+        "Args:\n"
+        "  sub_agent_name: SubAgent 名称，可选值：outline_writer | script_writer | storyboarder\n"
+        "  task_description: 给 SubAgent 的具体任务描述（包含角色定义 + 任务 + 参考产物）\n"
+        "  context_snapshot: 前序 SubAgent 产物的 JSON 字符串（选择性注入上下文）\n"
+        "Returns: 流式事件（SubAgentStart → Thinking/Text/ToolStart/ToolEnd → SubAgentEnd）\n"
+    ),
+)
 async def call_sub_agent(
     sub_agent_name: str,
     task_description: str,
@@ -200,6 +212,16 @@ def _build_call_reviewer_schema() -> Dict[str, Any]:
     }
 
 
+@register_tool(
+    name="call_reviewer",
+    description=(
+        "调用 Reviewer Agent 评估内容质量。\n"
+        "Args:\n"
+        "  content: 需要评估的内容（文本或 JSON）\n"
+        "  review_criteria: 评估维度列表，如：情感张力 | 结构完整性 | 分镜合理性\n"
+        "Returns: {score: 0-10, passed: bool, feedback: str, suggestions: []}\n"
+    ),
+)
 async def call_reviewer(
     content: str,
     review_criteria: List[str],
@@ -285,6 +307,13 @@ def _build_get_workflow_state_schema() -> Dict[str, Any]:
     }
 
 
+@register_tool(
+    name="get_workflow_state",
+    description=(
+        "查询当前流水线状态（Supervisor 决策参考）。\n"
+        "Returns: {current_phase, artifacts, review_history, sub_agent_sessions}\n"
+    ),
+)
 async def get_workflow_state(
     supervisor_context: SupervisorContext,
 ) -> Dict[str, Any]:
