@@ -9,6 +9,7 @@ from app.repositories.asset import AssetRepository
 from app.repositories.task import TaskRepository
 from app.repositories.conversation import ConversationRepository, MessageRepository
 from app.repositories.skill import SkillRepository
+from app.repositories.supervisor_workflow import SupervisorWorkflowRepository
 
 __all__ = [
     "BaseRepository",
@@ -23,4 +24,5 @@ __all__ = [
     "ConversationRepository",
     "MessageRepository",
     "SkillRepository",
+    "SupervisorWorkflowRepository",
 ]

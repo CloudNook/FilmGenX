@@ -53,6 +53,8 @@ class PersistStrategy(ABC):
         tool_call_id: Optional[str] = None,
         tool_name: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        usage: Optional[Dict[str, Any]] = None,
+        supervisor_session_id: Optional[str] = None,
     ) -> None:
         """
         追加一条消息记录。
@@ -69,6 +71,7 @@ class PersistStrategy(ABC):
             tool_call_id:  role=tool 时的调用 ID
             tool_name:     role=tool 时的工具名
             metadata:      附加元数据
+            supervisor_session_id: Supervisor session ID（sv- 前缀），SubAgent 消息追溯到 Supervisor 流水线
         """
         ...
 

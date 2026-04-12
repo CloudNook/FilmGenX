@@ -56,6 +56,24 @@ from app.core.middleware.builtin import (
 from app.core.tools.registry import ToolFunc, ToolRegistry, register_tool
 
 
+# ──────────────────────────────────────────────────────────────────
+# Helper: async generator for execute_all mocks
+# ──────────────────────────────────────────────────────────────────
+async def _mock_execute_all(results):
+    """
+    Async generator that yields ToolEndEvent objects.
+    execute_all yields ToolEndEvent (not ToolResult) for each completed tool.
+    """
+    from app.core.agent.base import ToolEndEvent
+    for r in results:
+        yield ToolEndEvent(
+            tool_call_id=r.tool_call_id,
+            tool_name=r.tool_name,
+            result=r.result,
+            is_error=r.is_error,
+        )
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 1. GeminiAdapter._normalize_finish_reason
 # ═══════════════════════════════════════════════════════════════════
@@ -247,7 +265,7 @@ class TestAgentLoopRun:
         llm.parse_json = MagicMock(return_value=None)
 
         tool_executor = MagicMock()
-        tool_executor.execute_all = AsyncMock(return_value=[
+        tool_executor.execute_all = lambda _: _mock_execute_all([
             ToolResult(tool_call_id="tc1", tool_name="calculate", result="2", is_error=False)
         ])
 
@@ -291,7 +309,7 @@ class TestAgentLoopRun:
         llm.parse_json = MagicMock(return_value=None)
 
         tool_executor = MagicMock()
-        tool_executor.execute_all = AsyncMock(return_value=[
+        tool_executor.execute_all = lambda _: _mock_execute_all([
             ToolResult(tool_call_id="tc1", tool_name="get_weather", result="晴，25°C", is_error=False)
         ])
 
@@ -327,7 +345,7 @@ class TestAgentLoopRun:
         llm.parse_json = MagicMock(return_value=None)
 
         tool_executor = MagicMock()
-        tool_executor.execute_all = AsyncMock(return_value=[
+        tool_executor.execute_all = lambda _: _mock_execute_all([
             ToolResult(tool_call_id="tc1", tool_name="calculate", result="2", is_error=False)
         ])
 
@@ -479,7 +497,7 @@ class TestAgentLoopStreamRun:
         llm.parse_json = MagicMock(return_value=None)
 
         tool_executor = MagicMock()
-        tool_executor.execute_all = AsyncMock(return_value=[
+        tool_executor.execute_all = lambda _: _mock_execute_all([
             ToolResult(tool_call_id="tc1", tool_name="calculate", result="6", is_error=False)
         ])
 

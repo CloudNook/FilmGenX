@@ -50,6 +50,7 @@ class RedisPersistStrategy(PersistStrategy):
                 tool_name=r.get("tool_name"),
                 usage=r.get("usage"),
                 extra_metadata=r.get("metadata") or {},
+                supervisor_session_id=r.get("supervisor_session_id"),
             )
             for r in records
         ]
@@ -67,6 +68,7 @@ class RedisPersistStrategy(PersistStrategy):
         tool_name: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         usage: Optional[Dict[str, Any]] = None,
+        supervisor_session_id: Optional[str] = None,
     ) -> None:
         from app.utils import redis_client
 
@@ -82,6 +84,7 @@ class RedisPersistStrategy(PersistStrategy):
             "tool_name": tool_name,
             "usage": usage,
             "metadata": metadata or {},
+            "supervisor_session_id": supervisor_session_id,
         }
         await redis_client.rpush(key, json.dumps(msg, ensure_ascii=False))
         await redis_client.expire(key, self.ttl)

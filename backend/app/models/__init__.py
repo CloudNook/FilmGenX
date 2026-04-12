@@ -16,6 +16,7 @@ from app.models.prompt import PromptTemplate
 from app.models.conversation import Conversation, Message
 from app.models.skill import Skill
 from app.models.workspace import Workspace
+from app.models.supervisor_workflow import SupervisorWorkflow
 
 __all__ = [
     "User",
@@ -33,4 +34,5 @@ __all__ = [
     "Message",
     "Skill",
     "Workspace",
+    "SupervisorWorkflow",
 ]

@@ -1,0 +1,115 @@
+"""
+Supervisor Workflow 流水线记录表。
+
+存储每次 Supervisor 流水线的执行元数据：
+  - 关联项目 / 用户
+  - supervisor_session_id（映射到 SupervisorContext）
+  - 最终产物（artifacts JSON）
+  - 执行状态和统计
+"""
+
+from datetime import datetime
+from typing import TYPE_CHECKING, Dict, Any, List, Optional
+
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, JSON
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.db.base import Base
+
+if TYPE_CHECKING:
+    from app.models.user import User
+    from app.models.project import Project
+
+
+class SupervisorWorkflow(Base):
+    """
+    Supervisor 流水线执行记录。
+
+    每发起一次 /api/v1/supervisor/stream 产生一条记录，
+    流水线结束后更新 status / artifacts / final_result。
+    """
+
+    __tablename__ = "supervisor_workflows"
+
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+        comment="所属项目",
+    )
+    owner_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+        comment="发起用户（用于权限校验）",
+    )
+    supervisor_session_id: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        unique=True,
+        index=True,
+        comment="SupervisorSession UUID（sv- 前缀），映射到 SupervisorContext",
+    )
+    user_request: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        comment="用户原始需求",
+    )
+    model: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="gemini-3-flash-preview",
+        comment="使用的 LLM 模型",
+    )
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="running",
+        index=True,
+        comment="running | completed | failed",
+    )
+    current_stage: Mapped[Optional[str]] = mapped_column(
+        String(50),
+        nullable=True,
+        comment="当前阶段：outline_writer | script_writer | storyboarder",
+    )
+    loop_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        comment="实际循环次数",
+    )
+    total_tokens: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        comment="累计消耗 token 数",
+    )
+    artifacts: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+        JSON,
+        nullable=True,
+        comment="流水线产物（outline / script / storyboard JSON）",
+    )
+    final_result: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Supervisor 最终总结文本",
+    )
+    error_message: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        comment="执行出错时的错误信息",
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="流水线完成时间",
+    )
+
+    # Relations
+    project: Mapped["Project"] = relationship("Project", back_populates="supervisor_workflows")
+    owner: Mapped["User"] = relationship("User")
+
+    # SubAgent 会话记录（反向引用 SupervisorSession）
+    # NOTE: SupervisorSession 的 SubAgent 信息在内存中，
+    # 如需持久化，可在 agent_messages 表加 supervisor_session_id 字段（Task 13）

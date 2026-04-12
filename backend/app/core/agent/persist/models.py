@@ -29,6 +29,7 @@ class MessageRecord:
     tool_name: Optional[str] = None
     usage: Optional[Dict[str, Any]] = None
     extra_metadata: Optional[Dict[str, Any]] = field(default=None)
+    supervisor_session_id: Optional[str] = field(default=None)
 
 
 class AgentMessageRecord(Base):
@@ -93,6 +94,12 @@ class AgentMessageRecord(Base):
     extra_metadata: Mapped[Optional[dict]] = mapped_column(
         JSON,
         nullable=True,
+    )
+    supervisor_session_id: Mapped[Optional[str]] = mapped_column(
+        String(100),
+        nullable=True,
+        index=True,
+        comment="Supervisor session ID（sv- 前缀），SubAgent 消息追溯到 Supervisor 流水线",
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
