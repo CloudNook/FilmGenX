@@ -37,7 +37,7 @@ def create_supervisor(
     middlewares: Optional[List[AgentMiddleware]] = None,
     sub_agent_configs: Optional[Dict[str, Any]] = None,
     workflow_service=None,
-    human_review: bool = False,
+    interrupt_config=None,
 ) -> SupervisorAgent:
     """
     创建 SupervisorAgent 实例。
@@ -51,10 +51,15 @@ def create_supervisor(
         middlewares: 中间件列表
         sub_agent_configs: SubAgent 配置映射（预留，未来从 DB/Skill 加载）
         workflow_service: SupervisorWorkflowService 实例（可选，用于 call_sub_agent DB 持久化）
+        interrupt_config: InterruptConfig for framework-level HITL (optional)
 
     Returns:
         SupervisorAgent 实例
     """
+    # If interrupt_config enabled but no persist strategy, default to redis
+    if interrupt_config and getattr(interrupt_config, 'enabled', False) and persist is None:
+        persist = "redis"
+
     supervisor_session_id = f"sv-{uuid4()}"
     persist_strategy = _resolve_persist(persist)
 
@@ -71,7 +76,7 @@ def create_supervisor(
         persist=persist_strategy,
         model=model,
         max_loop=max_loop,
-        human_review=human_review,
+        interrupt_config=interrupt_config,
     )
 
     # 注入 workflow_service，供 call_sub_agent 写入 DB

@@ -153,6 +153,7 @@ async def call_sub_agent(
             elif isinstance(event, DoneEvent):
                 accumulated_result = {
                     "output": event.result.raw_output or "",
+                    "sub_agent_name": sub_agent_name,
                 }
                 if supervisor_context is not None:
                     supervisor_context.artifacts[sub_agent_name] = (
@@ -164,7 +165,7 @@ async def call_sub_agent(
     except Exception as e:
         logger.exception(f"[call_sub_agent] error in sub_agent={sub_agent_name}: {e}")
         yield ErrorEvent(error=str(e), source=sub_agent_name)
-        accumulated_result = {"error": str(e)}
+        accumulated_result = {"error": str(e), "sub_agent_name": sub_agent_name}
 
     # SubAgent 执行完毕后，写入 DB
     if workflow_service is not None and supervisor_context is not None:
