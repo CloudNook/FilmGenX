@@ -107,7 +107,7 @@ async def call_sub_agent(
     sub_agent = create_agent(
         agent_name=sub_agent_name,
         session_id=sub_session_id,
-        prompt=sub_prompt,
+        prompt="",
         model="gemini-3-flash-preview",
         max_loop=20,
         persist="redis",
@@ -130,7 +130,7 @@ async def call_sub_agent(
     try:
         accumulated_result = {}
 
-        async for event in sub_agent.stream(initial_input=""):
+        async for event in sub_agent.stream(initial_input=sub_prompt):
             if isinstance(event, ThinkingEvent):
                 yield ThinkingEvent(content=event.content, source=sub_agent_name)
             elif isinstance(event, TextEvent):
@@ -152,17 +152,14 @@ async def call_sub_agent(
                 )
             elif isinstance(event, DoneEvent):
                 accumulated_result = {
-                    "schema_data": event.result.schema_data,
-                    "raw_output": event.result.raw_output,
-                    "loop_count": event.result.loop_count,
+                    "output": event.result.raw_output or "",
                 }
                 if supervisor_context is not None:
                     supervisor_context.artifacts[sub_agent_name] = (
-                        event.result.schema_data or event.result.raw_output
+                        event.result.raw_output
                     )
                 logger.info(
-                    f"[call_sub_agent] completed sub_agent={sub_agent_name}, "
-                    f"loop_count={event.result.loop_count}"
+                    f"[call_sub_agent] completed sub_agent={sub_agent_name}"
                 )
     except Exception as e:
         logger.exception(f"[call_sub_agent] error in sub_agent={sub_agent_name}: {e}")
@@ -175,7 +172,7 @@ async def call_sub_agent(
             await workflow_service.append_artifacts(
                 supervisor_session_id=supervisor_context.supervisor_session_id,
                 stage=sub_agent_name,
-                artifact=accumulated_result.get("schema_data") or accumulated_result.get("raw_output") or {},
+                artifact=accumulated_result.get("output") or {},
             )
         except Exception as e:
             logger.warning(f"[call_sub_agent] failed to persist artifacts: {e}")

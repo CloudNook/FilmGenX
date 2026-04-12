@@ -24,8 +24,9 @@ class ToolExecutor:
     根据 tool_call 查找并执行对应工具。
     """
 
-    def __init__(self, db: Any = None):
+    def __init__(self, db: Any = None, extra_kwargs: Optional[Dict[str, Any]] = None):
         self.db = db
+        self.extra_kwargs = extra_kwargs or {}
 
     def get_tool(self, name: str):
         return ToolRegistry.get(name)
@@ -58,14 +59,34 @@ class ToolExecutor:
         kwargs = dict(tool_call.arguments)
         if self.db is not None and "db" not in kwargs:
             kwargs["db"] = self.db
+        # 只注入工具签名中实际存在的额外参数
+        import inspect
+        tool_params = set(inspect.signature(tool_func.func).parameters)
+        for k, v in self.extra_kwargs.items():
+            if k not in kwargs and k in tool_params:
+                kwargs[k] = v
 
         try:
-            raw_result = tool_func.execute(**kwargs)
+            raw_result = await tool_func.execute(**kwargs)
 
             if hasattr(raw_result, "__aiter__"):
-                # 工具返回 AsyncGenerator：yield 所有中间事件
+                # 工具返回 AsyncGenerator：yield 所有中间事件，最后补 ToolEndEvent
+                last_event = None
                 async for event in raw_result:
                     yield event
+                    last_event = event
+                # async generator 工具可能不产出 ToolEndEvent，
+                # 但 execute_all 需要它来构建 tool_results，必须补一个
+                if not isinstance(last_event, ToolEndEvent):
+                    result = None
+                    if last_event is not None and hasattr(last_event, "result"):
+                        result = last_event.result
+                    yield ToolEndEvent(
+                        tool_call_id=tool_call.id,
+                        tool_name=tool_call.name,
+                        result=result or {"status": "completed"},
+                        is_error=False,
+                    )
             else:
                 # 工具返回同步结果
                 yield ToolEndEvent(
@@ -167,12 +188,29 @@ class ToolExecutor:
         kwargs = dict(tool_call.arguments)
         if self.db is not None and "db" not in kwargs:
             kwargs["db"] = self.db
+        import inspect as _inspect
+        _tool_params = set(_inspect.signature(tool_func.func).parameters)
+        for k, v in self.extra_kwargs.items():
+            if k not in kwargs and k in _tool_params:
+                kwargs[k] = v
 
         try:
             raw_result = await tool_func.execute(**kwargs)
             if hasattr(raw_result, "__aiter__"):
+                last_event = None
                 async for event in raw_result:
                     yield event
+                    last_event = event
+                if not isinstance(last_event, ToolEndEvent):
+                    result = None
+                    if last_event is not None and hasattr(last_event, "result"):
+                        result = last_event.result
+                    yield ToolEndEvent(
+                        tool_call_id=tool_call.id,
+                        tool_name=tool_call.name,
+                        result=result or {"status": "completed"},
+                        is_error=False,
+                    )
             else:
                 yield ToolEndEvent(
                     tool_call_id=tool_call.id,

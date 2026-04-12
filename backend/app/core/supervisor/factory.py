@@ -37,6 +37,7 @@ def create_supervisor(
     middlewares: Optional[List[AgentMiddleware]] = None,
     sub_agent_configs: Optional[Dict[str, Any]] = None,
     workflow_service=None,
+    human_review: bool = False,
 ) -> SupervisorAgent:
     """
     创建 SupervisorAgent 实例。
@@ -70,6 +71,7 @@ def create_supervisor(
         persist=persist_strategy,
         model=model,
         max_loop=max_loop,
+        human_review=human_review,
     )
 
     # 注入 workflow_service，供 call_sub_agent 写入 DB

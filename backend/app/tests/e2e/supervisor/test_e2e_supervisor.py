@@ -145,18 +145,14 @@ class MockToolExecutor:
                 sub_agent_name=sub_agent_name,
                 session_id=f"sub-{sub_agent_name}-mock",
                 result={
-                    "schema_data": {"title": f"{sub_agent_name} 产物"},
-                    "raw_output": f"{sub_agent_name} 执行完毕",
-                    "loop_count": 1,
+                    "output": f"{sub_agent_name} 执行完毕",
                 },
             )
             yield ToolEndEvent(
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
                 result={
-                    "schema_data": {"title": f"{sub_agent_name} 产物"},
-                    "raw_output": f"{sub_agent_name} 执行完毕",
-                    "loop_count": 1,
+                    "output": f"{sub_agent_name} 执行完毕",
                 },
                 is_error=False,
             )
@@ -453,7 +449,7 @@ async def test_supervisor_context_artifacts_accumulated():
             events.append(ev)
             if hasattr(ev, "type") and ev.type == "supervisor_done":
                 artifacts = ev.artifacts
-                # artifacts 应包含各 SubAgent 的产物（mock 中为 schema_data）
+                # artifacts 应包含各 SubAgent 的产物
                 assert isinstance(artifacts, dict)
                 print(f"✓ SupervisorDoneEvent.artifacts: {artifacts}")
                 return

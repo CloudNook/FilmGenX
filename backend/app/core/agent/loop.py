@@ -592,6 +592,7 @@ class AgentLoop:
                         async for ev in self.tool_executor.execute_all(tool_calls):
                             if isinstance(ev, list):
                                 pending_list.append(ev)
+                                continue
                             elif isinstance(ev, ToolResult):
                                 tr = ev
                                 tool_results.append(ev)

@@ -53,6 +53,14 @@ class ReviewEndEvent(BaseModel):
     source: str = "supervisor"
 
 
+class HumanReviewEvent(BaseModel):
+    """SubAgent 完成，等待用户审阅。"""
+    type: Literal["human_review"] = "human_review"
+    sub_agent_name: str
+    output: str
+    source: str = "supervisor"
+
+
 class SupervisorDoneEvent(BaseModel):
     """Supervisor 流水线执行完毕。"""
     type: Literal["supervisor_done"] = "supervisor_done"
@@ -67,5 +75,6 @@ SupervisorStreamEvent = Union[
     SubAgentEndEvent,
     ReviewStartEvent,
     ReviewEndEvent,
+    HumanReviewEvent,
     SupervisorDoneEvent,
 ]
