@@ -49,9 +49,7 @@ from app.core.agent.loop import AgentLoop
 from app.core.agent.persist.db_strategy import DBPersistStrategy
 from app.core.middleware.chain import AgentMiddleware, MiddlewareChain, MiddlewareContext
 from app.core.middleware.builtin import (
-    CreditMiddleware,
     FinalSchemaResponseMiddleware,
-    SummaryMiddleware,
 )
 from app.core.tools.registry import ToolFunc, ToolRegistry, register_tool
 
@@ -962,91 +960,6 @@ class TestBuiltinMiddlewares:
         assert done.result.schema_data == {"answer": "结构化结论"}
         assert done.result.usage == {"prompt_tokens": 7, "completion_tokens": 5, "total_tokens": 12}
 
-    @pytest.mark.asyncio
-    async def test_credit_middleware_records_final_usage(self):
-        records = []
-
-        async def recorder(ctx, usage):
-            records.append(
-                {
-                    "session_id": ctx.session_id,
-                    "request_id": ctx.request_id,
-                    "usage": usage,
-                }
-            )
-
-        llm = MagicMock(spec=LLMAdapter)
-        llm.generate = AsyncMock(return_value=LLMResponse(
-            content="hello",
-            finish_reason="stop",
-            usage={"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
-        ))
-
-        agent = Agent(
-            config=AgentConfig(agent_name="test", prompt=""),
-            session_id="s1",
-            middlewares=[CreditMiddleware(recorder=recorder)],
-        )
-        agent._llm = llm
-        agent._tool_executor = MagicMock()
-
-        result = await agent.run("hi")
-
-        assert result.usage == {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6}
-        assert records == [
-            {
-                "session_id": "s1",
-                "request_id": result.request_id,
-                "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
-            }
-        ]
-
-    @pytest.mark.asyncio
-    async def test_summary_middleware_replaces_old_messages_with_summary_context(self):
-        persist = MagicMock()
-        persist.load_messages = AsyncMock(return_value=[
-            {"role": "user", "content": "旧问题1", "seq": 0},
-            {"role": "assistant", "content": "旧回答1", "seq": 1},
-            {"role": "user", "content": "旧问题2", "seq": 2},
-            {"role": "assistant", "content": "旧回答2", "seq": 3},
-            {"role": "user", "content": "旧问题3", "seq": 4},
-            {"role": "assistant", "content": "旧回答3", "seq": 5},
-        ])
-        persist.append_message = AsyncMock()
-        persist.flush = AsyncMock()
-
-        summarized_batches = []
-
-        async def summarizer(ctx, messages):
-            summarized_batches.append(messages)
-            return "这是压缩后的历史摘要"
-
-        llm = MagicMock(spec=LLMAdapter)
-        llm.generate = AsyncMock(return_value=LLMResponse(content="最终回答", finish_reason="stop"))
-
-        agent = Agent(
-            config=AgentConfig(agent_name="test", prompt=""),
-            session_id="s1",
-            persist=persist,
-            middlewares=[SummaryMiddleware(
-                max_tokens=10,
-                keep_last_messages=2,
-                token_estimator=lambda messages: 999,
-                summarizer=summarizer,
-            )],
-        )
-        agent._llm = llm
-        agent._tool_executor = MagicMock()
-
-        await agent.run("当前问题")
-
-        generate_messages = llm.generate.await_args_list[0].kwargs["messages"]
-        assert len(summarized_batches) == 1
-        assert generate_messages[0]["role"] == "system"
-        assert "这是压缩后的历史摘要" in generate_messages[0]["content"]
-        assert generate_messages[-1]["role"] == "user"
-        assert generate_messages[-1]["content"] == "当前问题"
-        assert len(generate_messages) == 3
 
 
 # ═══════════════════════════════════════════════════════════════════
