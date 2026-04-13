@@ -11,7 +11,7 @@ Supervisor Workflow 流水线记录表。
 from datetime import datetime
 from typing import TYPE_CHECKING, Dict, Any, List, Optional
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, JSON
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -99,6 +99,18 @@ class SupervisorWorkflow(Base):
         Text,
         nullable=True,
         comment="执行出错时的错误信息",
+    )
+    hitl_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+        comment="Whether HITL is enabled for this run",
+    )
+    review_nodes: Mapped[Optional[list]] = mapped_column(
+        JSON,
+        nullable=True,
+        comment="Configured review node names for HITL",
     )
     completed_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),

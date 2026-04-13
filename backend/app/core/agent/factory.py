@@ -75,6 +75,7 @@ def create_agent(
     max_loop: int = 20,
     persist: PersistArg = None,
     middlewares: Optional[List[AgentMiddleware]] = None,
+    interrupt_config=None,
 ) -> Agent:
     """
     创建 Agent 实例。
@@ -109,6 +110,7 @@ def create_agent(
         max_tokens=max_tokens,
         tools=tools or [],
         max_loop=max_loop,
+        interrupt_config=interrupt_config,
     )
 
     persist_strategy = _resolve_persist(persist)

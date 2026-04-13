@@ -8,3 +8,5 @@
 #   id_utils.py         - 业务 ID 生成（如 DQCK_001_S003 格式的可读 ID）
 #   validators.py       - 业务数据校验（分镜JSON结构完整性检查等）
 #   redis_client.py     - Redis 异步客户端封装
+
+from app.utils import redis_client  # noqa: F401

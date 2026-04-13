@@ -51,7 +51,6 @@ from app.core.supervisor.events import (
     SubAgentStartEvent,
     SubAgentEndEvent,
     SupervisorDoneEvent,
-    HumanReviewEvent,
 )
 from app.core.agent.base import (
     ThinkingEvent,
@@ -60,6 +59,8 @@ from app.core.agent.base import (
     ToolEndEvent,
     ErrorEvent,
     DoneEvent,
+    InterruptEvent,
+    InterruptConfig,
 )
 
 import app.core.tools.supervisor_tools  # noqa: F401
@@ -104,7 +105,10 @@ async def run_supervisor_pipeline(user_request: str) -> None:
         model="gemini-3-flash-preview",
         max_loop=30,
         persist=None,
-        human_review=True,  # 启用人工审阅
+        interrupt_config=InterruptConfig(
+            enabled=True,
+            tool_names=["call_sub_agent"],
+        ),
     )
 
     print(f"{_tag(C.BLUE, 'INIT')} session = {supervisor.supervisor_session_id}")
@@ -117,100 +121,125 @@ async def run_supervisor_pipeline(user_request: str) -> None:
     def _count(etype: str):
         event_counts[etype] = event_counts.get(etype, 0) + 1
 
-    try:
-        async for ev in supervisor.stream(initial_input=user_request):
-            ev_type = getattr(ev, "type", type(ev).__name__)
-            _count(ev_type)
+    # 使用循环交替模式：stream → interrupt → resume → stream → ...
+    # 这样多层 interrupt（每个子 agent 审核一次）都能正确处理
+    async def handle_event(ev):
+        """统一处理单个事件，返回 None 或 resume generator。"""
+        ev_type = getattr(ev, "type", type(ev).__name__)
+        _count(ev_type)
 
-            # ── 思考 ──
-            if isinstance(ev, ThinkingEvent):
-                source = getattr(ev, "source", "supervisor")
-                print(f"  {_tag(C.DIM, f'THINK:{source}')} {ev.content}")
+        # ── 思考 ──
+        if isinstance(ev, ThinkingEvent):
+            source = getattr(ev, "source", "supervisor")
+            print(f"  {_tag(C.DIM, f'THINK:{source}')} {ev.content}")
 
-            # ── 文本 ──
-            elif isinstance(ev, TextEvent):
-                source = getattr(ev, "source", "supervisor")
-                if source == "supervisor":
-                    print(f"  {_tag(C.CYAN, 'TEXT')} {ev.content}", end="")
-                else:
-                    print(f"  {_tag(C.MAGENTA, f'TEXT:{source}')} {ev.content}", end="")
-
-            # ── SubAgent 开始 ──
-            elif isinstance(ev, SubAgentStartEvent):
-                phase_times[ev.sub_agent_name] = time.perf_counter()
-                print(f"\n{_tag(C.GREEN, 'SUB_START')} {C.GREEN}{ev.sub_agent_name}{C.RESET}"
-                      f" session={ev.session_id}")
-                print(f"  {C.DIM}task: {ev.task_description}{C.RESET}")
-
-            # ── SubAgent 结束 ──
-            elif isinstance(ev, SubAgentEndEvent):
-                name = ev.sub_agent_name
-                elapsed = time.perf_counter() - phase_times.get(name, t0)
-                print(f"\n{_tag(C.GREEN, 'SUB_END')}   {C.GREEN}{name}{C.RESET} ({elapsed:.1f}s)")
-                if isinstance(ev.result, dict) and "output" in ev.result:
-                    print(f"  {C.DIM}output:{C.RESET}\n{ev.result['output']}")
-
-            # ── 用户审阅 ──
-            elif isinstance(ev, HumanReviewEvent):
-                print(f"\n{'─'*70}")
-                print(f"{C.YELLOW}{C.BOLD}  审阅: {ev.sub_agent_name} 输出{C.RESET}")
-                print(f"{'─'*70}")
-                print(ev.output)
-                print(f"{'─'*70}")
-
-                feedback = await ainput(
-                    f"{C.YELLOW}请审阅 [{ev.sub_agent_name}]: "
-                    f"(回车=通过 / 输入修改意见): {C.RESET}"
-                )
-
-                if feedback.strip():
-                    print(f"{_tag(C.RED, 'FEEDBACK')} 注入反馈: {feedback}")
-                    supervisor.submit_review(feedback=feedback.strip())
-                else:
-                    print(f"{_tag(C.GREEN, 'APPROVED')} 通过，继续下一阶段")
-                    supervisor.submit_review(feedback=None)
-
-                print(f"{_tag(C.BLUE, 'RESUMING')} Supervisor 正在接收反馈并继续决策，请稍候...")
-                print()
-
-            # ── 工具调用 ──
-            elif isinstance(ev, ToolStartEvent):
-                source = getattr(ev, "source", "supervisor")
-                args_str = json.dumps(ev.arguments, ensure_ascii=False)
-                print(f"  {_tag(C.YELLOW, f'TOOL:{source}')} {ev.tool_name}({args_str})")
-
-            elif isinstance(ev, ToolEndEvent):
-                source = getattr(ev, "source", "supervisor")
-                result_str = json.dumps(ev.result, ensure_ascii=False, default=str) \
-                    if isinstance(ev.result, (dict, list)) else str(ev.result)
-                print(f"  {_tag(C.YELLOW, f'TOOL_END:{source}')} {ev.tool_name} -> {result_str}")
-
-            # ── Supervisor 完成 ──
-            elif isinstance(ev, SupervisorDoneEvent):
-                elapsed = time.perf_counter() - t0
-                print(f"\n{'='*70}")
-                print(f"{C.GREEN}{C.BOLD}  SUPERVISOR DONE{C.RESET}")
-                print(f"{'='*70}")
-                print(f"  session_id : {ev.supervisor_session_id}")
-                print(f"  duration   : {elapsed:.1f}s")
-                print(f"  artifacts  : {list(ev.artifacts.keys())}")
-                for name, artifact in ev.artifacts.items():
-                    artifact_str = json.dumps(artifact, ensure_ascii=False, default=str)
-                    print(f"    {C.CYAN}{name}{C.RESET}:")
-                    print(f"    {artifact_str}")
-                print(f"\n  final_result:")
-                print(f"  {ev.final_result}")
-
-            # ── 错误 ──
-            elif isinstance(ev, ErrorEvent):
-                print(f"\n  {_tag(C.RED, 'ERROR')} {ev.error}")
-
-            # ── Done 事件 ──
-            elif isinstance(ev, DoneEvent):
-                pass  # 静默处理
-
+        # ── 文本 ──
+        elif isinstance(ev, TextEvent):
+            source = getattr(ev, "source", "supervisor")
+            if source == "supervisor":
+                print(f"  {_tag(C.CYAN, 'TEXT')} {ev.content}", end="")
             else:
-                print(f"  {_tag(C.DIM, ev_type)} {type(ev).__name__}")
+                print(f"  {_tag(C.MAGENTA, f'TEXT:{source}')} {ev.content}", end="")
+
+        # ── SubAgent 开始 ──
+        elif isinstance(ev, SubAgentStartEvent):
+            phase_times[ev.sub_agent_name] = time.perf_counter()
+            print(f"\n{_tag(C.GREEN, 'SUB_START')} {C.GREEN}{ev.sub_agent_name}{C.RESET}"
+                  f" session={ev.session_id}")
+            print(f"  {C.DIM}task: {ev.task_description}{C.RESET}")
+
+        # ── SubAgent 结束 ──
+        elif isinstance(ev, SubAgentEndEvent):
+            name = ev.sub_agent_name
+            elapsed = time.perf_counter() - phase_times.get(name, t0)
+            print(f"\n{_tag(C.GREEN, 'SUB_END')}   {C.GREEN}{name}{C.RESET} ({elapsed:.1f}s)")
+            if isinstance(ev.result, dict) and "output" in ev.result:
+                print(f"  {C.DIM}output:{C.RESET}\n{ev.result['output']}")
+
+        # ── 中断事件（用户审阅） ──
+        elif isinstance(ev, InterruptEvent):
+            tool_label = ev.tool_name
+            sub_name = "unknown"
+            if ev.tool_result and isinstance(ev.tool_result, dict):
+                sub_name = ev.tool_result.get("sub_agent_name", tool_label)
+            else:
+                sub_name = ev.context.get("sub_agent_name", tool_label)
+            print(f"\n{'─'*70}")
+            print(f"{C.YELLOW}{C.BOLD}  审阅: {sub_name} 输出{C.RESET}")
+            print(f"{'─'*70}")
+            if ev.tool_result and isinstance(ev.tool_result, dict):
+                print(ev.tool_result.get("output", ev.tool_result))
+            else:
+                print(ev.tool_result or "(无输出)")
+            print(f"{'─'*70}")
+
+            feedback = await ainput(
+                f"{C.YELLOW}请审阅 [{sub_name}]: "
+                f"(回车=通过 / 输入修改意见): {C.RESET}"
+            )
+
+            if feedback.strip():
+                print(f"{_tag(C.RED, 'FEEDBACK')} 注入反馈: {feedback}")
+                print(f"{_tag(C.BLUE, 'RESUMING')} Supervisor 正在接收反馈并继续...")
+                return supervisor.resume(action="reject", feedback=feedback.strip())
+            else:
+                print(f"{_tag(C.GREEN, 'APPROVED')} 通过，继续下一阶段")
+                print(f"{_tag(C.BLUE, 'RESUMING')} Supervisor 继续决策...")
+                return supervisor.resume(action="approve")
+
+        # ── 工具调用 ──
+        elif isinstance(ev, ToolStartEvent):
+            source = getattr(ev, "source", "supervisor")
+            args_str = json.dumps(ev.arguments, ensure_ascii=False)
+            print(f"  {_tag(C.YELLOW, f'TOOL:{source}')} {ev.tool_name}({args_str})")
+
+        elif isinstance(ev, ToolEndEvent):
+            source = getattr(ev, "source", "supervisor")
+            result_str = json.dumps(ev.result, ensure_ascii=False, default=str) \
+                if isinstance(ev.result, (dict, list)) else str(ev.result)
+            print(f"  {_tag(C.YELLOW, f'TOOL_END:{source}')} {ev.tool_name} -> {result_str}")
+
+        # ── Supervisor 完成 ──
+        elif isinstance(ev, SupervisorDoneEvent):
+            elapsed = time.perf_counter() - t0
+            print(f"\n{'='*70}")
+            print(f"{C.GREEN}{C.BOLD}  SUPERVISOR DONE{C.RESET}")
+            print(f"{'='*70}")
+            print(f"  session_id : {ev.supervisor_session_id}")
+            print(f"  duration   : {elapsed:.1f}s")
+            print(f"  artifacts  : {list(ev.artifacts.keys())}")
+            for name, artifact in ev.artifacts.items():
+                artifact_str = json.dumps(artifact, ensure_ascii=False, default=str)
+                print(f"    {C.CYAN}{name}{C.RESET}:")
+                print(f"    {artifact_str}")
+            print(f"\n  final_result:")
+            print(f"  {ev.final_result}")
+
+        # ── 错误 ──
+        elif isinstance(ev, ErrorEvent):
+            print(f"\n  {_tag(C.RED, 'ERROR')} {ev.error}")
+
+        # ── Done 事件 ──
+        elif isinstance(ev, DoneEvent):
+            pass  # 静默处理
+
+        else:
+            print(f"  {_tag(C.DIM, ev_type)} {type(ev).__name__}")
+
+        return None
+
+    try:
+        current_stream = supervisor.stream(initial_input=user_request)
+        while True:
+            try:
+                ev = await current_stream.__anext__()
+            except StopAsyncIteration:
+                break
+
+            resume_gen = await handle_event(ev)
+            if resume_gen is not None:
+                # 中断后 resume，切换到新的 generator 继续处理
+                current_stream = resume_gen
 
     except Exception as e:
         print(f"\n  {_tag(C.RED, 'EXCEPTION')} {e}")

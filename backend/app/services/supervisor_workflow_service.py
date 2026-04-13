@@ -84,6 +84,23 @@ class SupervisorWorkflowService:
         await self.db.refresh(workflow)
         return workflow
 
+    async def update_status(
+        self,
+        supervisor_session_id: str,
+        status: str,
+    ) -> Optional[SupervisorWorkflow]:
+        """Update workflow status."""
+        workflow = await self.repo.get_by_session_id(supervisor_session_id)
+        if not workflow:
+            return None
+        workflow.status = status
+        if status == "completed":
+            from datetime import datetime, timezone
+            workflow.completed_at = datetime.now(timezone.utc)
+        await self.db.commit()
+        await self.db.refresh(workflow)
+        return workflow
+
     async def increment_loop_count(
         self,
         supervisor_session_id: str,

@@ -2,13 +2,12 @@
 SupervisorAgent — 视频生成流水线的元 Agent。
 """
 
-import asyncio
 import logging
 from string import Template
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from app.core.agent.agent import Agent
-from app.core.agent.base import AgentResult
+from app.core.agent.base import AgentResult, InterruptConfig
 from app.core.agent.factory import create_agent
 from app.core.agent.persist.base import PersistStrategy
 from app.core.middleware.chain import AgentMiddleware
@@ -83,7 +82,7 @@ class SupervisorAgent:
         persist: Optional[PersistStrategy],
         model: str = "gemini-3-flash-preview",
         max_loop: int = 30,
-        human_review: bool = False,
+        interrupt_config: Optional[InterruptConfig] = None,
     ):
         self.supervisor_session_id = supervisor_session_id
         self.context = SupervisorContext(
@@ -92,9 +91,6 @@ class SupervisorAgent:
         )
         self.session = SupervisorSession(supervisor_session_id)
         self._sub_agent_configs = sub_agent_configs
-        self._human_review = human_review
-        self._review_event = asyncio.Event()
-        self._review_feedback: Optional[str] = None
 
         tool_schemas = get_supervisor_tool_schemas()
 
@@ -111,6 +107,7 @@ class SupervisorAgent:
             max_loop=max_loop,
             persist=persist,
             middlewares=middlewares,
+            interrupt_config=interrupt_config,
         )
 
         # 注入 ToolExecutor，携带 supervisor_context / workflow_service
@@ -126,27 +123,6 @@ class SupervisorAgent:
         return SUPERVISOR_SYSTEM_PROMPT_TEMPLATE.substitute(
             user_request=self.context.user_request,
         )
-
-    def submit_review(self, feedback: Optional[str] = None) -> None:
-        """
-        提交用户审阅结果。
-
-        feedback=None 表示通过，流水线继续。
-        feedback=str  表示需要修改，反馈注入 system prompt。
-        """
-        self._review_feedback = feedback
-        self._review_event.set()
-
-    def _inject_feedback_to_prompt(self, sub_agent_name: str, feedback: str) -> None:
-        """将用户反馈追加到 system prompt，下次 LLM 调用时生效。"""
-        self.context.metadata[f"{sub_agent_name}_review"] = feedback
-        updated_request = (
-            self.context.user_request
-            + f"\n\n## 用户对 {sub_agent_name} 的审阅反馈\n{feedback}"
-        )
-        self.context.user_request = updated_request
-        self._agent.config.prompt = self._build_system_prompt()
-        logger.info(f"[SupervisorAgent] injected review feedback for {sub_agent_name}")
 
     async def run(self, initial_input: str) -> AgentResult:
         """
@@ -168,16 +144,13 @@ class SupervisorAgent:
         - Supervisor 的 Thinking/Text 事件：透传（source = "supervisor"）
         - ToolStart/ToolEnd 事件：透传（source = "supervisor"）
         - SubAgentStart/SubAgentEnd 事件：工具内部 yield
-        - HumanReviewEvent：human_review 模式下，SubAgent 完成后 yield
         - SupervisorDoneEvent：最后 yield
         """
-        from app.core.supervisor.events import (
-            SupervisorDoneEvent,
-            HumanReviewEvent,
-            SubAgentEndEvent,
-        )
+        from app.core.supervisor.events import SupervisorDoneEvent
+        from app.core.agent.base import InterruptEvent
 
         accumulated_result = ""
+        was_interrupted = False
 
         try:
             async for event in self._agent.stream(initial_input):
@@ -187,41 +160,19 @@ class SupervisorAgent:
                 if hasattr(event, "content") and getattr(event, "type", None) == "text":
                     accumulated_result += event.content
 
+                if isinstance(event, InterruptEvent):
+                    was_interrupted = True
+
                 yield event
 
-                # Human-in-the-loop: SubAgent 完成后暂停等待用户审阅
-                if self._human_review and isinstance(event, SubAgentEndEvent):
-                    output = ""
-                    if isinstance(event.result, dict):
-                        output = event.result.get("output", "")
-                    yield HumanReviewEvent(
-                        sub_agent_name=event.sub_agent_name,
-                        output=str(output),
-                    )
-                    # 阻塞等待用户提交审阅
-                    self._review_event.clear()
-                    self._review_feedback = None
-                    logger.info(
-                        f"[SupervisorAgent] waiting for human review of {event.sub_agent_name}..."
-                    )
-                    await self._review_event.wait()
-                    logger.info(
-                        f"[SupervisorAgent] review received, resuming stream..."
-                    )
-                    if self._review_feedback:
-                        self._inject_feedback_to_prompt(
-                            event.sub_agent_name, self._review_feedback
-                        )
-                    logger.info(
-                        f"[SupervisorAgent] continuing to next event from _agent.stream()"
-                    )
-
-            final_artifacts = dict(self.context.artifacts)
-            yield SupervisorDoneEvent(
-                supervisor_session_id=self.supervisor_session_id,
-                artifacts=final_artifacts,
-                final_result=accumulated_result or "流水线执行完毕",
-            )
+            # Only yield SupervisorDoneEvent if stream ended normally (not interrupted)
+            if not was_interrupted:
+                final_artifacts = dict(self.context.artifacts)
+                yield SupervisorDoneEvent(
+                    supervisor_session_id=self.supervisor_session_id,
+                    artifacts=final_artifacts,
+                    final_result=accumulated_result or "流水线执行完毕",
+                )
 
         except Exception as e:
             logger.exception(f"[SupervisorAgent] stream error: {e}")
@@ -232,3 +183,30 @@ class SupervisorAgent:
                 artifacts=dict(self.context.artifacts),
                 final_result=f"执行出错：{str(e)}",
             )
+
+    async def resume(
+        self,
+        action: str,
+        feedback: Optional[str] = None,
+        edited_content: Optional[str] = None,
+    ) -> AsyncGenerator:
+        """Resume Supervisor from interrupt checkpoint."""
+        from app.core.agent.base import DoneEvent
+        from app.core.supervisor.events import SupervisorDoneEvent
+
+        async for event in self._agent.resume(
+            action=action,
+            feedback=feedback,
+            edited_content=edited_content,
+        ):
+            if hasattr(event, "source") and getattr(event, "source", None) is None:
+                event.source = "supervisor"
+
+            yield event
+
+            if isinstance(event, DoneEvent):
+                yield SupervisorDoneEvent(
+                    supervisor_session_id=self.supervisor_session_id,
+                    artifacts=dict(self.context.artifacts),
+                    final_result=event.result.raw_output or "Pipeline completed",
+                )

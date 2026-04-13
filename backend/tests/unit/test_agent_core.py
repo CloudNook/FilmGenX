@@ -1084,3 +1084,87 @@ class TestDBPersistStrategy:
 
         db.flush.assert_awaited_once()
         db.commit.assert_not_called()
+
+
+class TestAgentLoopInterrupt:
+    """Tests for AgentLoop interrupt detection."""
+
+    def _make_interrupt_config(self, tool_names=None):
+        from app.core.agent.base import InterruptConfig, InterruptMode
+        return InterruptConfig(
+            enabled=True,
+            mode=InterruptMode.AFTER_TOOL,
+            tool_names=tool_names or [],
+        )
+
+    def _make_loop_with_interrupt(self, interrupt_config):
+        from app.core.agent.loop import AgentLoop
+        from app.core.agent.base import AgentConfig
+        from unittest.mock import MagicMock
+
+        config = AgentConfig(
+            agent_name="test",
+            prompt="",
+            max_loop=10,
+            interrupt_config=interrupt_config,
+        )
+        return AgentLoop(
+            config=config,
+            llm=MagicMock(),
+            tool_executor=None,
+            session_id="test-session",
+            request_id="req-1",
+            interrupt_config=interrupt_config,
+        )
+
+    def test_should_interrupt_disabled(self):
+        from app.core.agent.base import InterruptConfig
+        loop = self._make_loop_with_interrupt(InterruptConfig(enabled=False))
+        assert loop._should_interrupt("any_tool") is False
+
+    def test_should_interrupt_no_config(self):
+        from app.core.agent.loop import AgentLoop
+        from app.core.agent.base import AgentConfig
+        from unittest.mock import MagicMock
+        config = AgentConfig(agent_name="test", prompt="")
+        loop = AgentLoop(config=config, llm=MagicMock(), session_id="s1")
+        assert loop._should_interrupt("any_tool") is False
+
+    def test_should_interrupt_matching_tool(self):
+        cfg = self._make_interrupt_config(tool_names=["call_sub_agent"])
+        loop = self._make_loop_with_interrupt(cfg)
+        assert loop._should_interrupt("call_sub_agent") is True
+
+    def test_should_interrupt_non_matching_tool(self):
+        cfg = self._make_interrupt_config(tool_names=["call_sub_agent"])
+        loop = self._make_loop_with_interrupt(cfg)
+        assert loop._should_interrupt("call_reviewer") is False
+
+    def test_should_interrupt_empty_tool_names_matches_all(self):
+        cfg = self._make_interrupt_config(tool_names=[])
+        loop = self._make_loop_with_interrupt(cfg)
+        assert loop._should_interrupt("any_tool") is True
+
+    def test_should_interrupt_with_context_filter_match(self):
+        cfg = self._make_interrupt_config(tool_names=["call_sub_agent"])
+        cfg.context["review_sub_agents"] = ["outline_writer"]
+        loop = self._make_loop_with_interrupt(cfg)
+        assert loop._should_interrupt(
+            "call_sub_agent",
+            tool_result={"output": "...", "sub_agent_name": "outline_writer"},
+        ) is True
+
+    def test_should_interrupt_with_context_filter_no_match(self):
+        cfg = self._make_interrupt_config(tool_names=["call_sub_agent"])
+        cfg.context["review_sub_agents"] = ["outline_writer"]
+        loop = self._make_loop_with_interrupt(cfg)
+        assert loop._should_interrupt(
+            "call_sub_agent",
+            tool_result={"output": "...", "sub_agent_name": "script_writer"},
+        ) is False
+
+    def test_should_interrupt_before_tool_mode(self):
+        from app.core.agent.base import InterruptConfig, InterruptMode
+        cfg = InterruptConfig(enabled=True, mode=InterruptMode.BEFORE_TOOL, tool_names=[])
+        loop = self._make_loop_with_interrupt(cfg)
+        assert loop._should_interrupt("any_tool") is False
