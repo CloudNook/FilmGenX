@@ -201,6 +201,7 @@ class OpenAIAdapter(ProviderAdapter):
                     idx = tc_delta.index
                     if idx not in accumulated_tool_calls:
                         accumulated_tool_calls[idx] = {
+                            "index": idx,
                             "id": tc_delta.id or "",
                             "name": "",
                             "arguments": "",

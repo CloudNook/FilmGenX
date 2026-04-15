@@ -126,3 +126,73 @@ class FinalSchemaResponseMiddleware(AgentMiddleware):
             result.schema_error = f"Failed to format final schema response: {exc}"
 
         return result
+
+
+class HumanInTheLoopMiddleware(AgentMiddleware):
+    """
+    人工审阅中间件。
+
+    在工具执行前拦截不在白名单的工具，等待人工确认/拒绝/取消后再继续。
+    白名单内的工具直接放行，白名单外的工具触发人工审阅。
+    AgentLoop 负责持久化中断状态（通过 persist.save_interrupt_state）；
+    本中间件只负责判断是否需要中断。
+
+    使用方式：
+        agent = create_agent(
+            ...,
+            middlewares=[HumanInTheLoopMiddleware(auto_tool_list=["get_weather", "get_time"])]
+        )
+        # get_weather / get_time 直接执行
+        # 其他所有工具（call_sub_agent 等）都需要人工确认
+    """
+
+    name = "hitl"
+
+    def __init__(
+        self,
+        auto_tool_list: Optional[list[str]] = None,
+        *,
+        white_tool_list: Optional[list[str]] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """
+        Args:
+            auto_tool_list: 直接放行的工具名列表（新参数名）。
+                           不在列表内的工具触发人工审阅。
+            white_tool_list: auto_tool_list 的兼容别名。
+            context: 中断时附加到中断信息的上下文，供前端展示用。
+        """
+        if auto_tool_list is None and white_tool_list is None:
+            raise ValueError("auto_tool_list or white_tool_list is required")
+        chosen = auto_tool_list if auto_tool_list is not None else white_tool_list
+        self.auto_tool_list = set(chosen or [])
+        self.context = context or {}
+
+    async def before_tool_calls(
+        self,
+        ctx: MiddlewareContext,
+        tool_calls: list[Any],
+    ) -> MiddlewareContext:
+        """
+        检查是否有需要人工审阅的工具调用。
+
+        规则：遍历 tool_calls，只要有一个工具不在 auto_tool_list 中，就中断。
+        auto_tool_list 内的工具直接放行。
+
+        中断信息写入 ctx.metadata["interrupt"]，AgentLoop 通过检查此字段决定是否中断。
+        """
+        for tc in tool_calls:
+            if tc.name not in self.auto_tool_list:
+                logger.info(
+                    f"[HumanInTheLoopMiddleware] tool '{tc.name}' not in auto list, "
+                    f"interrupting session={ctx.session_id}"
+                )
+                ctx.metadata["interrupt"] = {
+                    "tool_call_id": tc.id,
+                    "tool_name": tc.name,
+                    "arguments": dict(tc.arguments),
+                    "context": self.context,
+                    "available_actions": ["approve", "reject"],
+                }
+                return ctx
+        return ctx

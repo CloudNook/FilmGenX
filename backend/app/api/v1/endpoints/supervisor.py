@@ -7,7 +7,7 @@ Supervisor 流式 API 端点。
 
 import json
 import logging
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
@@ -45,9 +45,11 @@ class SupervisorStartRequest(BaseModel):
 
 class SupervisorResumeRequest(BaseModel):
     """Resume Supervisor pipeline after human review."""
-    action: str = Field(..., description="approve | reject | edit | skip | abort")
+    action: Literal["approve", "reject", "skip"] = Field(
+        ...,
+        description="approve | reject | skip",
+    )
     feedback: Optional[str] = Field(None, description="Feedback text (for reject)")
-    edited_content: Optional[str] = Field(None, description="Edited content (for edit)")
 
 
 class SupervisorInterruptState(BaseModel):
@@ -156,20 +158,21 @@ def _create_supervisor(body: SupervisorStartRequest, user_id: int, workflow_serv
     延迟导入以避免循环依赖。
     """
     from app.core.supervisor.factory import create_supervisor
-    from app.core.agent.base import InterruptConfig
+    from app.core.middleware import HumanInTheLoopMiddleware
 
     persist: Any = None
     if body.persist and body.persist != "none":
         persist = body.persist  # "redis" → factory 内部解析
 
-    interrupt_config = None
+    middlewares = []
+
+    # HITL：需要审阅时，传入 HumanInTheLoopMiddleware
     if body.human_review:
-        interrupt_config = InterruptConfig(
-            enabled=True,
-            tool_names=["call_sub_agent"],
-            context={
-                "review_sub_agents": body.review_nodes or [],
-            },
+        middlewares.append(
+            HumanInTheLoopMiddleware(
+                white_tool_list=["call_sub_agent"],
+                context={"review_sub_agents": body.review_nodes or []},
+            )
         )
 
     return create_supervisor(
@@ -179,7 +182,7 @@ def _create_supervisor(body: SupervisorStartRequest, user_id: int, workflow_serv
         persist=persist,
         sub_agent_configs=body.sub_agent_configs,
         workflow_service=workflow_service,
-        interrupt_config=interrupt_config,
+        middlewares=middlewares,
     )
 
 
@@ -212,14 +215,14 @@ async def get_interrupt_state(
 
     from app.core.agent.persist.redis_strategy import RedisPersistStrategy
     persist = RedisPersistStrategy()
-    checkpoint = await persist.load_checkpoint(session_id)
+    interrupt_state = await persist.load_interrupt_state(session_id)
 
     return SupervisorInterruptState(
         status=workflow.status,
         interrupt={
-            "tool_name": checkpoint.interrupt_tool_name if checkpoint else None,
-            "context": checkpoint.interrupt_config.context if checkpoint else {},
-            "loop_count": checkpoint.loop_count if checkpoint else None,
+            "tool_name": interrupt_state.tool_name if interrupt_state else None,
+            "arguments": interrupt_state.arguments if interrupt_state else {},
+            "context": interrupt_state.context if interrupt_state else {},
         },
         artifacts=workflow.artifacts,
     )
@@ -256,19 +259,17 @@ async def resume_supervisor_pipeline(
     from app.core.supervisor.factory import create_supervisor
 
     persist = RedisPersistStrategy()
-    checkpoint = await persist.load_checkpoint(session_id)
-    if not checkpoint:
+    interrupt_state = await persist.load_interrupt_state(session_id)
+    if not interrupt_state:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
-            detail="No checkpoint found for session",
+            detail="No interrupt state found for session",
         )
 
-    interrupt_config = checkpoint.interrupt_config
     supervisor = create_supervisor(
         user_request=workflow.user_request,
         model=workflow.model,
         persist="redis",
-        interrupt_config=interrupt_config,
     )
 
     if workflow.artifacts:
@@ -279,7 +280,6 @@ async def resume_supervisor_pipeline(
             async for event in supervisor.resume(
                 action=body.action,
                 feedback=body.feedback,
-                edited_content=body.edited_content,
             ):
                 if hasattr(event, "model_dump"):
                     payload = event.model_dump()

@@ -1385,8 +1385,17 @@ export interface AgentMessageResponse {
   created_at: string | null;
 }
 
+export interface PendingInterrupt {
+  tool_name: string;
+  tool_call_id: string;
+  arguments: Record<string, unknown>;
+  available_actions: string[];
+  context: Record<string, unknown>;
+}
+
 export interface WorkspaceDetailResponse extends WorkspaceResponse {
   messages: AgentMessageResponse[];
+  pending_interrupt: PendingInterrupt | null;
 }
 
 /** Agent SSE 事件类型 */
@@ -1396,7 +1405,8 @@ export type AgentSSEEvent =
   | { type: 'tool_start'; tool_call_id: string; tool_name: string; arguments: Record<string, unknown> }
   | { type: 'tool_end'; tool_call_id: string; tool_name: string; result: unknown; is_error: boolean }
   | { type: 'done'; usage: { prompt_tokens?: number | null; completion_tokens?: number | null; thinking_tokens?: number | null; total_tokens?: number | null } | null; loop_count: number; finished: boolean }
-  | { type: 'error'; error: string };
+  | { type: 'error'; error: string }
+  | { type: 'interrupt'; session_id: string; tool_name: string; tool_call_id: string; arguments: Record<string, unknown>; available_actions: string[]; context: Record<string, unknown> };
 
 export const workspacesApi = {
   list(projectId: number, page = 1, pageSize = 20) {
@@ -1435,7 +1445,7 @@ export const workspacesApi = {
   },
 
   /** 流式聊天，返回 Response 对象供前端读取 SSE */
-  chat(projectId: number, workspaceId: number, content: string, options?: { model?: string; temperature?: number }) {
+  chat(projectId: number, workspaceId: number, content: string, options?: { model?: string; temperature?: number; hitlAutoTools?: string[] }) {
     const token = getToken();
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -1451,7 +1461,26 @@ export const workspacesApi = {
           content,
           model: options?.model,
           temperature: options?.temperature,
+          hitl_auto_tools: options?.hitlAutoTools,
         }),
+      },
+    );
+  },
+
+  /** HITL Resume：复用 /chat 端点，传 resume 字段，content 为空 */
+  resume(projectId: number, workspaceId: number, action: 'approve' | 'reject') {
+    const token = getToken();
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    return fetch(
+      `${BASE_URL}/projects/${projectId}/workspaces/${workspaceId}/chat`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ content: '', resume: { action } }),
       },
     );
   },

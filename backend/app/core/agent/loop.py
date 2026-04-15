@@ -7,20 +7,25 @@ Agent 循环逻辑。
 持久化由 AgentLoop 在每条消息产生后直接驱动，与 middleware 无关。
 """
 
+import base64
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, List, Optional
 
 from app.core.agent.base import (
-    AgentConfig, AgentMessage, AgentResult, ToolCall, ToolResult,
-    ThinkingEvent, TextEvent, ToolStartEvent, ToolEndEvent, DoneEvent, ErrorEvent,
-    InterruptEvent,
+    AgentConfig, AgentMessage, AgentResult, ToolCall, ToolExecutionResult,
+    ToolResult, ThinkingEvent, TextEvent, ToolStartEvent, ToolEndEvent,
+    DoneEvent, ErrorEvent, InterruptEvent, InterruptDecision, AgentInterrupted,
+    AgentCheckpoint, ResumeDecision,
 )
 from app.core.agent.llm import LLMAdapter
 from app.core.agent.persist.base import PersistStrategy
 from app.core.agent.tool import ToolExecutor
 from app.core.agent.usage import merge_usage
+
+if TYPE_CHECKING:
+    from app.core.middleware.chain import MiddlewareChain, MiddlewareContext
 
 logger = logging.getLogger(__name__)
 
@@ -59,9 +64,7 @@ class AgentLoop:
         request_id: str = "",
         on_loop_start: Optional[Any] = None,
         on_loop_end: Optional[Any] = None,
-        interrupt_config=None,
-        initial_messages=None,
-        initial_loop_count: int = 0,
+        chain: "MiddlewareChain" = None,
     ):
         self.config = config
         self.llm = llm
@@ -71,14 +74,12 @@ class AgentLoop:
         self.request_id = request_id
         self.on_loop_start = on_loop_start
         self.on_loop_end = on_loop_end
+        self.chain = chain
         self.messages: List[Dict[str, Any]] = []
-        self.loop_count = initial_loop_count
+        self.loop_count = 0
         self._seq = 0  # 全局序号，run() 开始时从历史最大 seq + 1 初始化
         self._system_prompt: Optional[str] = None  # 缓存，内容不随循环变化
         self._session_accumulated_usage: Optional[Dict[str, Any]] = None  # 会话历史累积 usage
-        self.interrupt_config = interrupt_config
-        if initial_messages is not None:
-            self.messages = initial_messages
 
     def _build_system_prompt(self) -> str:
         if self._system_prompt is not None:
@@ -112,44 +113,34 @@ class AgentLoop:
 
         return False
 
-    def _should_interrupt(
-        self,
-        tool_name: str,
-        tool_result: Any = None,
-    ) -> bool:
-        """Check if this tool execution should trigger an interrupt."""
-        if self.interrupt_config is None or not self.interrupt_config.enabled:
-            return False
-        if self.interrupt_config.mode.value != "after_tool":
-            return False
-        if not self.interrupt_config.tool_names:
-            pass
-        elif tool_name not in self.interrupt_config.tool_names:
-            return False
-        review_filter = self.interrupt_config.context.get("review_sub_agents")
-        if review_filter and tool_result is not None:
-            if isinstance(tool_result, dict):
-                sub_name = tool_result.get("sub_agent_name", "")
-                if sub_name and sub_name not in review_filter:
-                    return False
-        return True
+    async def _persist_interrupt(self, ctx: "MiddlewareContext") -> None:
+        """
+        将中断时的完整快照持久化到 persist。
 
-    async def _save_checkpoint(self, tool_name: str) -> None:
-        """Save interrupt checkpoint via persist strategy."""
-        if self.persist is None or self.interrupt_config is None:
+        包含：被拦截的 tool_call + 消息历史 + loop_count。
+        resume 时用于完整恢复状态。
+        """
+        interrupt_info = ctx.metadata.get("interrupt")
+        if self.persist is None or interrupt_info is None:
             return
-        from app.core.agent.checkpoint import AgentCheckpoint
+        from app.core.agent.base import AgentCheckpoint
+
         checkpoint = AgentCheckpoint(
-            session_id=self.session_id,
+            tool_call_id=interrupt_info["tool_call_id"],
+            tool_name=interrupt_info["tool_name"],
+            arguments=interrupt_info["arguments"],
+            context=interrupt_info.get("context", {}),
+            available_actions=interrupt_info.get(
+                "available_actions", ["approve", "reject"]
+            ),
             messages=list(self.messages),
             loop_count=self.loop_count,
-            interrupt_tool_name=tool_name,
-            interrupt_config=self.interrupt_config,
         )
-        await self.persist.save_checkpoint(checkpoint)
+        await self.persist.save_interrupt_state(self.session_id, checkpoint)
         logger.info(
             f"[AgentLoop:{self.config.agent_name}] "
-            f"Checkpoint saved for session={self.session_id}, tool={tool_name}"
+            f"Checkpoint saved for session={self.session_id}, "
+            f"tool={checkpoint.tool_name}, loop={checkpoint.loop_count}"
         )
 
     def _add_message(self, role: str, content: str, seq: int = 0, **kwargs) -> AgentMessage:
@@ -174,6 +165,17 @@ class AgentLoop:
                 tr = results_by_id[tc.id]
                 entry["result"] = tr.result
                 entry["is_error"] = tr.is_error
+            # Persist Gemini thought_signature so it can be restored on resume.
+            # thought_signature lives on the Part object (not on function_call).
+            raw: Dict[str, Any] = getattr(tc, "raw", None) or {}
+            gemini_part = raw.get("gemini_part")
+            if gemini_part is not None:
+                ts = getattr(gemini_part, "thought_signature", None)
+                if ts is not None:
+                    # bytes → base64 string for JSON serialisation
+                    entry["gemini_thought_signature"] = base64.b64encode(ts).decode()
+                    entry["gemini_fc_name"] = tc.name
+                    entry["gemini_fc_args"] = tc.arguments
             out.append(entry)
         return out
 
@@ -221,11 +223,13 @@ class AgentLoop:
         self,
         role: str,
         content: str,
+        seq: Optional[int] = None,
+        loop_count: int = 0,
         tool_call_id: Optional[str] = None,
         tool_name: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         usage: Optional[Dict[str, Any]] = None,
-        seq: Optional[int] = None,
+        is_checkpoint: bool = False,
     ) -> None:
         """写入一条消息。seq 可预分配传入，否则自动分配并自增。"""
         if self.persist is None:
@@ -240,10 +244,12 @@ class AgentLoop:
             role=role,
             content=content,
             seq=seq,
+            loop_count=loop_count,
             tool_call_id=tool_call_id,
             tool_name=tool_name,
             metadata=metadata,
             usage=usage,
+            is_checkpoint=is_checkpoint,
         )
 
 
@@ -278,7 +284,22 @@ class AgentLoop:
                     if metadata.get("thinking"):
                         restored["thinking"] = metadata["thinking"]
                     if metadata.get("tool_calls"):
-                        restored["tool_calls"] = metadata["tool_calls"]
+                        # Rebuild raw for any tool call that had a
+                        # thought_signature persisted, so to_request() can
+                        # reconstruct a proper Part and satisfy Gemini's
+                        # requirement on resume.
+                        rebuilt: List[Dict[str, Any]] = []
+                        for tc in metadata["tool_calls"]:
+                            ts_b64 = tc.get("gemini_thought_signature")
+                            if ts_b64:
+                                tc = dict(tc)  # don't mutate stored metadata
+                                tc["raw"] = {
+                                    "gemini_thought_signature": base64.b64decode(ts_b64),
+                                    "gemini_fc_name": tc.get("gemini_fc_name", tc["name"]),
+                                    "gemini_fc_args": tc.get("gemini_fc_args", tc.get("arguments", {})),
+                                }
+                            rebuilt.append(tc)
+                        restored["tool_calls"] = rebuilt
                     if r.usage:
                         self._session_accumulated_usage = merge_usage(
                             self._session_accumulated_usage, r.usage
@@ -292,19 +313,53 @@ class AgentLoop:
             f"session_accumulated_usage={self._session_accumulated_usage}"
         )
 
-    async def run(self, initial_input: str) -> AgentResult:
+    async def run(
+        self,
+        initial_input: Optional[str],
+        ctx: "MiddlewareContext" = None,
+        *,
+        checkpoint: Optional["AgentCheckpoint"] = None,
+        resume: Optional["ResumeDecision"] = None,
+    ) -> AgentResult:
         """
         执行 Agent 循环。
 
-        先加载历史消息恢复上下文，再追加本轮用户输入，进入循环。
+        resume 时：从 checkpoint 恢复 pending tool，执行后继续循环。
         """
         await self._load_history()
 
-        result = AgentResult(
-            agent_name=self.config.agent_name,
-            messages=[self._add_message("user", initial_input, seq=self._seq)],
-        )
-        await self._persist("user", initial_input)
+        # ── Resume 分支 ────────────────────────────────────────────────────────────
+        if checkpoint is not None and resume is not None:
+            self.loop_count = checkpoint.loop_count
+            result = AgentResult(agent_name=self.config.agent_name, messages=[])
+
+            # 执行 tool；approve 继续循环，reject 结束当前请求
+            tool_result = await self._execute_pending_tool(checkpoint, resume)
+            if tool_result is None:
+                result.loop_count = self.loop_count
+                result.error = f"Cannot find pending tool_call: {checkpoint.tool_call_id}"
+                result.finished = False
+                result.finished_at = datetime.now(timezone.utc)
+                return result
+
+            await self._record_tool_result(result, tool_result)
+            if self.persist is not None:
+                await self.persist.clear_interrupt_state(self.session_id)
+            if resume.action == "reject":
+                result.loop_count = self.loop_count
+                result.error = "Tool call rejected by reviewer"
+                result.finished = False
+                result.finished_at = datetime.now(timezone.utc)
+                return result
+
+            # approve 后继续主循环，不追加新的 user 消息
+            initial_input = None
+        else:
+            result = AgentResult(agent_name=self.config.agent_name, messages=[])
+
+        if initial_input is not None:
+            result.messages.append(self._add_message("user", initial_input, seq=self._seq))
+            await self._persist("user", initial_input, loop_count=self.loop_count)
 
         try:
             while self.loop_count < self.config.max_loop:
@@ -356,9 +411,8 @@ class AgentLoop:
                 )
                 self._add_usage(result, response.usage)
 
-                # Step 3: 有 tool_calls → 先执行工具，再写 assistant persist（以便携带 result）
+                # Step 3: 有 tool_calls → middleware 拦截检查 → 执行工具 → 写 assistant persist
                 if response.tool_calls:
-                    # Step 5: Act - 执行工具
                     tool_calls = [
                         ToolCall(
                             id=tc.id,
@@ -368,6 +422,28 @@ class AgentLoop:
                         for tc in response.tool_calls
                     ]
 
+                    # --- HITL 拦截点：before_tool_calls 钩子 ---
+                    if self.chain is not None:
+                        ctx = await self.chain.before_tool_calls(ctx, tool_calls)
+                        if ctx.metadata.get("interrupt"):
+                            # 先写 assistant 消息（标记 checkpoint），再持久化中断状态
+                            await self._persist(
+                                "assistant",
+                                response.content,
+                                seq=_assistant_seq,
+                                loop_count=self.loop_count,
+                                metadata=self._build_assistant_metadata(
+                                    thinking=response.thinking,
+                                    tool_calls=response.tool_calls,
+                                    finish_reason=response.finish_reason,
+                                    accumulated_usage=self._session_accumulated_usage,
+                                ),
+                                usage=response.usage,
+                                is_checkpoint=True,
+                            )
+                            await self._persist_interrupt(ctx)
+                            raise AgentInterrupted()
+
                     for tc in tool_calls:
                         logger.info(
                             f"[AgentLoop:{self.config.agent_name}] "
@@ -375,23 +451,21 @@ class AgentLoop:
                         )
 
                     _tool_results_for_persist: List[Any] = []
+                    tool_results: List[ToolResult] = []
                     if self.tool_executor is None:
                         logger.warning(
                             f"[AgentLoop:{self.config.agent_name}] "
                             f"No tool_executor configured, skipping {len(tool_calls)} tool calls"
                         )
                     else:
-                        # execute_all yields: intermediate events + list[ToolResult] (last)
-                        tool_results: List[Any] = []
-                        pending_list: List[Any] = []
+                        # execute_all yields: 中间事件（ToolEndEvent 等） + ToolExecutionResult（最后）
+                        execution_result: Optional[ToolExecutionResult] = None
                         async for ev in self.tool_executor.execute_all(tool_calls):
-                            if isinstance(ev, list):
-                                pending_list.append(ev)
-                            elif isinstance(ev, (ToolEndEvent, ToolResult)):
-                                tool_results.append(ev)
-                        # 最后一个 list 是完整结果
-                        if pending_list:
-                            tool_results = pending_list[-1]
+                            if isinstance(ev, ToolEndEvent):
+                                pass  # run() 不需要流式中间事件
+                            elif isinstance(ev, ToolExecutionResult):
+                                execution_result = ev
+                        tool_results = execution_result.results if execution_result else []
                         _tool_results_for_persist = tool_results
 
                         # 构建 Provider 原生格式的 tool 结果消息
@@ -406,36 +480,37 @@ class AgentLoop:
                                 "content": raw_content,
                             })
 
+                        # 先给每个 tool result 预分配 seq（保证顺序连续）
+                        tool_persist_items = []
                         for tr in tool_results:
-                            # 格式化的 tool 消息用于展示/持久化，不参与 API 调用
                             formatted = self._format_tool_result(tr.tool_name, tr.result)
                             raw_content = self._serialize_tool_result_content(tr.result)
                             logger.info(
                                 f"[AgentLoop:{self.config.agent_name}] "
                                 f"[Loop {self.loop_count}] Tool result: {tr.tool_name} -> {tr.result!r}"
                             )
+                            tool_seq = self._alloc_seq()
                             result.messages.append(
                                 AgentMessage(
                                     role="tool",
                                     content=formatted,
-                                    seq=self._seq,
+                                    seq=tool_seq,
                                     agent_name=self.config.agent_name,
                                     tool_call_id=tr.tool_call_id,
                                     tool_name=tr.tool_name,
                                 )
                             )
-                            await self._persist(
-                                "tool", raw_content,
-                                tool_call_id=tr.tool_call_id,
-                                tool_name=tr.tool_name,
-                                metadata={"display_content": formatted, "is_error": tr.is_error},
-                            )
+                            tool_persist_items.append((tr, formatted, raw_content, tool_seq))
 
-                    # 工具执行完毕后写 assistant 消息（携带 tool_results，使用预分配 seq）
+                    # --- after_tool_calls 钩子 ---
+                    await self._handle_after_tool_calls(ctx, tool_calls, tool_results)
+
+                    # assistant 消息（含 tool_calls + results）先写，seq 最小，保证 DB 写入顺序正确
                     await self._persist(
                         "assistant",
                         response.content,
                         seq=_assistant_seq,
+                        loop_count=self.loop_count,
                         metadata=self._build_assistant_metadata(
                             thinking=response.thinking,
                             tool_calls=response.tool_calls,
@@ -444,7 +519,18 @@ class AgentLoop:
                             accumulated_usage=self._session_accumulated_usage,
                         ),
                         usage=response.usage,
+                        is_checkpoint=True,
                     )
+                    # tool 消息紧跟 assistant 之后写入（seq 更大，DB row id 也更大）
+                    for tr, formatted, raw_content, tool_seq in tool_persist_items:
+                        await self._persist(
+                            "tool", raw_content,
+                            seq=tool_seq,
+                            loop_count=self.loop_count,
+                            tool_call_id=tr.tool_call_id,
+                            tool_name=tr.tool_name,
+                            metadata={"display_content": formatted, "is_error": tr.is_error},
+                        )
 
                     # 工具执行完毕，本轮结束，继续循环让模型生成最终答案
                     if self.on_loop_end is not None:
@@ -456,6 +542,7 @@ class AgentLoop:
                     "assistant",
                     response.content,
                     seq=_assistant_seq,
+                    loop_count=self.loop_count,
                     metadata=self._build_assistant_metadata(
                         thinking=response.thinking,
                         finish_reason=response.finish_reason,
@@ -477,33 +564,10 @@ class AgentLoop:
                 # Fallback：模型返回空内容且无法正常结束
                 # 常见于工具执行完毕后模型拒绝生成文字的边缘场景
                 if not response.content:
-                    tool_results_texts = [
-                        msg.content
-                        for msg in result.messages
-                        if msg.role == "tool" and msg.content
-                    ]
-                    fallback_content = (
-                        "根据工具执行结果，汇总如下：\n"
-                        + "\n".join(f"- {t}" for t in tool_results_texts)
-                    ) if tool_results_texts else ""
-
+                    fallback_content = self._apply_fallback(result, current_assistant_msg_idx)
                     if fallback_content:
-                        logger.warning(
-                            f"[AgentLoop:{self.config.agent_name}] "
-                            f"[Loop {self.loop_count}] Empty response after tool execution, using fallback"
-                        )
-                        result.messages[current_assistant_msg_idx] = AgentMessage(
-                            role="assistant",
-                            content=fallback_content,
-                            agent_name=self.config.agent_name,
-                        )
-                        result.finished = True
-                        result.finished_at = datetime.now(timezone.utc)
-                        result.raw_output = fallback_content
-                        result.loop_count = self.loop_count
                         if self.on_loop_end is not None:
                             await self.on_loop_end(result.messages)
-    
                         return result
 
                 # 无结束信号也无内容 → 继续循环
@@ -523,32 +587,568 @@ class AgentLoop:
             result.finished_at = datetime.now(timezone.utc)
             return result
 
+        except AgentInterrupted:
+            raise
         except Exception as e:
             logger.exception(f"[AgentLoop:{self.config.agent_name}] Error: {e}")
+
             result.error = str(e)
+
             result.loop_count = self.loop_count
+
             result.finished = False
+
             result.finished_at = datetime.now(timezone.utc)
+
             return result
 
-    async def stream_run(self, initial_input: str):
-        """
-        执行 Agent 循环（流式）。
 
-        每轮：
-          1. 流式调用 LLM，文本 chunk 实时 yield TextEvent
-          2. 终止 chunk 到达后判断：
-             - 有 tool_calls → yield ToolStartEvent → 执行 → yield ToolEndEvent → 继续循环
-             - 无 tool_calls → 检查结束条件 → yield DoneEvent
+    async def _handle_before_tool_calls(
+        self,
+        ctx: Optional["MiddlewareContext"],
+        tool_calls: List[ToolCall],
+    ) -> Optional[InterruptEvent]:
         """
+        执行 before_tool_calls 钩子，检查是否需要中断。
+
+        调用方：
+            event = await self._handle_before_tool_calls(ctx, tool_calls)
+            if event is not None:
+                yield event
+                return
+
+        Returns:
+            中断：返回 InterruptEvent，调用方负责 yield 并 return
+            无中断：返回 None，继续执行工具
+        """
+        if self.chain is None:
+            return None
+
+        ctx = await self.chain.before_tool_calls(ctx, tool_calls)
+        if not ctx.metadata.get("interrupt"):
+            return None
+
+        interrupt_info = ctx.metadata["interrupt"]
+        return InterruptEvent(
+            session_id=self.session_id,
+            tool_name=interrupt_info["tool_name"],
+            tool_call_id=interrupt_info["tool_call_id"],
+            arguments=interrupt_info["arguments"],
+            available_actions=interrupt_info.get(
+                "available_actions", ["approve", "reject"]
+            ),
+            context=interrupt_info.get("context", {}),
+        )
+
+    async def _handle_after_tool_calls(
+        self,
+        ctx: Optional["MiddlewareContext"],
+        tool_calls: List[ToolCall],
+        tool_results: List[ToolResult],
+    ) -> None:
+        """
+        执行 after_tool_calls 钩子。
+
+        在工具执行完毕、所有结果处理完成后调用。
+        用于 middleware 对工具结果做后处理、监控或记录。
+        """
+        if self.chain is None:
+            return
+        await self.chain.after_tool_calls(ctx, tool_calls, tool_results)
+
+    async def _execute_single_tool(self, tool_call: ToolCall) -> ToolResult:
+        """
+        非流式地执行单个工具调用，返回最终 ToolResult。
+        """
+        if self.tool_executor is None:
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                tool_name=tool_call.name,
+                result={"error": "no tool executor"},
+                is_error=True,
+            )
+
+        execution_result: Optional[ToolExecutionResult] = None
+        last_tool_end: Optional[ToolEndEvent] = None
+        async for ev in self.tool_executor.execute_all([tool_call]):
+            if isinstance(ev, ToolEndEvent):
+                last_tool_end = ev
+            elif isinstance(ev, ToolExecutionResult):
+                execution_result = ev
+
+        if execution_result and execution_result.results:
+            return execution_result.results[0]
+        if last_tool_end is not None:
+            return ToolResult(
+                tool_call_id=last_tool_end.tool_call_id,
+                tool_name=last_tool_end.tool_name,
+                result=last_tool_end.result,
+                is_error=last_tool_end.is_error,
+            )
+        return ToolResult(
+            tool_call_id=tool_call.id,
+            tool_name=tool_call.name,
+            result={"error": "no result"},
+            is_error=True,
+        )
+
+    def _build_rejected_tool_result(self, tool_call: ToolCall) -> ToolResult:
+        """
+        构造“工具调用被人工拒绝”的伪工具结果，供后续对话感知。
+        """
+        return ToolResult(
+            tool_call_id=tool_call.id,
+            tool_name=tool_call.name,
+            result={
+                "status": "interrupted",
+                "reason": "human_review_rejected",
+                "message": (
+                    f"Tool call '{tool_call.name}' interrupted: "
+                    "rejected by reviewer."
+                ),
+            },
+            is_error=True,
+        )
+
+    async def _record_tool_result(
+        self,
+        result: AgentResult,
+        tool_result: ToolResult,
+    ) -> None:
+        """
+        将工具结果同时写入内存消息、结果消息和持久化存储。
+        """
+        raw_content = self._serialize_tool_result_content(tool_result.result)
+        self.messages.append({
+            "role": "tool",
+            "tool_call_id": tool_result.tool_call_id,
+            "tool_name": tool_result.tool_name,
+            "content": raw_content,
+        })
+        formatted = self._format_tool_result(tool_result.tool_name, tool_result.result)
+        tool_seq = self._alloc_seq()
+        result.messages.append(
+            AgentMessage(
+                role="tool",
+                content=formatted,
+                seq=tool_seq,
+                agent_name=self.config.agent_name,
+                tool_call_id=tool_result.tool_call_id,
+                tool_name=tool_result.tool_name,
+            )
+        )
+        await self._persist(
+            "tool",
+            raw_content,
+            seq=tool_seq,
+            loop_count=self.loop_count,
+            tool_call_id=tool_result.tool_call_id,
+            tool_name=tool_result.tool_name,
+            metadata={"display_content": formatted, "is_error": tool_result.is_error},
+        )
+
+    def _apply_fallback(
+        self,
+        result: AgentResult,
+        current_assistant_msg_idx: int,
+    ) -> Optional[str]:
+        """
+        当模型返回空内容时，根据工具执行结果生成兜底内容并标记结束。
+
+        Returns:
+            兜底内容字符串（模型继续返回空且有工具结果时）
+            None（无工具结果，无需 fallback）
+        """
+        tool_results_texts = [
+            msg.content
+            for msg in result.messages
+            if msg.role == "tool" and msg.content
+        ]
+        if not tool_results_texts:
+            return None
+
+        fallback_content = (
+            "根据工具执行结果，汇总如下：\n"
+            + "\n".join(f"- {t}" for t in tool_results_texts)
+        )
+        logger.warning(
+            f"[AgentLoop:{self.config.agent_name}] "
+            f"[Loop {self.loop_count}] Empty response after tool execution, using fallback"
+        )
+        result.messages[current_assistant_msg_idx] = AgentMessage(
+            role="assistant",
+            content=fallback_content,
+            agent_name=self.config.agent_name,
+        )
+        result.finished = True
+        result.finished_at = datetime.now(timezone.utc)
+        result.raw_output = fallback_content
+        result.loop_count = self.loop_count
+        return fallback_content
+
+    async def _execute_pending_tool(
+        self,
+        checkpoint: "AgentCheckpoint",
+        resume: "ResumeDecision",
+    ) -> Optional[ToolResult]:
+        """
+        执行 pending tool。
+
+        用于 resume 场景（非流式调用）。
+        approve/reject 返回 ToolResult。
+        """
+        # 找到待执行的 tool_call
+        tc_to_execute = None
+        for msg in reversed(self.messages):
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    if tc.get("id") == checkpoint.tool_call_id:
+                        tc_to_execute = ToolCall(
+                            id=tc["id"],
+                            name=tc["name"],
+                            arguments=tc.get("arguments", {}),
+                        )
+                        break
+                break
+
+        if tc_to_execute is None:
+            logger.error(
+                f"[AgentLoop:{self.config.agent_name}] "
+                f"Cannot find tool_call_id={checkpoint.tool_call_id} in messages"
+            )
+            return None
+
+        self.loop_count += 1
+
+        if resume.action == "approve":
+            # 真实执行
+            if self.tool_executor is None:
+                tool_result = ToolResult(
+                    tool_call_id=tc_to_execute.id,
+                    tool_name=tc_to_execute.name,
+                    result={"error": "no tool executor"},
+                    is_error=True,
+                )
+            else:
+                tool_result = await self._execute_single_tool(tc_to_execute)
+        elif resume.action == "reject":
+            tool_result = self._build_rejected_tool_result(tc_to_execute)
+        else:
+            raise ValueError(f"Unsupported resume action: {resume.action}")
+
+        logger.info(
+            f"[AgentLoop:{self.config.agent_name}] "
+            f"[Resume] Executed tool {tc_to_execute.name}, result={str(tool_result.result)[:60]}"
+        )
+        return tool_result
+
+    async def _resume_from_checkpoint(
+        self,
+        checkpoint: "AgentCheckpoint",
+        resume: "ResumeDecision",
+        result: AgentResult,
+        ctx: "MiddlewareContext",
+    ):
+        """
+        从 checkpoint 恢复，执行 pending tool，继续循环。
+
+        根据 ResumeDecision.action：
+        - approve:   直接执行 tool，将结果加入消息，继续循环
+        - reject:    记录“工具调用被拒绝”，结束当前请求
+        """
+        # 从消息历史中找到 pending tool_call
+        tc_to_execute = None
+        for msg in reversed(self.messages):
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    if tc.get("id") == checkpoint.tool_call_id:
+                        tc_to_execute = ToolCall(
+                            id=tc["id"],
+                            name=tc["name"],
+                            arguments=tc.get("arguments", {}),
+                        )
+                        break
+                break
+
+        if tc_to_execute is None:
+            logger.error(
+                f"[AgentLoop:{self.config.agent_name}] "
+                f"Cannot find tool_call_id={checkpoint.tool_call_id} in messages"
+            )
+            yield ErrorEvent(error=f"Cannot find pending tool_call: {checkpoint.tool_call_id}")
+            yield DoneEvent(result=result)
+            return
+
+        # 清除中断状态
+        if self.persist is not None:
+            await self.persist.clear_interrupt_state(self.session_id)
+
+        self.loop_count += 1
+
+        # 构建 ToolResult（approve/reject 共用）
+        tc_for_execute = tc_to_execute
+        if resume.action == "approve":
+            tool_result_content = None  # 真实执行
+            rejected_tool_result = None
+        elif resume.action == "reject":
+            rejected_tool_result = self._build_rejected_tool_result(tc_to_execute)
+            tool_result_content = rejected_tool_result.result
+        else:
+            raise ValueError(f"Unsupported resume action: {resume.action}")
+
+        # 执行工具
+        if tool_result_content is None:
+            # 真实执行
+            if self.tool_executor is None:
+                logger.warning(f"No tool_executor configured")
+                tool_result = ToolResult(
+                    tool_call_id=tc_for_execute.id,
+                    tool_name=tc_for_execute.name,
+                    result={"error": "no tool executor"},
+                    is_error=True,
+                )
+            else:
+                logger.info(
+                    f"[AgentLoop:{self.config.agent_name}] "
+                    f"[Resume Loop {self.loop_count}] Executing tool: {tc_for_execute.name} "
+                    f"args={tc_for_execute.arguments}"
+                )
+                yield ToolStartEvent(
+                    tool_call_id=tc_for_execute.id,
+                    tool_name=tc_for_execute.name,
+                    arguments=tc_for_execute.arguments,
+                )
+                async for ev in self.tool_executor.execute_all([tc_for_execute]):
+                    if isinstance(ev, ToolEndEvent):
+                        tool_result = ToolResult(
+                            tool_call_id=ev.tool_call_id,
+                            tool_name=ev.tool_name,
+                            result=ev.result,
+                            is_error=ev.is_error,
+                        )
+                        yield ev
+                    elif isinstance(ev, ToolExecutionResult):
+                        tool_result = ToolResult(
+                            tool_call_id=tc_for_execute.id,
+                            tool_name=tc_for_execute.name,
+                            result=ev.results[0].result if ev.results else {"error": "no result"},
+                            is_error=ev.results[0].is_error if ev.results else True,
+                        )
+                    elif not isinstance(ev, (ToolStartEvent,)):
+                        yield ev
+        else:
+            # 模拟执行结果（reject）
+            tool_result = ToolResult(
+                tool_call_id=tc_to_execute.id,
+                tool_name=tc_to_execute.name,
+                result=tool_result_content,
+                is_error=rejected_tool_result.is_error if rejected_tool_result else False,
+            )
+
+        await self._record_tool_result(result, tool_result)
+
+        # after_tool_calls 钩子
+        await self._handle_after_tool_calls(
+            ctx, [tc_for_execute], [tool_result]
+        )
+
+        # 继续主循环（从下一轮开始）
+        if self.on_loop_start is not None:
+            await self.on_loop_start()
+        if self.on_loop_end is not None:
+            await self.on_loop_end(result.messages)
+
+        # 继续执行主循环
+        async for ev in self.stream_run("", ctx):
+            yield ev
+
+    async def _do_resume_tool(
+        self,
+        checkpoint: "AgentCheckpoint",
+        resume: "ResumeDecision",
+        result: AgentResult,
+        ctx: "MiddlewareContext",
+    ) -> AsyncGenerator[ToolEndEvent, None]:
+        """
+        Resume 时执行 pending tool（流式 yield ToolStartEvent/ToolEndEvent）。
+
+        用于 stream_run resume 分支。
+        """
+        # 从消息历史中找到 pending tool_call
+        tc_to_execute = None
+        for msg in reversed(self.messages):
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    if tc.get("id") == checkpoint.tool_call_id:
+                        tc_to_execute = ToolCall(
+                            id=tc["id"],
+                            name=tc["name"],
+                            arguments=tc.get("arguments", {}),
+                        )
+                        break
+                break
+
+        if tc_to_execute is None:
+            logger.error(
+                f"[AgentLoop:{self.config.agent_name}] "
+                f"Cannot find tool_call_id={checkpoint.tool_call_id} in messages"
+            )
+            raise LookupError(f"Cannot find pending tool_call: {checkpoint.tool_call_id}")
+
+        # 构建 ToolResult（approve/reject 共用）
+        tc_for_execute = tc_to_execute
+        if resume.action == "approve":
+            tool_result_content = None  # 真实执行
+            rejected_tool_result = None
+        elif resume.action == "reject":
+            rejected_tool_result = self._build_rejected_tool_result(tc_to_execute)
+            tool_result_content = rejected_tool_result.result
+        else:
+            raise ValueError(f"Unsupported resume action: {resume.action}")
+
+        # 执行工具
+        if tool_result_content is None:
+            # 真实执行（approve）
+            if self.tool_executor is None:
+                logger.warning(f"No tool_executor configured")
+                tool_result = ToolResult(
+                    tool_call_id=tc_for_execute.id,
+                    tool_name=tc_for_execute.name,
+                    result={"error": "no tool executor"},
+                    is_error=True,
+                )
+            else:
+                logger.info(
+                    f"[AgentLoop:{self.config.agent_name}] "
+                    f"[Resume Loop {self.loop_count}] Executing tool: {tc_for_execute.name} "
+                    f"args={tc_for_execute.arguments}"
+                )
+                yield ToolStartEvent(
+                    tool_call_id=tc_for_execute.id,
+                    tool_name=tc_for_execute.name,
+                    arguments=tc_for_execute.arguments,
+                )
+                async for ev in self.tool_executor.execute_all([tc_for_execute]):
+                    if isinstance(ev, ToolEndEvent):
+                        tool_result = ToolResult(
+                            tool_call_id=ev.tool_call_id,
+                            tool_name=ev.tool_name,
+                            result=ev.result,
+                            is_error=ev.is_error,
+                        )
+                        yield ev
+                    elif isinstance(ev, ToolExecutionResult):
+                        tool_result = ToolResult(
+                            tool_call_id=tc_for_execute.id,
+                            tool_name=tc_for_execute.name,
+                            result=ev.results[0].result if ev.results else {"error": "no result"},
+                            is_error=ev.results[0].is_error if ev.results else True,
+                        )
+                    elif not isinstance(ev, ToolStartEvent):
+                        yield ev
+        else:
+            # 模拟执行结果（reject）
+            tool_result = ToolResult(
+                tool_call_id=tc_to_execute.id,
+                tool_name=tc_to_execute.name,
+                result=tool_result_content,
+                is_error=rejected_tool_result.is_error if rejected_tool_result else False,
+            )
+
+        # 写入 tool 结果消息
+        raw_content = self._serialize_tool_result_content(tool_result.result)
+        self.messages.append({
+            "role": "tool",
+            "tool_call_id": tool_result.tool_call_id,
+            "tool_name": tool_result.tool_name,
+            "content": raw_content,
+        })
+        formatted = self._format_tool_result(tool_result.tool_name, tool_result.result)
+        result.messages.append(
+            AgentMessage(
+                role="tool",
+                content=formatted,
+                seq=self._alloc_seq(),
+                agent_name=self.config.agent_name,
+                tool_call_id=tool_result.tool_call_id,
+                tool_name=tool_result.tool_name,
+            )
+        )
+        await self._persist(
+            "tool", raw_content,
+            loop_count=self.loop_count,
+            tool_call_id=tool_result.tool_call_id,
+            tool_name=tool_result.tool_name,
+            metadata={"display_content": formatted, "is_error": tool_result.is_error},
+        )
+
+        # after_tool_calls 钩子
+        await self._handle_after_tool_calls(
+            ctx, [tc_for_execute], [tool_result]
+        )
+
+        # 继续主循环（从下一轮开始）
+        if self.on_loop_start is not None:
+            await self.on_loop_start()
+        if self.on_loop_end is not None:
+            await self.on_loop_end(result.messages)
+
+    async def stream_run(
+        self,
+        initial_input: str,
+        ctx: "MiddlewareContext" = None,
+        *,
+        checkpoint: Optional["AgentCheckpoint"] = None,
+        resume: Optional["ResumeDecision"] = None,
+    ):
+
+        # ── Resume 分支：执行 pending tool 后直接进入主循环 ──────────────────────
+        # 先加载历史消息（持久化层可能有之前中断后的消息）
         await self._load_history()
+
+        if checkpoint is not None and resume is not None:
+            self.loop_count = checkpoint.loop_count
+            result = AgentResult(agent_name=self.config.agent_name, messages=[])
+
+            self.loop_count += 1  # 消耗一个迭代
+            # 执行 tool 并 yield tool 事件
+            try:
+                async for ev in self._do_resume_tool(checkpoint, resume, result, ctx):
+                    yield ev
+            except LookupError as e:
+                result.loop_count = self.loop_count
+                result.error = str(e)
+                result.finished = False
+                result.finished_at = datetime.now(timezone.utc)
+                yield ErrorEvent(error=str(e))
+                yield DoneEvent(result=result)
+                return
+            # 清除中断状态
+            if self.persist is not None:
+                await self.persist.clear_interrupt_state(self.session_id)
+            if resume.action == "reject":
+                result.loop_count = self.loop_count
+                result.error = "Tool call rejected by reviewer"
+                result.finished = False
+                result.finished_at = datetime.now(timezone.utc)
+                yield DoneEvent(result=result)
+                return
+            # 进入主循环
+            async for ev in self._stream_loop(result, ctx):
+                yield ev
+            return
 
         result = AgentResult(
             agent_name=self.config.agent_name,
             messages=[self._add_message("user", initial_input, seq=self._seq)],
         )
-        await self._persist("user", initial_input)
+        if initial_input is not None:
+            await self._persist("user", initial_input, loop_count=self.loop_count)
 
+        async for ev in self._stream_loop(result, ctx):
+            yield ev
+
+    async def _stream_loop(self, result: AgentResult, ctx: "MiddlewareContext"):
         try:
             while self.loop_count < self.config.max_loop:
                 self.loop_count += 1
@@ -609,14 +1209,37 @@ class AgentLoop:
                         agent_name=self.config.agent_name,
                     )
                 )
-                # --- Act：有 tool_calls → 先执行工具，再写 assistant persist（携带 result）---
+                # --- Act：有 tool_calls → middleware 拦截检查 → 执行工具 → 写 assistant persist ---
                 if final_chunk.tool_calls:
                     tool_calls = [
                         ToolCall(id=tc.id, name=tc.name, arguments=tc.arguments)
                         for tc in final_chunk.tool_calls
                     ]
 
+                    # --- HITL 拦截点：before_tool_calls 钩子 ---
+                    interrupt_event = await self._handle_before_tool_calls(ctx, tool_calls)
+                    if interrupt_event is not None:
+                        # 先写 assistant 消息（标记 checkpoint），再 yield interrupt 事件
+                        await self._persist(
+                            "assistant",
+                            accumulated_content,
+                            seq=_assistant_seq,
+                            loop_count=self.loop_count,
+                            metadata=self._build_assistant_metadata(
+                                thinking=accumulated_thinking,
+                                tool_calls=final_chunk.tool_calls,
+                                finish_reason=final_chunk.finish_reason if final_chunk else None,
+                                accumulated_usage=self._session_accumulated_usage,
+                            ),
+                            usage=final_chunk.usage if final_chunk else None,
+                            is_checkpoint=True,
+                        )
+                        await self._persist_interrupt(ctx)
+                        yield interrupt_event
+                        return
+
                     _tool_results_for_persist: List[Any] = []
+                    tool_results: List[ToolResult] = []
                     if self.tool_executor is None:
                         logger.warning(
                             f"[AgentLoop:{self.config.agent_name}] "
@@ -634,31 +1257,31 @@ class AgentLoop:
                                 arguments=tc.arguments,
                             )
 
-                        tool_results: List[Any] = []
-                        pending_list: List[Any] = []
+                        # execute_all yields: 中间事件 + ToolExecutionResult（最后）
+                        execution_result: Optional[ToolExecutionResult] = None
                         async for ev in self.tool_executor.execute_all(tool_calls):
-                            if isinstance(ev, list):
-                                pending_list.append(ev)
-                                continue
-                            elif isinstance(ev, ToolResult):
-                                tr = ev
-                                tool_results.append(ev)
-                                _tool_results_for_persist.append(ev)
-                            elif isinstance(ev, ToolEndEvent):
-                                tr = ToolResult(
+                            if isinstance(ev, ToolEndEvent):
+                                # 中间事件：yield 给前端，同时记录到 tool_results
+                                tool_results.append(ToolResult(
                                     tool_call_id=ev.tool_call_id,
                                     tool_name=ev.tool_name,
                                     result=ev.result,
                                     is_error=ev.is_error,
-                                )
-                                tool_results.append(tr)
-                                _tool_results_for_persist.append(tr)
-                            else:
-                                # Intermediate event (e.g. SubAgentStartEvent) — yield directly
+                                ))
+                                _tool_results_for_persist.append(tool_results[-1])
                                 yield ev
-                                continue
+                            elif isinstance(ev, ToolExecutionResult):
+                                # 批量执行完毕，最后一个产出
+                                execution_result = ev
+                            else:
+                                # 其他中间事件（如 SubAgentStartEvent）直接 yield
+                                yield ev
+                        # 优先使用 execution_result（更完整），fallback 到已收集的 tool_results
+                        tool_results = execution_result.results if execution_result else tool_results
 
-                            # Process ToolResult
+                        # 批量执行完毕后，统一处理 tool_results，预分配 seq 但暂不写 DB
+                        tool_persist_items = []
+                        for tr in tool_results:
                             raw_content = self._serialize_tool_result_content(tr.result)
                             self.messages.append({
                                 "role": "tool",
@@ -671,49 +1294,28 @@ class AgentLoop:
                                 f"[AgentLoop:{self.config.agent_name}] "
                                 f"[Loop {self.loop_count}] Tool result: {tr.tool_name} -> {tr.result!r}"
                             )
+                            tool_seq = self._alloc_seq()
                             result.messages.append(
                                 AgentMessage(
                                     role="tool",
                                     content=formatted,
-                                    seq=self._seq,
+                                    seq=tool_seq,
                                     agent_name=self.config.agent_name,
                                     tool_call_id=tr.tool_call_id,
                                     tool_name=tr.tool_name,
                                 )
                             )
-                            await self._persist(
-                                "tool", raw_content,
-                                tool_call_id=tr.tool_call_id,
-                                tool_name=tr.tool_name,
-                                metadata={"display_content": formatted, "is_error": tr.is_error},
-                            )
-                            yield ToolEndEvent(
-                                tool_call_id=tr.tool_call_id,
-                                tool_name=tr.tool_name,
-                                result=tr.result,
-                                is_error=tr.is_error,
-                            )
-                            # --- Framework-level HITL interrupt check ---
-                            if self._should_interrupt(tr.tool_name, tr.result):
-                                # Save checkpoint BEFORE yielding, because
-                                # the caller may switch to resume() generator
-                                # and abandon this one (code after yield won't run).
-                                await self._save_checkpoint(tr.tool_name)
-                                yield InterruptEvent(
-                                    session_id=self.session_id,
-                                    tool_name=tr.tool_name,
-                                    tool_call_id=tr.tool_call_id,
-                                    tool_result=tr.result,
-                                    arguments=tc.arguments,
-                                    context=self.interrupt_config.context if self.interrupt_config else {},
-                                )
-                                return
+                            tool_persist_items.append((tr, formatted, raw_content, tool_seq))
 
-                    # 工具执行完毕后写 assistant 消息（携带 tool_results，使用预分配 seq）
+                    # --- after_tool_calls 钩子 ---
+                    await self._handle_after_tool_calls(ctx, tool_calls, tool_results)
+
+                    # assistant 先写（seq 最小），tool 紧跟其后，保证 DB 写入顺序与 seq 一致
                     await self._persist(
                         "assistant",
                         accumulated_content,
                         seq=_assistant_seq,
+                        loop_count=self.loop_count,
                         metadata=self._build_assistant_metadata(
                             thinking=accumulated_thinking,
                             tool_calls=final_chunk.tool_calls,
@@ -723,6 +1325,15 @@ class AgentLoop:
                         ),
                         usage=final_chunk.usage if final_chunk else None,
                     )
+                    for tr, formatted, raw_content, tool_seq in tool_persist_items:
+                        await self._persist(
+                            "tool", raw_content,
+                            seq=tool_seq,
+                            loop_count=self.loop_count,
+                            tool_call_id=tr.tool_call_id,
+                            tool_name=tr.tool_name,
+                            metadata={"display_content": formatted, "is_error": tr.is_error},
+                        )
 
                     if self.on_loop_end is not None:
                         await self.on_loop_end(result.messages)
@@ -733,6 +1344,7 @@ class AgentLoop:
                     "assistant",
                     accumulated_content,
                     seq=_assistant_seq,
+                    loop_count=self.loop_count,
                     metadata=self._build_assistant_metadata(
                         thinking=accumulated_thinking,
                         finish_reason=final_chunk.finish_reason if final_chunk else None,
@@ -752,31 +1364,13 @@ class AgentLoop:
                     yield DoneEvent(result=result)
                     return
 
-                # Fallback：模型返回空内容
+                # Fallback：模型返回空内容，根据工具结果生成兜底内容
                 if not accumulated_content:
-                    tool_results_texts = [
-                        msg.content
-                        for msg in result.messages
-                        if msg.role == "tool" and msg.content
-                    ]
-                    if tool_results_texts:
-                        fallback_content = (
-                            "根据工具执行结果，汇总如下：\n"
-                            + "\n".join(f"- {t}" for t in tool_results_texts)
-                        )
-                        result.messages[current_assistant_msg_idx] = AgentMessage(
-                            role="assistant",
-                            content=fallback_content,
-                            agent_name=self.config.agent_name,
-                        )
-                        result.finished = True
-                        result.finished_at = datetime.now(timezone.utc)
-                        result.raw_output = fallback_content
-                        result.loop_count = self.loop_count
-                        yield TextEvent(content=fallback_content)
+                    fallback_content = self._apply_fallback(result, current_assistant_msg_idx)
+                    if fallback_content:
                         if self.on_loop_end is not None:
                             await self.on_loop_end(result.messages)
-    
+                        yield TextEvent(content=fallback_content)
                         yield DoneEvent(result=result)
                         return
 
@@ -795,9 +1389,15 @@ class AgentLoop:
 
         except Exception as e:
             logger.exception(f"[AgentLoop:{self.config.agent_name}] stream_run error: {e}")
+
             yield ErrorEvent(error=str(e))
+
             result.error = str(e)
+
             result.loop_count = self.loop_count
+
             result.finished = False
+
             result.finished_at = datetime.now(timezone.utc)
+
             yield DoneEvent(result=result)

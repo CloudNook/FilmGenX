@@ -7,7 +7,7 @@ from string import Template
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from app.core.agent.agent import Agent
-from app.core.agent.base import AgentResult, InterruptConfig
+from app.core.agent.base import AgentResult
 from app.core.agent.factory import create_agent
 from app.core.agent.persist.base import PersistStrategy
 from app.core.middleware.chain import AgentMiddleware
@@ -82,7 +82,6 @@ class SupervisorAgent:
         persist: Optional[PersistStrategy],
         model: str = "gemini-3-flash-preview",
         max_loop: int = 30,
-        interrupt_config: Optional[InterruptConfig] = None,
     ):
         self.supervisor_session_id = supervisor_session_id
         self.context = SupervisorContext(
@@ -107,7 +106,6 @@ class SupervisorAgent:
             max_loop=max_loop,
             persist=persist,
             middlewares=middlewares,
-            interrupt_config=interrupt_config,
         )
 
         # 注入 ToolExecutor，携带 supervisor_context / workflow_service
@@ -188,7 +186,6 @@ class SupervisorAgent:
         self,
         action: str,
         feedback: Optional[str] = None,
-        edited_content: Optional[str] = None,
     ) -> AsyncGenerator:
         """Resume Supervisor from interrupt checkpoint."""
         from app.core.agent.base import DoneEvent
@@ -197,7 +194,6 @@ class SupervisorAgent:
         async for event in self._agent.resume(
             action=action,
             feedback=feedback,
-            edited_content=edited_content,
         ):
             if hasattr(event, "source") and getattr(event, "source", None) is None:
                 event.source = "supervisor"

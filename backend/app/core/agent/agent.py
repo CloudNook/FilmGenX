@@ -9,7 +9,7 @@ import logging
 from typing import TYPE_CHECKING, List, Optional
 from uuid import uuid4
 
-from app.core.agent.base import AgentConfig, AgentResult, DoneEvent
+from app.core.agent.base import AgentConfig, AgentResult, DoneEvent, AgentInterrupted, InterruptEvent, ErrorEvent, ResumeDecision
 from app.core.agent.loop import AgentLoop
 from app.core.agent.llm import LLMAdapter
 from app.core.agent.tool import ToolExecutor
@@ -66,16 +66,11 @@ class Agent:
         """根据 skill_names 从 DB 加载 Skill 摘要并注入 system prompt（只执行一次）。"""
         if self._skills_injected or not self.skill_names:
             return
-        # 从 DBPersistStrategy 拿 db session（duck typing）
-        db = getattr(self.persist, "db", None)
-        if db is None:
-            logger.warning(
-                f"[Agent:{self.config.agent_name}] skill_names 非空但 persist 无 db session，跳过 skill 注入"
-            )
-            return
         from app.core.skill.loader import load_skill_lite
         from app.core.agent.factory import _build_system_prompt_with_skills
-        all_lite = await load_skill_lite(db=db)
+        from app.db.session import AsyncSessionFactory
+        async with AsyncSessionFactory() as db:
+            all_lite = await load_skill_lite(db=db)
         name_set = set(self.skill_names)
         skill_lite_list = [s for s in all_lite if s["name"] in name_set]
         self.config.prompt = _build_system_prompt_with_skills(self.config.prompt, skill_lite_list)
@@ -103,6 +98,7 @@ class Agent:
         initial_input: str,
         *,
         request_id: str | None = None,
+        resume: Optional[ResumeDecision] = None,
     ) -> AgentResult:
         """
         执行 Agent 循环（非流式）。
@@ -124,6 +120,15 @@ class Agent:
         self._init_tool_executor()
 
         rid = request_id or str(uuid4())
+
+        # ── Resume 分支：从 persist 加载 checkpoint ───────────────────────────────
+        if resume is not None:
+            if self.persist is None:
+                raise ValueError("Cannot resume without a persist strategy")
+            checkpoint = await self.persist.load_interrupt_state(self.session_id)
+            if checkpoint is None:
+                raise ValueError(f"No interrupt state found for session {self.session_id}")
+
         ctx = self._build_context(rid, initial_input)
 
         async def _do_run() -> AgentResult:
@@ -147,7 +152,7 @@ class Agent:
                 persist=self.persist,
                 session_id=self.session_id,
                 request_id=rid,
-                interrupt_config=self.config.interrupt_config,
+                chain=self._chain,
                 on_loop_start=on_loop_start,
                 on_loop_end=on_loop_end,
             )
@@ -155,7 +160,23 @@ class Agent:
             ctx.loop = loop
             # loop.run() 负责完整的 think/act/observe 主循环，
             # 这里只做请求级封装和最终结果后处理。
-            result = await loop.run(initial_input)
+            try:
+                result = await loop.run(
+                    initial_input,
+                    ctx,
+                    checkpoint=checkpoint if resume is not None else None,
+                    resume=resume,
+                )
+            except AgentInterrupted:
+                result = AgentResult(
+                    agent_id=self.agent_id,
+                    agent_name=self.config.agent_name,
+                    request_id=rid,
+                    error="interrupted",
+                    finished=False,
+                )
+                ctx.result = result
+                return result
             result.usage = merge_usage(ctx.metadata.get("usage"), result.usage)
             # finalize_result 是“主循环结束后、返回给业务前”的最后加工阶段，
             # 适合做最终结构化、usage 汇总等不应干扰主循环的逻辑。
@@ -173,6 +194,7 @@ class Agent:
         initial_input: str,
         *,
         request_id: str | None = None,
+        resume: Optional[ResumeDecision] = None,
     ):
         """
         执行 Agent 循环（流式），yield StreamEvent。
@@ -194,7 +216,17 @@ class Agent:
         self._init_tool_executor()
 
         rid = request_id or str(uuid4())
-        ctx = self._build_context(rid, initial_input)
+
+        # ── Resume：从 persist 加载 checkpoint ───────────────────────────────────
+        checkpoint = None
+        if resume is not None:
+            if self.persist is None:
+                raise ValueError("Cannot resume without a persist strategy")
+            checkpoint = await self.persist.load_interrupt_state(self.session_id)
+            if checkpoint is None:
+                raise ValueError(f"No interrupt state found for session {self.session_id}")
+
+        ctx = self._build_context(rid, initial_input or "")
 
         prev_msg_count = 0
 
@@ -216,7 +248,7 @@ class Agent:
             persist=self.persist,
             session_id=self.session_id,
             request_id=rid,
-            interrupt_config=self.config.interrupt_config,
+            chain=self._chain,
             on_loop_start=on_loop_start,
             on_loop_end=on_loop_end,
         )
@@ -224,116 +256,28 @@ class Agent:
         ctx.loop = loop
 
         async def _generate():
-            async for event in loop.stream_run(initial_input):
+            async for event in loop.stream_run(
+                initial_input or "",
+                ctx,
+                checkpoint=checkpoint,
+                resume=resume,
+            ):
                 if isinstance(event, DoneEvent):
                     event.result.usage = merge_usage(ctx.metadata.get("usage"), event.result.usage)
-                    # 在 DoneEvent 发给上层之前，先完成最终结果后处理，
-                    # 这样前端拿到过程流，业务代码拿到的是已经整理好的 result。
                     event.result = await self._chain.finalize_result(ctx, event.result)
                     event.result.agent_id = self.agent_id
                     event.result.request_id = rid
                     ctx.result = event.result
+                elif isinstance(event, InterruptEvent):
+                    ctx.result = AgentResult(
+                        agent_id=self.agent_id,
+                        agent_name=self.config.agent_name,
+                        request_id=rid,
+                        error="interrupted",
+                        finished=False,
+                    )
                 yield event
 
         async for event in self._chain.stream(ctx, _generate()):
             yield event
 
-    async def resume(
-        self,
-        action: str,
-        feedback: Optional[str] = None,
-        edited_content: Optional[str] = None,
-        *,
-        request_id: Optional[str] = None,
-    ):
-        """
-        Resume from interrupt checkpoint (streaming).
-
-        Loads checkpoint from persist, patches messages based on action,
-        then continues the Agent loop from restored state.
-
-        Args:
-            action: "approve" | "reject" | "edit" | "skip" | "abort"
-            feedback: Optional feedback text (used with reject)
-            edited_content: Replacement content (used with edit)
-            request_id: Optional request ID
-        """
-        if self.persist is None:
-            raise ValueError("Cannot resume without a persist strategy")
-
-        self._init_llm()
-        self._init_tool_executor()
-
-        rid = request_id or str(uuid4())
-
-        # Load checkpoint
-        checkpoint = await self.persist.load_checkpoint(self.session_id)
-        if checkpoint is None:
-            from app.core.agent.base import ErrorEvent
-            yield ErrorEvent(error=f"No checkpoint found for session {self.session_id}")
-            return
-
-        # Handle abort immediately
-        if action == "abort":
-            from app.core.agent.base import DoneEvent
-            result = AgentResult(
-                agent_name=self.config.agent_name,
-                error="Aborted by user",
-                finished=False,
-            )
-            yield DoneEvent(result=result)
-            await self.persist.clear_checkpoint(self.session_id)
-            return
-
-        # Patch messages based on action
-        messages = list(checkpoint.messages)
-
-        if action == "approve":
-            pass
-        elif action == "reject":
-            messages.append({
-                "role": "user",
-                "content": f"[Human Review Feedback] {feedback or 'Please revise.'}",
-            })
-        elif action == "edit":
-            if edited_content is not None:
-                for msg in reversed(messages):
-                    if msg.get("role") == "tool":
-                        msg["content"] = edited_content
-                        break
-        elif action == "skip":
-            messages.append({
-                "role": "user",
-                "content": "[Human Review] Skip this step, proceed to next.",
-            })
-
-        # Create new AgentLoop with restored state
-        from app.core.agent.loop import AgentLoop
-        loop = AgentLoop(
-            config=self.config,
-            llm=self._llm,
-            tool_executor=self._tool_executor,
-            persist=self.persist,
-            session_id=self.session_id,
-            request_id=rid,
-            interrupt_config=self.config.interrupt_config,
-            initial_messages=messages,
-            initial_loop_count=checkpoint.loop_count,
-        )
-
-        ctx = self._build_context(rid, "")
-        ctx.llm = self._llm
-        ctx.loop = loop
-
-        async def _generate():
-            from app.core.agent.base import DoneEvent
-            async for event in loop.stream_run(""):
-                if isinstance(event, DoneEvent):
-                    event.result.agent_id = self.agent_id
-                    event.result.request_id = rid
-                    ctx.result = event.result
-                    await self.persist.clear_checkpoint(self.session_id)
-                yield event
-
-        async for event in self._chain.stream(ctx, _generate()):
-            yield event

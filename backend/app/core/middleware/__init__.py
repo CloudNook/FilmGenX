@@ -16,6 +16,7 @@ Middleware 系统 - Agent 调用拦截与链式执行。
 
 from app.core.middleware.builtin import (
     FinalSchemaResponseMiddleware,
+    HumanInTheLoopMiddleware,
     LoggingMiddleware,
 )
 from app.core.middleware.chain import AgentMiddleware, MiddlewareChain, MiddlewareContext, middleware_chain
@@ -27,4 +28,5 @@ __all__ = [
     "middleware_chain",
     "LoggingMiddleware",
     "FinalSchemaResponseMiddleware",
+    "HumanInTheLoopMiddleware",
 ]

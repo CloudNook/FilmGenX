@@ -12,7 +12,7 @@ from app.core.agent.persist.base import PersistStrategy
 from app.core.agent.persist.models import MessageRecord
 
 if TYPE_CHECKING:
-    from app.core.agent.checkpoint import AgentCheckpoint
+    from app.core.agent.base import AgentCheckpoint
 
 # 会话消息默认保留 7 天
 _DEFAULT_TTL_SECONDS = 7 * 24 * 3600
@@ -49,6 +49,8 @@ class RedisPersistStrategy(PersistStrategy):
                 role=r["role"],
                 content=r["content"],
                 seq=r["seq"],
+                loop_count=r.get("loop_count", 0),
+                is_checkpoint=r.get("is_checkpoint", False),
                 tool_call_id=r.get("tool_call_id"),
                 tool_name=r.get("tool_name"),
                 usage=r.get("usage"),
@@ -66,12 +68,14 @@ class RedisPersistStrategy(PersistStrategy):
         role: str,
         content: str,
         seq: int,
+        loop_count: int = 0,
         *,
         tool_call_id: Optional[str] = None,
         tool_name: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         usage: Optional[Dict[str, Any]] = None,
         supervisor_session_id: Optional[str] = None,
+        is_checkpoint: bool = False,
     ) -> None:
         from app.utils import redis_client
 
@@ -83,6 +87,8 @@ class RedisPersistStrategy(PersistStrategy):
             "role": role,
             "content": content,
             "seq": seq,
+            "loop_count": loop_count,
+            "is_checkpoint": is_checkpoint,
             "tool_call_id": tool_call_id,
             "tool_name": tool_name,
             "usage": usage,
@@ -92,26 +98,61 @@ class RedisPersistStrategy(PersistStrategy):
         await redis_client.rpush(key, json.dumps(msg, ensure_ascii=False))
         await redis_client.expire(key, self.ttl)
 
-    async def save_checkpoint(self, checkpoint: "AgentCheckpoint") -> None:
+    async def save_interrupt_state(
+        self,
+        session_id: str,
+        checkpoint: "AgentCheckpoint",
+    ) -> None:
+        """
+        保存中断时的最小快照：tool_call_id + tool_name + loop_count + context。
+
+        中断信息存储在独立的 key 中。
+        """
         from app.utils import redis_client
 
-        key = f"agent:checkpoint:{checkpoint.session_id}"
-        await redis_client.set(key, checkpoint.model_dump_json().encode())
+        key = f"agent:interrupt:{session_id}"
+        data = {
+            "tool_call_id": checkpoint.tool_call_id,
+            "tool_name": checkpoint.tool_name,
+            "loop_count": checkpoint.loop_count,
+            "context": checkpoint.context,
+            "available_actions": checkpoint.available_actions,
+        }
+        await redis_client.set(key, json.dumps(data, ensure_ascii=False).encode())
         await redis_client.expire(key, self.ttl)
 
-    async def load_checkpoint(self, session_id: str) -> "Optional[AgentCheckpoint]":
-        from app.utils import redis_client
-        from app.core.agent.checkpoint import AgentCheckpoint
+    async def load_interrupt_state(
+        self,
+        session_id: str,
+    ) -> "Optional[AgentCheckpoint]":
+        """
+        加载中断快照。
 
-        key = f"agent:checkpoint:{session_id}"
+        从 Redis 独立 key 读取 tool_call_id + loop_count，
+        从最后一条 is_checkpoint=True 的 assistant 消息恢复 tool_calls。
+        """
+        from app.utils import redis_client
+
+        key = f"agent:interrupt:{session_id}"
         raw = await redis_client.get(key)
         if raw is None:
             return None
         data = json.loads(raw)
-        return AgentCheckpoint(**data)
 
-    async def clear_checkpoint(self, session_id: str) -> None:
+        # tool_calls 从 AgentMessageRecord 的 extra_metadata.tool_calls 中恢复
+        from app.core.agent.base import AgentCheckpoint
+        return AgentCheckpoint(
+            tool_call_id=data["tool_call_id"],
+            tool_name=data["tool_name"],
+            arguments={},  # 从 tool_calls 中查找
+            context=data.get("context", {}),
+            available_actions=data.get("available_actions", ["approve", "reject"]),
+            messages=[],  # 不再需要，resume 时从 load_messages 恢复
+            loop_count=data.get("loop_count", 0),
+        )
+
+    async def clear_interrupt_state(self, session_id: str) -> None:
         from app.utils import redis_client
 
-        key = f"agent:checkpoint:{session_id}"
+        key = f"agent:interrupt:{session_id}"
         await redis_client.delete(key)

@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
     from app.core.agent.persist.models import AgentMessageRecord, MessageRecord
-    from app.core.agent.checkpoint import AgentCheckpoint
+    from app.core.agent.base import AgentCheckpoint
 
 
 class PersistStrategy(ABC):
@@ -50,12 +50,14 @@ class PersistStrategy(ABC):
         role: str,
         content: str,
         seq: int,
+        loop_count: int = 0,
         *,
         tool_call_id: Optional[str] = None,
         tool_name: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         usage: Optional[Dict[str, Any]] = None,
         supervisor_session_id: Optional[str] = None,
+        is_checkpoint: bool = False,
     ) -> None:
         """
         追加一条消息记录。
@@ -69,25 +71,40 @@ class PersistStrategy(ABC):
             role:          user / assistant / tool
             content:       消息内容
             seq:           全局序号，= 历史最大 seq + 1，保证跨 request 连续
+            loop_count:    消息写入时的 loop 计数
             tool_call_id:  role=tool 时的调用 ID
             tool_name:     role=tool 时的工具名
             metadata:      附加元数据
             supervisor_session_id: Supervisor session ID（sv- 前缀），SubAgent 消息追溯到 Supervisor 流水线
+            is_checkpoint: 该消息是否为中断检查点
         """
         ...
 
     @abstractmethod
-    async def save_checkpoint(self, checkpoint: "AgentCheckpoint") -> None:
-        """Save interrupt checkpoint for later resume."""
+    async def save_interrupt_state(
+        self,
+        session_id: str,
+        checkpoint: "AgentCheckpoint",
+    ) -> None:
+        """
+        保存中断信息。
+
+        中断信息写入 is_checkpoint=True 的 assistant 消息的 extra_metadata，
+        或独立的 interrupt 存储（取决于具体策略）。
+        resume 时由 load_interrupt_state 恢复。
+        """
         ...
 
     @abstractmethod
-    async def load_checkpoint(self, session_id: str) -> "Optional[AgentCheckpoint]":
-        """Load interrupt checkpoint by session_id. Returns None if not found."""
+    async def load_interrupt_state(
+        self,
+        session_id: str,
+    ) -> "Optional[AgentCheckpoint]":
+        """从中断消息记录中加载中断快照，不存在则返回 None。"""
         ...
 
     @abstractmethod
-    async def clear_checkpoint(self, session_id: str) -> None:
-        """Delete checkpoint after successful resume."""
+    async def clear_interrupt_state(self, session_id: str) -> None:
+        """清除中断状态，resume 完成后调用。"""
         ...
 

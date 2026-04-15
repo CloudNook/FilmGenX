@@ -4,12 +4,25 @@ Agent 核心数据模型。
 仅包含数据结构定义，不包含业务逻辑。
 """
 
+from __future__ import annotations
+
 from datetime import datetime
-from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
+
+
+class AgentInterrupted(Exception):
+    """
+    Agent 执行被 middleware 拦截并中断。
+
+    在 AgentLoop.run() 中，当 before_tool_calls 设置 ctx.metadata["interrupt"] 时抛出，
+    中断信息从 ctx.metadata["interrupt"] 中读取。
+    Agent.run() 捕获此异常并转换为 AgentResult（error="interrupted"）。
+    """
+
+    pass
 
 
 # ----------------------------------------------------------------------
@@ -48,31 +61,6 @@ class LLMResponse(BaseModel):
     raw: Optional[Dict[str, Any]] = Field(default=None, description="Provider 原生响应数据")
 
 
-class InterruptMode(str, Enum):
-    """Interrupt mode for HITL."""
-    AFTER_TOOL = "after_tool"
-    BEFORE_TOOL = "before_tool"
-
-
-class InterruptConfig(BaseModel):
-    """
-    Framework-level HITL interrupt configuration.
-
-    Any Agent created via create_agent() can configure interrupt strategy.
-    AgentLoop auto-detects interrupts when conditions match.
-    """
-    enabled: bool = False
-    mode: InterruptMode = InterruptMode.AFTER_TOOL
-    tool_names: List[str] = Field(
-        default_factory=list,
-        description="Tool names that trigger interrupt. Empty = all tools.",
-    )
-    context: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Business-layer context attached to InterruptEvent.",
-    )
-
-
 class AgentConfig(BaseModel):
     """Agent 配置参数。"""
 
@@ -85,7 +73,6 @@ class AgentConfig(BaseModel):
     max_tokens: Optional[int] = Field(None, gt=0, description="最大 token 数")
     max_loop: int = Field(default=20, ge=1, le=100, description="最大循环次数")
     tools: List[Dict[str, Any]] = Field(default_factory=list, description="工具列表")
-    interrupt_config: Optional[InterruptConfig] = None
 
 
 class AgentMessage(BaseModel):
@@ -151,6 +138,19 @@ class ToolResult(BaseModel):
     is_error: bool = Field(default=False, description="是否错误")
 
 
+class ToolExecutionResult:
+    """
+    execute_all 批量执行完毕后的结果集合。
+
+    与中间事件（ToolEndEvent 等）的区别：
+    - 中间事件由 execute_all 即时 yield，供调用方实时流式处理
+    - ToolExecutionResult 是最后一个产出，表示本批所有工具执行完毕
+    """
+
+    def __init__(self, results: List["ToolResult"]):
+        self.results: List["ToolResult"] = results
+
+
 # ----------------------------------------------------------------------
 # 流式事件模型
 # ----------------------------------------------------------------------
@@ -203,20 +203,83 @@ class ErrorEvent(BaseModel):
     error: str
 
 
+class InterruptDecision(BaseModel):
+    """
+    Middleware 在 before_tool_calls 钩子中写入 ctx.metadata["interrupt"] 的中断信息。
+
+    AgentLoop 检测到此字段后：
+    1. 通过 persist.save_interrupt_state 持久化完整 checkpoint
+    2. yield InterruptEvent 给前端
+    3. 停止本轮循环
+    """
+    # 待审阅的工具调用
+    tool_call_id: str
+    tool_name: str
+    arguments: Dict[str, Any]
+    # 中断上下文，供前端展示和后续 resume 使用
+    context: Dict[str, Any] = Field(default_factory=dict)
+    # 可用操作
+    available_actions: List[str] = Field(
+        default_factory=lambda: ["approve", "reject"],
+    )
+
+
+class AgentCheckpoint(BaseModel):
+    """
+    Agent 中断时的完整快照。
+
+    包含：
+    - 被拦截的 tool_call 信息（用于 approve 后直接执行）
+    - 中断时刻的消息历史（用于 resume 时完整恢复上下文）
+    - 中断时的 loop_count（用于 resume 后继续计数）
+
+    由 persist.save_interrupt_state 持久化，resume 时通过 load_interrupt_state 恢复。
+    """
+    tool_call_id: str
+    tool_name: str
+    arguments: Dict[str, Any]
+    context: Dict[str, Any] = Field(default_factory=dict)
+    available_actions: List[str] = Field(
+        default_factory=lambda: ["approve", "reject"],
+    )
+    # 中断时刻的完整消息历史（dict 列表，与 self.messages 格式一致）
+    messages: List[Dict[str, Any]] = Field(default_factory=list)
+    # 中断时的循环次数
+    loop_count: int = 0
+
+
+class ResumeDecision(BaseModel):
+    """
+    用户在人工审阅后传入的决策。
+
+    对应 LangChain 的 Command(resume={"decisions": [{"type": "approve"}]})。
+    """
+    action: Literal["approve", "reject"] = Field(
+        ...,
+        description="approve | reject",
+    )
+    feedback: Optional[str] = Field(
+        None,
+        description="可选的审阅补充信息；当前 reject 默认仅记录“工具调用被拒绝”状态",
+    )
+
+
 class InterruptEvent(BaseModel):
     """
-    Agent execution interrupted, waiting for external input.
+    Agent 执行被中断，等待人工审阅。
 
-    Framework-level event produced by any Agent with interrupt_config.
+    中断发生在工具执行之前，前端收到此事件时应展示：
+    - 即将执行哪个工具（tool_name）
+    - 工具的参数是什么（arguments）
+    - 用户可以 approve / reject
     """
     type: Literal["interrupt"] = "interrupt"
     session_id: str
     tool_name: str
     tool_call_id: str
-    tool_result: Any = None
     arguments: Dict[str, Any] = Field(default_factory=dict)
     available_actions: List[str] = Field(
-        default_factory=lambda: ["approve", "reject", "edit", "skip", "abort"]
+        default_factory=lambda: ["approve", "reject"],
     )
     context: Dict[str, Any] = Field(default_factory=dict)
 

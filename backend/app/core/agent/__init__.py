@@ -4,6 +4,7 @@ Agent 框架 - 统一导出。
 
 from app.core.agent.agent import Agent
 from app.core.agent.base import (
+    AgentCheckpoint,
     AgentConfig,
     AgentMessage,
     AgentResult,
@@ -17,6 +18,8 @@ from app.core.agent.base import (
     ToolEndEvent,
     DoneEvent,
     ErrorEvent,
+    InterruptEvent,
+    ResumeDecision,
     StreamEvent,
 )
 from app.core.agent.factory import create_agent
@@ -30,7 +33,6 @@ from app.core.agent.persist import (
     DBPersistStrategy,
 )
 from app.core.middleware.chain import AgentMiddleware, MiddlewareChain, MiddlewareContext
-from app.core.middleware.builtin import LoggingMiddleware
 from app.core.tools import ToolRegistry, get_tool_registry, register_tool
 
 __all__ = [
@@ -53,6 +55,9 @@ __all__ = [
     "ToolEndEvent",
     "DoneEvent",
     "ErrorEvent",
+    "InterruptEvent",
+    "ResumeDecision",
+    "AgentCheckpoint",
     "StreamEvent",
     # 核心组件
     "AgentLoop",
@@ -71,5 +76,4 @@ __all__ = [
     "AgentMiddleware",
     "MiddlewareChain",
     "MiddlewareContext",
-    "LoggingMiddleware",
 ]

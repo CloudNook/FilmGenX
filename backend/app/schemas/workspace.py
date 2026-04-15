@@ -61,34 +61,47 @@ class AgentMessageResponse(BaseModel):
     created_at: Optional[datetime] = None
 
 
+class PendingInterrupt(BaseModel):
+    """待审阅的工具调用中断信息。"""
+
+    tool_name: str
+    tool_call_id: str
+    arguments: Dict[str, Any] = Field(default_factory=dict)
+    available_actions: List[str] = Field(default_factory=lambda: ["approve", "reject"])
+    context: Dict[str, Any] = Field(default_factory=dict)
+
+
 class WorkspaceDetailResponse(WorkspaceResponse):
     """工作台详情响应（含历史消息）。"""
 
     messages: List[AgentMessageResponse]
+    pending_interrupt: Optional[PendingInterrupt] = Field(
+        None, description="若 Agent 当前处于 HITL 中断状态，返回待审阅信息"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Chat 请求
 # ---------------------------------------------------------------------------
 
-class SupervisorPipelineRequest(BaseModel):
-    """触发 Supervisor 流水线（可覆盖 workspace 消息内容）。"""
 
-    user_request: Optional[str] = Field(
-        None,
-        description="流水线需求描述（优先级高于 chat.content）",
-    )
-    model: Optional[str] = Field(None, description="LLM 模型，默认 gemini-3-flash-preview")
-    max_loop: int = Field(30, ge=1, le=100, description="最大循环次数")
+class WorkspaceResumeAction(BaseModel):
+    """HITL Resume 决策，嵌套在 WorkspaceChatRequest 中。"""
+
+    action: str = Field(..., pattern="^(approve|reject)$", description="approve | reject")
 
 
 class WorkspaceChatRequest(BaseModel):
     """发送工作台聊天消息请求。"""
 
-    content: str = Field(..., description="用户消息内容")
+    content: str = Field(default="", description="用户消息内容；resume 模式下可为空")
     model: Optional[str] = Field(None, description="LLM 模型，默认使用系统配置")
     temperature: Optional[float] = Field(None, ge=0, le=2)
-    pipeline: Optional[SupervisorPipelineRequest] = Field(
+    hitl_auto_tools: Optional[List[str]] = Field(
         None,
-        description="触发 Supervisor 流水线（设置此字段则走流水线模式）",
+        description="HITL 白名单工具列表，设置后启用 HumanInTheLoopMiddleware；列表内的工具自动放行，其余工具触发人工审阅",
+    )
+    resume: Optional[WorkspaceResumeAction] = Field(
+        None,
+        description="HITL Resume：设置此字段则进入 resume 模式，content 可为空",
     )

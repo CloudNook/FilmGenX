@@ -9,9 +9,9 @@ Tool 执行器。
 
 import asyncio
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
-from app.core.agent.base import ToolCall, ToolEndEvent, ToolResult
+from app.core.agent.base import ToolCall, ToolEndEvent, ToolExecutionResult, ToolResult
 from app.core.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -24,26 +24,23 @@ class ToolExecutor:
     根据 tool_call 查找并执行对应工具。
     """
 
-    def __init__(self, db: Any = None, extra_kwargs: Optional[Dict[str, Any]] = None):
-        self.db = db
+    def __init__(self, extra_kwargs: Optional[Dict[str, Any]] = None):
         self.extra_kwargs = extra_kwargs or {}
 
     def get_tool(self, name: str):
         return ToolRegistry.get(name)
 
-    async def execute_tool_call(self, tool_call: ToolCall) -> ToolResult:
+    async def execute_tool_call(
+        self, tool_call: ToolCall
+    ) -> AsyncGenerator[ToolEndEvent, None]:
         """
         执行单次工具调用。
 
         对于返回 AsyncGenerator 的工具（如 call_sub_agent），本方法会 yield
-        工具产生的所有中间事件，最后 yield ToolResult。
+        工具产生的所有中间事件，最后 yield ToolEndEvent。
 
         Yields:
-            ToolStartEvent / ToolEndEvent / SubAgentStartEvent 等中间事件
-            ToolResult（最后一个）
-
-        Returns:
-            ToolResult — 工具的最终结果（通过 async for 循环的返回值获取）
+            ToolEndEvent — 工具执行结果（含 result / is_error）
         """
         tool_func = self.get_tool(tool_call.name)
         if tool_func is None:
@@ -57,9 +54,6 @@ class ToolExecutor:
             return
 
         kwargs = dict(tool_call.arguments)
-        if self.db is not None and "db" not in kwargs:
-            kwargs["db"] = self.db
-        # 只注入工具签名中实际存在的额外参数
         import inspect
         tool_params = set(inspect.signature(tool_func.func).parameters)
         for k, v in self.extra_kwargs.items():
@@ -108,17 +102,13 @@ class ToolExecutor:
         self,
         tool_calls: List[ToolCall],
         concurrency: int = 4,
-    ):
+    ) -> AsyncGenerator[ToolEndEvent | ToolExecutionResult, None]:
         """
         批量执行工具调用，支持并发控制。
 
         Yields:
-            - 中间事件（ToolStartEvent, ToolEndEvent, SubAgentStartEvent 等）
-            - list[ToolResult]（每个工具完成后一次，供调用方获取 .result）
-
-        注意：此方法是一个 async generator。
-        - run() 用 `results = [ev async for ev in execute_all(...)]` 获取列表
-        - stream_run() 用 `async for ev in execute_all(...):` 获取中间事件
+            ToolEndEvent         — 工具执行完毕事件，流式实时产出
+            ToolExecutionResult  — 全部工具执行完毕后最后产出，供调用方收集结果
         """
         semaphore = asyncio.Semaphore(concurrency)
         tc_list = list(tool_calls)
@@ -150,7 +140,6 @@ class ToolExecutor:
                         try:
                             ev = queues[i].get_nowait()
                             yield ev
-                            from app.core.agent.base import ToolEndEvent
                             if isinstance(ev, ToolEndEvent):
                                 tool_results[i] = ToolResult(
                                     tool_call_id=tc_list[i].id,
@@ -170,10 +159,12 @@ class ToolExecutor:
                 except asyncio.QueueEmpty:
                     break
 
-        # yield ToolResult list（供 run() 收集）
-        yield tool_results
+        # yield ToolExecutionResult（供调用方收集本批结果）
+        yield ToolExecutionResult(results=tool_results)
 
-    async def execute_streaming_tool(self, tool_call: ToolCall):
+    async def execute_streaming_tool(
+        self, tool_call: ToolCall
+    ) -> AsyncGenerator[ToolEndEvent, None]:
         """透传流式工具的所有事件。用于 call_sub_agent 等。"""
         tool_func = self.get_tool(tool_call.name)
         if tool_func is None:
@@ -186,8 +177,6 @@ class ToolExecutor:
             return
 
         kwargs = dict(tool_call.arguments)
-        if self.db is not None and "db" not in kwargs:
-            kwargs["db"] = self.db
         import inspect as _inspect
         _tool_params = set(_inspect.signature(tool_func.func).parameters)
         for k, v in self.extra_kwargs.items():

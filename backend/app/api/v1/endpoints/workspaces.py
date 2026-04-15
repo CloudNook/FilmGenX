@@ -26,6 +26,7 @@ from app.core.agent import (
     ToolEndEvent,
     DoneEvent,
     ErrorEvent,
+    InterruptEvent,
 )
 from app.core.agent.persist.db_strategy import DBPersistStrategy
 from app.core.agent.tool import ToolExecutor
@@ -41,7 +42,7 @@ from app.schemas.workspace import (
     WorkspaceDetailResponse,
     WorkspaceChatRequest,
     AgentMessageResponse,
-    SupervisorPipelineRequest,
+    PendingInterrupt,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,7 +64,16 @@ DEFAULT_SYSTEM_PROMPT = """你是 FilmGenX AI 视频制作助手。你具备专�
 - 图片生成提示词编写
 - 视频制作指导
 
-当你需要专业领域知识时，使用 load_skill 工具获取对应知识库。
+## 工具使用规则
+
+**对于任何需要实时或外部信息的问题，必须调用对应工具，禁止凭记忆或猜测回答：**
+- 当前时间 → 调用 current_time
+- 天气信息 → 调用 get_weather
+- 搜索信息 → 调用 search_info
+- 专业影视知识 → 调用 load_skill
+
+即使你认为自己知道答案，只要涉及实时数据，也必须先调用工具获取后再回答。
+
 始终用中文回复，保持专业且友好的语气。"""
 
 
@@ -117,6 +127,16 @@ def _serialize_agent_event(event) -> dict:
         }
     elif isinstance(event, ErrorEvent):
         return {"type": "error", "error": event.error}
+    elif isinstance(event, InterruptEvent):
+        return {
+            "type": "interrupt",
+            "session_id": event.session_id,
+            "tool_name": event.tool_name,
+            "tool_call_id": event.tool_call_id,
+            "arguments": event.arguments,
+            "available_actions": event.available_actions,
+            "context": event.context,
+        }
     return {"type": "unknown"}
 
 
@@ -204,6 +224,21 @@ async def get_workspace(
             )
         )
 
+    # 检查是否有待审阅的中断状态
+    pending_interrupt = None
+    try:
+        checkpoint = await DBPersistStrategy(db=db).load_interrupt_state(ws.session_id)
+        if checkpoint is not None:
+            pending_interrupt = PendingInterrupt(
+                tool_name=checkpoint.tool_name,
+                tool_call_id=checkpoint.tool_call_id,
+                arguments=checkpoint.arguments,
+                available_actions=checkpoint.available_actions,
+                context=checkpoint.context,
+            )
+    except Exception:
+        pass
+
     return WorkspaceDetailResponse(
         id=ws.id,
         created_at=ws.created_at,
@@ -217,6 +252,7 @@ async def get_workspace(
         total_tokens=ws.total_tokens,
         last_message_at=ws.last_message_at,
         messages=messages,
+        pending_interrupt=pending_interrupt,
     )
 
 
@@ -259,7 +295,7 @@ async def delete_workspace(
 # 核心端点：流式对话
 # ---------------------------------------------------------------------------
 
-@router.post("/{workspace_id}/chat", summary="Agent 流式对话（SSE）")
+@router.post("/{workspace_id}/chat", summary="Agent 流式对话（SSE）/ HITL Resume")
 async def chat_workspace(
     project_id: int,
     workspace_id: int,
@@ -268,34 +304,44 @@ async def chat_workspace(
     user_id: int = Depends(get_current_user_id),
 ):
     """
-    通过 Agent 框架的 stream() 实现多轮流式对话。
+    通过 Agent 框架的 stream() 实现多轮流式对话，同时支持 HITL Resume。
+
+    普通对话模式：body.resume 为 None，body.content 为用户消息。
+    Resume 模式：body.resume 包含 action（approve/reject），content 可为空，
+                 Agent 从持久化的中断快照恢复并继续执行。
 
     SSE 事件类型：
       - thinking: Agent 思考过程片段
       - text: Agent 回复文本片段
       - tool_start: 工具开始执行
       - tool_end: 工具执行完毕
+      - interrupt: 工具调用等待人工审阅（HITL）
       - done: 对话结束（含 usage 统计）
       - error: 执行出错
-
-    若请求包含 pipeline 字段，则触发 Supervisor 流水线，
-    事件类型变为 pipeline_* 前缀（pipeline_start | sub_agent_* | ...）。
     """
+    from app.core.agent.base import ResumeDecision
+
     await _require_project(project_id, user_id, db)
     ws = await _require_workspace(workspace_id, project_id, db)
 
-    # ── Supervisor 流水线模式 ───────────────────────────────────────
-    if body.pipeline is not None:
-        return await _chat_workspace_supervisor(
-            project_id, ws, body, db, user_id
-        )
+    # ── 普通 / Resume Agent 对话模式 ────────────────────────────────
+    from app.core.middleware.builtin import HumanInTheLoopMiddleware
 
-    # ── 普通 Agent 对话模式 ─────────────────────────────────────────
     prompt = ws.system_prompt or DEFAULT_SYSTEM_PROMPT
     tools = ToolRegistry.get_all_schemas()
 
     persist = DBPersistStrategy(db=db)
-    tool_executor = ToolExecutor(db=db)
+    tool_executor = ToolExecutor()
+
+    resume = (
+        ResumeDecision(action=body.resume.action)
+        if body.resume is not None
+        else None
+    )
+
+    middlewares = []
+    if body.hitl_auto_tools is not None:
+        middlewares.append(HumanInTheLoopMiddleware(auto_tool_list=body.hitl_auto_tools))
 
     agent = create_agent(
         agent_name=ws.agent_name,
@@ -306,6 +352,7 @@ async def chat_workspace(
         tools=tools,
         skill_names=ws.skill_names if hasattr(ws, "skill_names") else [],
         persist=persist,
+        middlewares=middlewares,
     )
     agent._tool_executor = tool_executor
 
@@ -313,7 +360,7 @@ async def chat_workspace(
         total_tokens_delta = 0
 
         try:
-            async for event in agent.stream(body.content):
+            async for event in agent.stream(body.content, resume=resume):
                 data = _serialize_agent_event(event)
                 yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
@@ -342,105 +389,4 @@ async def chat_workspace(
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
-    )
-
-
-async def _chat_workspace_supervisor(
-    project_id: int,
-    ws,
-    body: WorkspaceChatRequest,
-    db: AsyncSession,
-    user_id: int,
-):
-    """
-    Supervisor 流水线模式：workspace chat 触发完整的流水线执行。
-
-    流水线产物通过 SupervisorStreamEvent 实时透传，
-    最终 SupervisorDoneEvent 携带完整 artifacts 结束。
-    """
-    from app.services.supervisor_workflow_service import SupervisorWorkflowService
-
-    # 确定 user_request：pipeline.user_request > body.content
-    user_request = (
-        body.pipeline.user_request
-        if body.pipeline.user_request
-        else body.content
-    )
-    pipeline_model = body.pipeline.model or body.model or "gemini-3-flash-preview"
-    max_loop = body.pipeline.max_loop
-
-    workflow_service = SupervisorWorkflowService(db)
-
-    supervisor = _create_supervisor_for_workspace(
-        user_request=user_request,
-        model=pipeline_model,
-        max_loop=max_loop,
-        workflow_service=workflow_service,
-    )
-
-    # 在流式开始前创建 workflow DB 记录
-    try:
-        await workflow_service.create_workflow(
-            project_id=project_id,
-            owner_id=user_id,
-            supervisor_session_id=supervisor.supervisor_session_id,
-            user_request=user_request,
-            model=pipeline_model,
-        )
-        await db.commit()
-        logger.info(
-            f"[supervisor/workspace:{ws.id}] workflow created: "
-            f"session={supervisor.supervisor_session_id}"
-        )
-    except Exception as e:
-        logger.warning(f"[supervisor/workspace:{ws.id}] failed to create workflow record: {e}")
-
-    async def stream_supervisor() -> AsyncGenerator[str, None]:
-        try:
-            async for event in supervisor.stream(initial_input=user_request):
-                # 透传 Supervisor 事件，source 字段标记为 "supervisor"
-                if hasattr(event, "model_dump"):
-                    payload = event.model_dump()
-                else:
-                    payload = {"type": "unknown", "repr": str(event)}
-                payload["source"] = "supervisor"
-                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-            yield "data: [DONE]\n\n"
-
-        except Exception as e:
-            logger.exception(f"[supervisor/workspace:{ws.id}] stream error: {e}")
-            yield f"data: {json.dumps({'type': 'error', 'source': 'supervisor', 'error': str(e)}, ensure_ascii=False)}\n\n"
-            yield "data: [DONE]\n\n"
-
-    return StreamingResponse(
-        stream_supervisor(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-def _create_supervisor_for_workspace(
-    user_request: str,
-    model: str,
-    max_loop: int,
-    workflow_service,
-):
-    """
-    在 workspace 上下文中创建 SupervisorAgent。
-
-    延迟导入以避免循环依赖。
-    """
-    from app.core.supervisor.factory import create_supervisor
-
-    return create_supervisor(
-        user_request=user_request,
-        model=model,
-        max_loop=max_loop,
-        persist="redis",
-        workflow_service=workflow_service,
     )

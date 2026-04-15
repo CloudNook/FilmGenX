@@ -27,27 +27,12 @@ from app.core.tools.registry import register_tool
 async def load_skill(
     skill_name: str,
     fields: Optional[List[str]] = None,
-    db: Optional[Any] = None,
 ) -> Optional[Dict[str, Any]]:
-    """
-    按名称加载完整 Skill。
-
-    渐进式披露：只返回调用方请求的字段，避免一次性暴露过多信息。
-
-    Args:
-        skill_name: Skill 名称
-        fields: 可选，指定要返回的字段列表
-        db: 数据库会话
-
-    Returns:
-        Skill 信息字典，未找到返回 None
-    """
     from app.core.skill.loader import load_skill as _load_skill
+    from app.db.session import AsyncSessionFactory
 
-    if db is None:
-        return {"error": "数据库会话未提供"}
-
-    return await _load_skill(db=db, skill_name=skill_name, fields=fields)
+    async with AsyncSessionFactory() as db:
+        return await _load_skill(db=db, skill_name=skill_name, fields=fields)
 
 
 @register_tool(
@@ -63,26 +48,13 @@ async def load_skill(
 )
 async def load_skill_lite(
     skill_names: List[str],
-    db: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
-    """
-    批量加载 Skill 摘要。
-
-    用于 Agent 初始化时获取 Skill 的基本信息，注入到提示词中。
-
-    Args:
-        skill_names: Skill 名称列表，为空则返回所有活跃 Skill
-        db: 数据库会话
-
-    Returns:
-        Skill 摘要列表
-    """
     from app.core.skill.loader import load_skill_lite as _load_skill_lite
+    from app.db.session import AsyncSessionFactory
 
-    if db is None:
-        return [{"error": "数据库会话未提供"}]
+    async with AsyncSessionFactory() as db:
+        all_lite = await _load_skill_lite(db=db)
 
-    all_lite = await _load_skill_lite(db=db)
     if not skill_names:
         return all_lite
     name_set = set(skill_names)

@@ -2,13 +2,13 @@
 持久化数据模型。
 
 只保留消息表，session 元信息由调用方业务表管理。
+中断状态通过 is_checkpoint=True 的 assistant 消息记录，不需要单独的中断状态表。
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from sqlalchemy import DateTime, Integer, JSON, String, Text
+from sqlalchemy import Boolean, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -25,11 +25,13 @@ class MessageRecord:
     role: str
     content: str
     seq: int
+    loop_count: int = 0
+    is_checkpoint: bool = False
     tool_call_id: Optional[str] = None
     tool_name: Optional[str] = None
     usage: Optional[Dict[str, Any]] = None
     extra_metadata: Optional[Dict[str, Any]] = field(default=None)
-    supervisor_session_id: Optional[str] = field(default=None)
+    supervisor_session_id: Optional[str] = None
 
 
 class AgentMessageRecord(Base):
@@ -91,6 +93,17 @@ class AgentMessageRecord(Base):
         nullable=True,
         comment="LLM token 用量，仅 assistant 消息填充",
     )
+    loop_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        comment="消息写入时的 loop 计数",
+    )
+    is_checkpoint: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        comment="该消息是否为中断检查点",
+    )
     extra_metadata: Mapped[Optional[dict]] = mapped_column(
         JSON,
         nullable=True,
@@ -99,10 +112,5 @@ class AgentMessageRecord(Base):
         String(100),
         nullable=True,
         index=True,
-        comment="Supervisor session ID（sv- 前缀），SubAgent 消息追溯到 Supervisor 流水线",
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        default=lambda: datetime.now(timezone.utc),
+        comment="Supervisor 会话 ID（用于跨 SubAgent 追溯）",
     )

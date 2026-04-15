@@ -1,34 +1,27 @@
 """add hitl_enabled and review_nodes to supervisor_workflows
 
 Revision ID: 26768d28b01c
-Revises: add_usage_to_agent_messages
+Revises: t3u4v5w6x7y8
 Create Date: 2026-04-12
 
+NOTE: supervisor_workflows 表已在 t3u4v5w6x7y8 中创建并包含
+hitl_enabled/review_nodes，本迁移不再执行任何操作（仅作历史标记）。
 """
+
 from typing import Sequence, Union
 
 from alembic import op
-import sqlalchemy as sa
 
 
-# revision identifiers, used by Alembic.
-revision: str = '26768d28b01c'
-down_revision: Union[str, Sequence[str], None] = 'add_usage_to_agent_messages'
+revision: str = "26768d28b01c"
+down_revision: Union[str, Sequence[str], None] = "t3u4v5w6x7y8"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "supervisor_workflows",
-        sa.Column("hitl_enabled", sa.Boolean(), nullable=False, server_default=sa.text("false")),
-    )
-    op.add_column(
-        "supervisor_workflows",
-        sa.Column("review_nodes", sa.JSON(), nullable=True),
-    )
+    pass  # columns already exist in f1e2d3c4b5a6
 
 
 def downgrade() -> None:
-    op.drop_column("supervisor_workflows", "review_nodes")
-    op.drop_column("supervisor_workflows", "hitl_enabled")
+    pass  # columns remain in f1e2d3c4b5a6

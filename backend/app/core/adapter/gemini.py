@@ -78,6 +78,7 @@ class GeminiAdapter(ProviderAdapter):
         Gemini 消息格式：
         [{"role": "user"|"model", "parts": [{"text": "..."}] or [...]}]
         """
+        from google.genai import types as _gtypes
         contents = []
         for msg in messages:
             role = msg.get("role", "user")
@@ -102,10 +103,20 @@ class GeminiAdapter(ProviderAdapter):
                 if msg.get("content"):
                     parts.append({"text": msg["content"]})
                 for tc in msg["tool_calls"]:
-                    # 优先使用原始 part（保留 thought_signature 等 Gemini 特有字段）
-                    gemini_part = (tc.get("raw") or {}).get("gemini_part")
+                    raw = tc.get("raw") or {}
+                    # 优先使用原始 part 对象（保留 thought_signature 等 Gemini 特有字段）
+                    gemini_part = raw.get("gemini_part")
                     if gemini_part is not None:
                         parts.append(gemini_part)
+                    elif raw.get("gemini_thought_signature") is not None:
+                        # 从持久化恢复：用 thought_signature bytes 重建 types.Part
+                        parts.append(_gtypes.Part(
+                            function_call=_gtypes.FunctionCall(
+                                name=raw.get("gemini_fc_name", tc["name"]),
+                                args=raw.get("gemini_fc_args", tc.get("arguments", {})),
+                            ),
+                            thought_signature=raw["gemini_thought_signature"],
+                        ))
                     else:
                         parts.append({
                             "functionCall": {
