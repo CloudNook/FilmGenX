@@ -30,9 +30,11 @@ backend/storage/
 .idea/
 *.DS_Store
 /.claude/
+.superpowers/
 
 # 测试生成的图片
 docs/img/
 backend/test_*.py
 backend/test_image*.py
 .worktrees/
+frontend/tsconfig.tsbuildinfo

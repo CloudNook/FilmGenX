@@ -54,6 +54,57 @@ npm run dev
 
 访问 http://localhost:3000
 
+## Docker 部署
+
+适合服务器直接拉代码后启动，内置：
+- PostgreSQL
+- Redis
+- FastAPI backend
+- Celery worker
+- Next.js frontend
+
+先准备后端配置文件：
+
+```bash
+cp backend/.env.example backend/.env
+```
+
+然后按需编辑 `backend/.env`。
+Docker 启动时会直接读取这个文件，`backend`、`worker`、`postgres` 共用同一份配置。
+其中：
+- `POSTGRES_DB`、`POSTGRES_USER`、`POSTGRES_PASSWORD` 直接决定容器内 PostgreSQL 账号
+- `backend` 和 `worker` 会基于这组值自动拼出容器内可用的数据库连接
+- `REDIS_URL` 在 Docker 场景下也会自动切到容器内的 `redis`
+
+启动命令：
+
+```bash
+docker compose up -d --build
+```
+
+停止命令：
+
+```bash
+docker compose down
+```
+
+查看日志：
+
+```bash
+docker compose logs -f
+```
+
+启动后访问：
+
+- 前端：http://服务器IP:3000
+- 后端健康检查：http://服务器IP:8000/health
+
+说明：
+- 后端容器启动时会自动执行 `alembic upgrade head`
+- 默认会自动创建并使用容器内的 PostgreSQL 和 Redis
+- 如果需要真实 AI/OSS 能力，把这些值直接填进 `backend/.env`：`EVOLINK_API_KEY`、`GOOGLE_API_KEY`、`OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET`、`OSS_BUCKET_NAME`、`OSS_ENDPOINT`
+- 若不设置这些 key，基础页面和数据库服务可以启动，但相关 AI/存储能力不可用
+
 ## 数据库迁移
 
 ```bash

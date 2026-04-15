@@ -2,10 +2,10 @@
  * FilmGenX API 客户端。
  *
  * 统一封装 fetch 请求，自动附加 Authorization header。
- * 后端 base URL 从环境变量 NEXT_PUBLIC_API_URL 读取，默认 http://localhost:8000/api/v1。
+ * 后端 base URL 从环境变量 NEXT_PUBLIC_API_URL 读取，默认 /api/v1。
  */
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL || '/api/v1';
 
 // ---------------------------------------------------------------------------
 // Token 管理（localStorage）

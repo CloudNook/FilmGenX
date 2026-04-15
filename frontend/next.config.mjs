@@ -1,4 +1,6 @@
 /** @type {import('next').NextConfig} */
+const internalApiBaseUrl = process.env.INTERNAL_API_BASE_URL || 'http://localhost:8000/api';
+
 const nextConfig = {
   typescript: {
     ignoreBuildErrors: true,
@@ -10,7 +12,7 @@ const nextConfig = {
     return [
       {
         source: '/api/:path*',
-        destination: 'http://localhost:8000/api/:path*',
+        destination: `${internalApiBaseUrl}/:path*`,
       },
     ];
   },
