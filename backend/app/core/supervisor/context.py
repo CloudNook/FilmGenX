@@ -2,9 +2,15 @@
 Supervisor 流水线工作内存。
 """
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from app.core.supervisor.workflow import (
+    WorkflowNodeDefinition,
+    WorkflowSnapshot,
+    build_workflow_snapshot,
+)
 
 
 class ReviewEntry(BaseModel):
@@ -26,13 +32,14 @@ class SupervisorContext(BaseModel):
 
     supervisor_session_id: str = Field(..., description="Supervisor session ID")
     user_request: str = Field(..., description="用户原始需求")
-    current_phase: Literal["init", "outline", "script", "storyboard", "review", "done"] = Field(
-        default="init",
-        description="当前流水线阶段：init | outline | script | storyboard | review | done",
+    workflow_profile: str = Field(default="default", description="工作流配置名称")
+    workflow_definitions: List[WorkflowNodeDefinition] = Field(
+        default_factory=list,
+        description="工作流节点定义",
     )
-    artifacts: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="各阶段产物：{outline: {...}, script: {...}, storyboard: {...}}",
+    workflow: WorkflowSnapshot | None = Field(
+        default=None,
+        description="当前版本化工作流快照",
     )
     sub_agent_sessions: Dict[str, str] = Field(
         default_factory=dict,
@@ -46,3 +53,20 @@ class SupervisorContext(BaseModel):
         default_factory=dict,
         description="附加元数据",
     )
+    execution_history: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="结构化执行历史",
+    )
+    auto_run: bool = Field(
+        default=False,
+        description="是否允许按建议自动继续执行",
+    )
+
+    @model_validator(mode="after")
+    def _populate_workflow(self):
+        if self.workflow is None:
+            self.workflow = build_workflow_snapshot(
+                profile=self.workflow_profile,
+                definitions=self.workflow_definitions,
+            )
+        return self

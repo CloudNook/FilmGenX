@@ -1,76 +1,59 @@
 """
-SupervisorAgent — 视频生成流水线的元 Agent。
+SupervisorAgent - 版本化工作流编排器。
+
+在不改动 create_agent / AgentLoop 内核的前提下，
+重建一层高层 orchestrator，用于：
+- 管理工作流节点与依赖
+- 通过 registry 动态选择专家 Agent
+- 维持与现有 stream / resume API 的兼容
 """
 
 import logging
 from string import Template
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
-from app.core.agent.agent import Agent
-from app.core.agent.base import AgentResult
+from app.core.agent.base import AgentResult, DoneEvent, ErrorEvent, InterruptEvent, ResumeDecision
 from app.core.agent.factory import create_agent
 from app.core.agent.persist.base import PersistStrategy
 from app.core.middleware.chain import AgentMiddleware
 from app.core.supervisor.context import SupervisorContext
+from app.core.supervisor.registry import (
+    SupervisorAgentRegistry,
+    WorkflowNodeDefinition,
+    build_default_registry,
+    build_default_workflow_definitions,
+)
 from app.core.supervisor.session import SupervisorSession
 from app.core.supervisor.tools import get_supervisor_tool_schemas
 
 logger = logging.getLogger(__name__)
 
-SUPERVISOR_SYSTEM_PROMPT_TEMPLATE = Template("""你是一个视频生成流水线的 Supervisor Agent。你的职责是：
+SUPERVISOR_SYSTEM_PROMPT_TEMPLATE = Template(
+    """你是 FilmGenX 的 Supervisor Orchestrator。
 
-## 可用工具
-- call_sub_agent(sub_agent_name, task_description, context_snapshot)
-- call_reviewer(content, review_criteria)
-- get_workflow_state()
+你的职责不是机械推进固定流程，而是根据当前工作流状态协调专家 Agent：
 
-## 流水线阶段
-1. outline_writer → 生成视频大纲（自然语言，包含场景时间线、主题、角色描述）
-2. script_writer → 基于大纲创作剧本（自然语言，包含对话、旁白、镜头描述）
-3. storyboarder → 基于剧本生成分镜组（自然语言，逐镜描述画面、运镜、时长）
+## 你的工作原则
+- 先通过 get_workflow_state() 理解当前节点状态、待确认节点和建议动作
+- 用户决定要修改什么，你负责分析影响，而不是替用户强制决定
+- 如果上游节点变更，下游节点应先进入 pending_confirmation，再由用户决定是否继续
+- 用户开启自动继续时，你可以按建议调用合适的专家 Agent
+- 调用专家时优先保持输出简洁、可执行、可复用
 
-## 工作原则
-- 先理解用户需求，制定流水线计划
-- 每个 SubAgent 调用后，用 Reviewer 评估结果（threshold = 7/10）
-- 评估不通过时，说明原因并决定：重试同 Agent 或调整策略
-- 流水线完成后，汇总所有产物并返回最终结果
-- 遇到错误时，尝试恢复或换备选方案，不要轻易放弃
-- 重要：不要让用户等待太久，每轮决策尽量简洁
-- SubAgent 输出为自然语言文本，不需要 JSON 格式
-
-## Supervisor 工具说明
-
-### call_sub_agent
-调用 SubAgent 执行任务：
-- sub_agent_name: outline_writer | script_writer | storyboarder
-- task_description: 角色定义 + 具体任务描述
-- context_snapshot: 前序产物的文本（选择性注入）
-
-### call_reviewer
-评估内容质量：
-- content: 待评估内容
-- review_criteria: 评估维度列表
-- 返回: {score, passed, feedback, suggestions}
-
-### get_workflow_state
-查询当前流水线状态（ Supervisor 决策参考）。
+## 当前可用专家 Agent
+$agent_list
 
 ## 当前用户需求
 $user_request
-""")
+"""
+)
 
 
 class SupervisorAgent:
     """
-    Supervisor Agent。
+    高层 Supervisor 编排器。
 
-    组合标准 Agent 能力，复用 run()/stream() 模式。
-    差异点：
-    - 有自己的 system prompt（流水线描述 + 工具说明）
-    - 持有 SupervisorContext（工作内存，SubAgent 无法访问）
-    - 持有 SupervisorSession（session 关联管理）
-    - 工具集为 {call_sub_agent, call_reviewer, get_workflow_state}
-    - stream() 将 SubAgent 事件实时透传到 SSE
+    仍然复用标准 Agent 作为执行内核，但将状态、registry、工作流定义提升到 Python 层。
     """
 
     def __init__(
@@ -82,70 +65,67 @@ class SupervisorAgent:
         persist: Optional[PersistStrategy],
         model: str = "gemini-3-flash-preview",
         max_loop: int = 30,
+        registry: Optional[SupervisorAgentRegistry] = None,
+        workflow_definitions: Optional[List[WorkflowNodeDefinition]] = None,
+        workflow_profile: str = "default",
+        auto_run: bool = False,
     ):
         self.supervisor_session_id = supervisor_session_id
+        self.registry = registry or build_default_registry()
+        self.workflow_definitions = workflow_definitions or build_default_workflow_definitions()
+        self.workflow_profile = workflow_profile
         self.context = SupervisorContext(
             supervisor_session_id=supervisor_session_id,
             user_request=user_request,
+            workflow_profile=workflow_profile,
+            workflow_definitions=self.workflow_definitions,
+            auto_run=auto_run,
         )
         self.session = SupervisorSession(supervisor_session_id)
         self._sub_agent_configs = sub_agent_configs
 
-        tool_schemas = get_supervisor_tool_schemas()
-
         self._tool_ctx: Dict[str, Any] = {
             "supervisor_context": self.context,
-            "workflow_service": None,  # 由 factory 或 API 层注入
+            "workflow_service": None,
+            "registry": self.registry,
         }
 
         self._agent = create_agent(
             agent_name="supervisor",
             session_id=supervisor_session_id,
             prompt=self._build_system_prompt(),
-            tools=tool_schemas,
+            model=model,
+            tools=get_supervisor_tool_schemas(self.registry.agent_names()),
             max_loop=max_loop,
             persist=persist,
             middlewares=middlewares,
         )
 
-        # 注入 ToolExecutor，携带 supervisor_context / workflow_service
         from app.core.agent.tool import ToolExecutor
+
         self._agent._tool_executor = ToolExecutor(extra_kwargs=self._tool_ctx)
 
         logger.info(
-            f"[SupervisorAgent] created supervisor_session={supervisor_session_id}, "
-            f"max_loop={max_loop}"
+            "[SupervisorAgent] created supervisor_session=%s, workflow_profile=%s, agents=%s",
+            supervisor_session_id,
+            workflow_profile,
+            self.registry.agent_names(),
         )
 
     def _build_system_prompt(self) -> str:
+        agent_lines = "\n".join(
+            f"- {agent.name}: {agent.description}" for agent in self.registry.agents
+        ) or "- 当前尚未注册专家 Agent"
         return SUPERVISOR_SYSTEM_PROMPT_TEMPLATE.substitute(
+            agent_list=agent_lines,
             user_request=self.context.user_request,
         )
 
     async def run(self, initial_input: str) -> AgentResult:
-        """
-        非流式执行，返回流水线最终结果。
-
-        Supervisor 不使用 run()，流水线推荐使用 stream()。
-        此方法用于简单场景。
-        """
         return await self._agent.run(initial_input)
 
-    async def stream(
-        self,
-        initial_input: str,
-    ) -> AsyncGenerator:
-        """
-        流式执行，yield SupervisorStreamEvent。
-
-        事件透传逻辑：
-        - Supervisor 的 Thinking/Text 事件：透传（source = "supervisor"）
-        - ToolStart/ToolEnd 事件：透传（source = "supervisor"）
-        - SubAgentStart/SubAgentEnd 事件：工具内部 yield
-        - SupervisorDoneEvent：最后 yield
-        """
+    async def stream(self, initial_input: str) -> AsyncGenerator:
         from app.core.supervisor.events import SupervisorDoneEvent
-        from app.core.agent.base import InterruptEvent
 
         accumulated_result = ""
         was_interrupted = False
@@ -155,7 +135,7 @@ class SupervisorAgent:
                 if hasattr(event, "source") and getattr(event, "source", None) is None:
                     event.source = "supervisor"
 
-                if hasattr(event, "content") and getattr(event, "type", None) == "text":
+                if getattr(event, "type", None) == "text" and hasattr(event, "content"):
                     accumulated_result += event.content
 
                 if isinstance(event, InterruptEvent):
@@ -163,23 +143,19 @@ class SupervisorAgent:
 
                 yield event
 
-            # Only yield SupervisorDoneEvent if stream ended normally (not interrupted)
             if not was_interrupted:
-                final_artifacts = dict(self.context.artifacts)
                 yield SupervisorDoneEvent(
                     supervisor_session_id=self.supervisor_session_id,
-                    artifacts=final_artifacts,
-                    final_result=accumulated_result or "流水线执行完毕",
+                    workflow=self._build_workflow_payload(),
+                    final_result=accumulated_result or "工作流执行完毕",
                 )
-
-        except Exception as e:
-            logger.exception(f"[SupervisorAgent] stream error: {e}")
-            from app.core.agent.base import ErrorEvent
-            yield ErrorEvent(error=str(e), source="supervisor")
+        except Exception as exc:
+            logger.exception("[SupervisorAgent] stream error: %s", exc)
+            yield ErrorEvent(error=str(exc), source="supervisor")
             yield SupervisorDoneEvent(
                 supervisor_session_id=self.supervisor_session_id,
-                artifacts=dict(self.context.artifacts),
-                final_result=f"执行出错：{str(e)}",
+                workflow=self._build_workflow_payload(),
+                final_result=f"执行出错：{exc}",
             )
 
     async def resume(
@@ -187,13 +163,13 @@ class SupervisorAgent:
         action: str,
         feedback: Optional[str] = None,
     ) -> AsyncGenerator:
-        """Resume Supervisor from interrupt checkpoint."""
-        from app.core.agent.base import DoneEvent
         from app.core.supervisor.events import SupervisorDoneEvent
 
-        async for event in self._agent.resume(
-            action=action,
-            feedback=feedback,
+        decision = ResumeDecision(action=action, feedback=feedback)
+
+        async for event in self._agent.stream(
+            "",
+            resume=decision,
         ):
             if hasattr(event, "source") and getattr(event, "source", None) is None:
                 event.source = "supervisor"
@@ -203,6 +179,11 @@ class SupervisorAgent:
             if isinstance(event, DoneEvent):
                 yield SupervisorDoneEvent(
                     supervisor_session_id=self.supervisor_session_id,
-                    artifacts=dict(self.context.artifacts),
-                    final_result=event.result.raw_output or "Pipeline completed",
+                    workflow=self._build_workflow_payload(),
+                    final_result=event.result.raw_output or "Workflow completed",
                 )
+
+    def _build_workflow_payload(self) -> Dict[str, Any]:
+        if self.context.workflow is None:
+            return {}
+        return self.context.workflow.model_dump()

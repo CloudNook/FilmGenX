@@ -16,6 +16,7 @@ import {
   Home,
   Box,
   Brain,
+  GitBranch,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
@@ -46,6 +47,7 @@ export function Sidebar({ projectId }: SidebarProps) {
         { title: '素材库', href: `/projects/${projectId}/materials`, icon: Box },
         { title: 'AI 剧本', href: `/projects/${projectId}/chat`, icon: MessageSquare },
         { title: 'AI 工作台', href: `/projects/${projectId}/workspace`, icon: Brain },
+        { title: 'AI Supervisor', href: `/projects/${projectId}/supervisor`, icon: GitBranch },
         { title: '分集管理', href: `/projects/${projectId}/episodes`, icon: Clapperboard },
         { title: '视频制作', href: `/projects/${projectId}/video`, icon: Video },
       ]

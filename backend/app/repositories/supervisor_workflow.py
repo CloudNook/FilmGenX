@@ -68,14 +68,14 @@ class SupervisorWorkflowRepository(BaseRepository[SupervisorWorkflow]):
     async def mark_completed(
         self,
         workflow: SupervisorWorkflow,
-        artifacts: Optional[dict] = None,
+        workflow_snapshot: Optional[dict] = None,
         final_result: Optional[str] = None,
     ) -> SupervisorWorkflow:
         """标记流水线完成。"""
         workflow.status = "completed"
         workflow.completed_at = datetime.now(timezone.utc)
-        if artifacts is not None:
-            workflow.artifacts = artifacts
+        if workflow_snapshot is not None:
+            workflow.workflow_snapshot = workflow_snapshot
         if final_result is not None:
             workflow.final_result = final_result
         await self.session.flush()

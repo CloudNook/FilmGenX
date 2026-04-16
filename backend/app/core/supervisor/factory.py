@@ -10,6 +10,12 @@ from app.core.agent.persist.base import PersistStrategy
 from app.core.agent.persist.redis_strategy import RedisPersistStrategy
 from app.core.agent.factory import PersistArg
 from app.core.middleware.chain import AgentMiddleware
+from app.core.supervisor.registry import (
+    SupervisorAgentRegistry,
+    WorkflowNodeDefinition,
+    build_default_registry,
+    build_default_workflow_definitions,
+)
 from app.core.supervisor.supervisor import SupervisorAgent
 
 logger = logging.getLogger(__name__)
@@ -30,12 +36,17 @@ def _resolve_persist(persist: PersistArg) -> Optional[PersistStrategy]:
 def create_supervisor(
     user_request: str,
     *,
+    supervisor_session_id: Optional[str] = None,
     supervisor_name: str = "supervisor",
     model: str = "gemini-3-flash-preview",
     max_loop: int = 30,
     persist: PersistArg = "redis",
     middlewares: Optional[List[AgentMiddleware]] = None,
     sub_agent_configs: Optional[Dict[str, Any]] = None,
+    registry: Optional[SupervisorAgentRegistry] = None,
+    workflow_definitions: Optional[List[WorkflowNodeDefinition]] = None,
+    workflow_profile: str = "default",
+    auto_run: bool = False,
     workflow_service=None,
 ) -> SupervisorAgent:
     """
@@ -54,22 +65,28 @@ def create_supervisor(
     Returns:
         SupervisorAgent 实例
     """
-    supervisor_session_id = f"sv-{uuid4()}"
+    session_id = supervisor_session_id or f"sv-{uuid4()}"
     persist_strategy = _resolve_persist(persist)
+    resolved_registry = registry or build_default_registry()
+    resolved_workflow_definitions = workflow_definitions or build_default_workflow_definitions()
 
     logger.info(
-        f"[create_supervisor] supervisor_session={supervisor_session_id}, "
+        f"[create_supervisor] supervisor_session={session_id}, "
         f"user_request={user_request[:50]}..., persist={persist}"
     )
 
     supervisor = SupervisorAgent(
-        supervisor_session_id=supervisor_session_id,
+        supervisor_session_id=session_id,
         user_request=user_request,
         sub_agent_configs=sub_agent_configs or {},
         middlewares=middlewares or [],
         persist=persist_strategy,
         model=model,
         max_loop=max_loop,
+        registry=resolved_registry,
+        workflow_definitions=resolved_workflow_definitions,
+        workflow_profile=workflow_profile,
+        auto_run=auto_run,
     )
 
     # 注入 workflow_service，供 call_sub_agent 写入 DB

@@ -2,14 +2,13 @@
 Supervisor 功能验证脚本。
 
 覆盖范围：
-1. SupervisorAgent 工厂创建
-2. SupervisorAgent 核心属性
-3. 工具 Schema 注册
+1. create_supervisor 工厂创建
+2. 默认 registry / workflow 骨架
+3. 工具 schema 注册
 4. SupervisorContext / SupervisorSession
-5. call_sub_agent / call_reviewer / get_workflow_state 工具函数
+5. workflow graph 基本行为
 6. 流式事件类型
 7. ConcurrencyLimiter
-8. workflow_service DB 持久化链路（mock）
 """
 
 import asyncio
@@ -54,8 +53,15 @@ try:
     assert supervisor is not None
     assert hasattr(supervisor, "supervisor_session_id")
     assert supervisor.supervisor_session_id.startswith("sv-")
+    assert hasattr(supervisor, "registry")
+    assert supervisor.registry.agent_names() == [
+        "outline_agent",
+        "script_agent",
+        "storyboard_agent",
+    ]
     assert hasattr(supervisor, "_tool_ctx")
     assert supervisor._tool_ctx.get("workflow_service") is None
+    assert supervisor._tool_ctx.get("registry") is supervisor.registry
     green(f"create_supervisor() OK — session={supervisor.supervisor_session_id}")
 except Exception as e:
     red(f"create_supervisor() 失败: {e}")
@@ -88,6 +94,8 @@ try:
     assert hasattr(supervisor, "context")
     assert hasattr(supervisor.context, "user_request")
     assert supervisor.context.user_request == "生成一个科幻短片脚本"
+    assert supervisor.context.workflow is not None
+    assert supervisor.context.workflow.nodes["outline"].status == "ready"
     green("SupervisorContext 绑定 OK")
 
     assert hasattr(supervisor, "session")
@@ -120,35 +128,49 @@ try:
     call_sub_schema = next(s for s in schemas if s["name"] == "call_sub_agent")
     assert "sub_agent_name" in call_sub_schema["parameters"]["properties"]
     enum_vals = call_sub_schema["parameters"]["properties"]["sub_agent_name"]["enum"]
-    assert set(enum_vals) == {"outline_writer", "script_writer", "storyboarder"}
+    assert set(enum_vals) == {"outline_agent", "script_agent", "storyboard_agent"}
     green(f"call_sub_agent enum OK: {enum_vals}")
 except Exception as e:
     red(f"工具 Schema 检查失败: {e}")
 
 # ─────────────────────────────────────────────────────────────
-# 5. SupervisorContext
+# 5. SupervisorContext / Workflow
 # ─────────────────────────────────────────────────────────────
 section("5. SupervisorContext")
 
 try:
     from app.core.supervisor.context import SupervisorContext
+    from app.core.supervisor.workflow import WorkflowNodeDefinition, apply_node_update
 
     ctx = SupervisorContext(
         supervisor_session_id="sv-test-123",
         user_request="测试需求",
+        workflow_definitions=[
+            WorkflowNodeDefinition(
+                key="outline",
+                label="Outline",
+                node_type="text",
+                depends_on=[],
+            ),
+            WorkflowNodeDefinition(
+                key="script",
+                label="Script",
+                node_type="text",
+                depends_on=["outline"],
+            ),
+        ],
     )
 
     assert ctx.user_request == "测试需求"
-    assert ctx.current_phase == "init"
-    assert ctx.artifacts == {}
+    assert ctx.workflow is not None
+    assert ctx.workflow.nodes["outline"].status == "ready"
     assert ctx.review_history == []
-    ctx.current_phase = "outline"
-    assert ctx.current_phase == "outline"
-    ctx.artifacts["outline_writer"] = {"title": "大纲"}
-    assert ctx.artifacts["outline_writer"]["title"] == "大纲"
-    ctx.sub_agent_sessions["outline_writer"] = "sub-outline-abc123"
-    assert ctx.sub_agent_sessions["outline_writer"] == "sub-outline-abc123"
-    green("SupervisorContext 读写 OK")
+    apply_node_update(ctx.workflow, "outline", {"title": "大纲"}, updated_by="user")
+    assert ctx.workflow.nodes["outline"].version == 1
+    assert ctx.workflow.nodes["script"].status == "ready"
+    ctx.sub_agent_sessions["outline_agent"] = "sub-outline-abc123"
+    assert ctx.sub_agent_sessions["outline_agent"] == "sub-outline-abc123"
+    green("SupervisorContext / workflow graph 读写 OK")
 except Exception as e:
     red(f"SupervisorContext 失败: {e}")
     import traceback
@@ -163,11 +185,11 @@ try:
     from app.core.supervisor.session import SupervisorSession
 
     sess = SupervisorSession("sv-test-456")
-    sess.register_sub_session("script_writer", "sub-script-def456")
-    sub = sess.get_sub_session("script_writer")
+    sess.register_sub_session("script_agent", "sub-script-def456")
+    sub = sess.get_sub_session("script_agent")
     assert sub == "sub-script-def456"
     all_sessions = sess.get_all_sessions()
-    assert "script_writer" in all_sessions
+    assert "script_agent" in all_sessions
     green("SupervisorSession OK")
 except Exception as e:
     red(f"SupervisorSession 失败: {e}")
@@ -188,7 +210,7 @@ try:
 
     done = SupervisorDoneEvent(
         supervisor_session_id="sv-abc",
-        artifacts={"outline": {"title": "测试"}},
+        workflow={"profile": "default", "nodes": {}},
         final_result="完成",
     )
     assert done.supervisor_session_id == "sv-abc"
@@ -196,16 +218,16 @@ try:
     green("SupervisorDoneEvent OK")
 
     start = SubAgentStartEvent(
-        sub_agent_name="outline_writer",
+        sub_agent_name="outline_agent",
         session_id="sub-xyz",
         task_description="生成大纲",
     )
-    assert start.sub_agent_name == "outline_writer"
+    assert start.sub_agent_name == "outline_agent"
     assert start.type == "sub_agent_start"
     green("SubAgentStartEvent OK")
 
     end = SubAgentEndEvent(
-        sub_agent_name="outline_writer",
+        sub_agent_name="outline_agent",
         session_id="sub-xyz",
         result={"schema_data": {"title": "大纲"}},
     )
@@ -214,7 +236,7 @@ try:
 
     # ReviewEndEvent 需要 sub_agent_name
     review_end = ReviewEndEvent(
-        sub_agent_name="outline_writer",
+        sub_agent_name="outline_agent",
         score=8.5,
         passed=True,
         feedback="Good",
@@ -243,12 +265,12 @@ try:
         assert limiter.active_count() == 0
 
         # 获取一个 permit
-        permit = await limiter.acquire("outline_writer")
+        permit = await limiter.acquire("outline_agent")
         assert limiter.active_count() == 1
         green("acquire() + active_count OK")
 
         # 再获取一个
-        permit2 = await limiter.acquire("script_writer")
+        permit2 = await limiter.acquire("script_agent")
         assert limiter.active_count() == 2
 
         # 释放
@@ -274,13 +296,13 @@ try:
         SubAgentConcurrencyLimiter._instance = None
         limiter2 = SubAgentConcurrencyLimiter(max_concurrent=2, timeout_seconds=0.5)
         # 先获取两个 permit，把槽位占满
-        p1 = await limiter2.acquire("outline_writer")
-        p2 = await limiter2.acquire("script_writer")
+        p1 = await limiter2.acquire("outline_agent")
+        p2 = await limiter2.acquire("script_agent")
         assert limiter2.active_count() == 2
         green(f"已持有 2 个 permit，active={limiter2.active_count()}")
 
         # 第三个请求会阻塞，超时 0.5s
-        permit_blocked_task = asyncio.create_task(limiter2.acquire("storyboarder"))
+        permit_blocked_task = asyncio.create_task(limiter2.acquire("storyboard_agent"))
         await asyncio.sleep(0.05)
         assert not permit_blocked_task.done(), "任务不应在 50ms 内完成（应等待信号量）"
         green("50ms 内未完成（符合预期，信号量被占满）")
@@ -348,19 +370,36 @@ section("10. get_workflow_state 工具函数")
 try:
     from app.core.supervisor.tools import get_workflow_state
     from app.core.supervisor.context import SupervisorContext
+    from app.core.supervisor.workflow import WorkflowNodeDefinition, apply_node_update
 
-    ctx = SupervisorContext(supervisor_session_id="sv-state-test", user_request="test")
-    ctx.current_phase = "script"
-    ctx.artifacts["outline_writer"] = {"title": "测试大纲"}
-    ctx.sub_agent_sessions["outline_writer"] = "sub-outline-001"
+    ctx = SupervisorContext(
+        supervisor_session_id="sv-state-test",
+        user_request="test",
+        workflow_definitions=[
+            WorkflowNodeDefinition(
+                key="outline",
+                label="Outline",
+                node_type="text",
+                depends_on=[],
+            ),
+            WorkflowNodeDefinition(
+                key="script",
+                label="Script",
+                node_type="text",
+                depends_on=["outline"],
+            ),
+        ],
+    )
+    apply_node_update(ctx.workflow, "outline", {"title": "测试大纲"}, updated_by="user")
+    ctx.sub_agent_sessions["outline_agent"] = "sub-outline-001"
 
     state = asyncio.run(get_workflow_state(ctx))
 
-    assert state["current_phase"] == "script"
-    assert "outline_writer" in state["artifacts"]
-    assert "outline_writer" in state["sub_agent_sessions"]
-    assert state["sub_agent_sessions"]["outline_writer"] == "sub-outline-001"
-    green(f"get_workflow_state OK: current_phase={state['current_phase']}")
+    assert state["workflow"]["nodes"]["outline"]["version"] == 1
+    assert state["workflow"]["nodes"]["script"]["status"] == "ready"
+    assert "outline_agent" in state["sub_agent_sessions"]
+    assert state["sub_agent_sessions"]["outline_agent"] == "sub-outline-001"
+    green("get_workflow_state OK: workflow snapshot + sub_agent_sessions")
 except Exception as e:
     red(f"get_workflow_state 失败: {e}")
 
@@ -377,7 +416,12 @@ try:
     # 检查字段存在
     assert hasattr(SupervisorWorkflow, "user_request")
     assert hasattr(SupervisorWorkflow, "status")
-    assert hasattr(SupervisorWorkflow, "artifacts")
+    assert hasattr(SupervisorWorkflow, "workflow_snapshot")
+    assert hasattr(SupervisorWorkflow, "active_node_key")
+    assert hasattr(SupervisorWorkflow, "workflow_profile")
+    assert hasattr(SupervisorWorkflow, "auto_run")
+    assert not hasattr(SupervisorWorkflow, "artifacts")
+    assert not hasattr(SupervisorWorkflow, "current_stage")
     assert hasattr(SupervisorWorkflow, "final_result")
     green("SupervisorWorkflow 模型 OK")
 except Exception as e:
@@ -413,7 +457,7 @@ try:
             mock_wf = MagicMock(spec=SupervisorWorkflow)
             mock_wf.id = 42
             mock_wf.supervisor_session_id = "sv-verify-001"
-            mock_wf.artifacts = {}
+            mock_wf.workflow_snapshot = {}
 
             with patch.object(service.repo, "create", new_callable=AsyncMock) as mock_create:
                 mock_create.return_value = mock_wf
@@ -423,28 +467,36 @@ try:
                     supervisor_session_id="sv-verify-001",
                     user_request="验证脚本测试",
                     model="gemini-3-flash-preview",
+                    workflow_profile="default",
+                    auto_run=False,
                 )
                 green(f"create_workflow OK — id={wf.id}")
 
         with patch.object(service.repo, "get_by_session_id", new_callable=AsyncMock) as mock_get:
             mock_wf2 = MagicMock(spec=SupervisorWorkflow)
             mock_wf2.loop_count = 0
-            mock_wf2.artifacts = {}
-            mock_wf2.current_stage = ""
+            mock_wf2.workflow_snapshot = {}
+            mock_wf2.active_node_key = None
             mock_get.return_value = mock_wf2
 
-            await service.update_stage("sv-verify-001", "outline_writer")
-            green("update_stage OK")
+            await service.update_active_node("sv-verify-001", "outline")
+            green("update_active_node OK")
 
             count = await service.increment_loop_count("sv-verify-001")
             green(f"increment_loop_count OK — count={count}")
 
-            await service.append_artifacts("sv-verify-001", "outline_writer", {"title": "大纲"})
-            green("append_artifacts OK")
+            await service.save_workflow_snapshot(
+                "sv-verify-001",
+                {"profile": "default", "nodes": {"outline": {"status": "ready"}}},
+            )
+            green("save_workflow_snapshot OK")
 
             with patch.object(service.repo, "get_by_session_id", new_callable=AsyncMock) as mock_get2:
                 mock_wf3 = MagicMock(spec=SupervisorWorkflow)
-                mock_wf3.artifacts = {"outline_writer": {"title": "大纲"}}
+                mock_wf3.workflow_snapshot = {
+                    "profile": "default",
+                    "nodes": {"outline": {"status": "fresh"}},
+                }
                 mock_get2.return_value = mock_wf3
                 with patch.object(service.repo, "mark_completed", new_callable=AsyncMock) as mock_complete:
                     mock_wf4 = MagicMock()
@@ -496,7 +548,11 @@ try:
     from app.core.agent.base import ThinkingEvent, TextEvent
 
     events = [
-        SupervisorDoneEvent(supervisor_session_id="x", artifacts={}, final_result=""),
+        SupervisorDoneEvent(
+            supervisor_session_id="x",
+            workflow={"profile": "default", "nodes": {}},
+            final_result="",
+        ),
         SubAgentStartEvent(sub_agent_name="x", session_id="x", task_description="x"),
         SubAgentEndEvent(sub_agent_name="x", session_id="x", result={}),
         ReviewEndEvent(sub_agent_name="x", score=7.0, passed=True, feedback="", suggestions=[]),
@@ -518,18 +574,48 @@ section("15. call_sub_agent 工具函数（mock）")
 try:
     from app.core.supervisor.tools import call_sub_agent
     from app.core.supervisor.context import SupervisorContext
+    from app.core.agent.base import AgentResult, DoneEvent
+    from app.core.supervisor.workflow import WorkflowNodeDefinition
 
-    ctx = SupervisorContext(supervisor_session_id="sv-call-sub-test", user_request="test")
+    ctx = SupervisorContext(
+        supervisor_session_id="sv-call-sub-test",
+        user_request="test",
+        workflow_definitions=[
+            WorkflowNodeDefinition(
+                key="outline",
+                label="Outline",
+                node_type="text",
+                depends_on=[],
+            ),
+            WorkflowNodeDefinition(
+                key="script",
+                label="Script",
+                node_type="text",
+                depends_on=["outline"],
+            ),
+        ],
+    )
+
+    class _FakeAgent:
+        async def stream(self, initial_input: str):
+            yield DoneEvent(
+                result=AgentResult(
+                    agent_name="outline_agent",
+                    raw_output="outline result",
+                    finished=True,
+                )
+            )
 
     async def run_call_sub_agent():
         events = []
-        async for ev in call_sub_agent(
-            sub_agent_name="outline_writer",
-            task_description="生成一个简短的大纲",
-            context_snapshot='{"theme": "科幻"}',
-            supervisor_context=ctx,
-        ):
-            events.append(ev)
+        with patch("app.core.supervisor.tools.create_agent", return_value=_FakeAgent()):
+            async for ev in call_sub_agent(
+                sub_agent_name="outline_agent",
+                task_description="生成一个简短的大纲",
+                context_snapshot='{"theme": "科幻"}',
+                supervisor_context=ctx,
+            ):
+                events.append(ev)
 
         # 应该至少有 SubAgentStart, 若干事件, SubAgentEnd
         event_types = [type(e).__name__ for e in events]
@@ -538,8 +624,11 @@ try:
         green(f"call_sub_agent 返回事件类型: {set(event_types)}")
 
         # 验证 context 被更新
-        assert "outline_writer" in ctx.sub_agent_sessions
-        green(f"sub_agent_session 记录: {ctx.sub_agent_sessions['outline_writer']}")
+        assert "outline_agent" in ctx.sub_agent_sessions
+        green(f"sub_agent_session 记录: {ctx.sub_agent_sessions['outline_agent']}")
+        assert ctx.workflow is not None
+        assert ctx.workflow.nodes["outline"].version == 1
+        green(f"workflow 节点版本: outline={ctx.workflow.nodes['outline'].version}")
 
     asyncio.run(run_call_sub_agent())
 except Exception as e:

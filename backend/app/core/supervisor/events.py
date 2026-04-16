@@ -57,7 +57,7 @@ class SupervisorDoneEvent(BaseModel):
     """Supervisor 流水线执行完毕。"""
     type: Literal["supervisor_done"] = "supervisor_done"
     supervisor_session_id: str
-    artifacts: Dict[str, Any]
+    workflow: Dict[str, Any]
     final_result: str
     source: str = "supervisor"
 

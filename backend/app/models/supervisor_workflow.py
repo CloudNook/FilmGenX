@@ -4,7 +4,7 @@ Supervisor Workflow 流水线记录表。
 存储每次 Supervisor 流水线的执行元数据：
   - 关联项目 / 用户
   - supervisor_session_id（映射到 SupervisorContext）
-  - 最终产物（artifacts JSON）
+  - 版本化 workflow 快照
   - 执行状态和统计
 """
 
@@ -26,7 +26,7 @@ class SupervisorWorkflow(Base):
     Supervisor 流水线执行记录。
 
     每发起一次 /api/v1/supervisor/stream 产生一条记录，
-    流水线结束后更新 status / artifacts / final_result。
+    流水线结束后更新 status / workflow_snapshot / final_result。
     """
 
     __tablename__ = "supervisor_workflows"
@@ -68,10 +68,24 @@ class SupervisorWorkflow(Base):
         index=True,
         comment="running | completed | failed",
     )
-    current_stage: Mapped[Optional[str]] = mapped_column(
-        String(50),
+    workflow_profile: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        default="default",
+        server_default="default",
+        comment="工作流配置名称",
+    )
+    auto_run: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+        comment="是否按建议自动继续执行",
+    )
+    active_node_key: Mapped[Optional[str]] = mapped_column(
+        String(100),
         nullable=True,
-        comment="当前阶段：outline_writer | script_writer | storyboarder",
+        comment="当前活跃节点 key",
     )
     loop_count: Mapped[int] = mapped_column(
         Integer,
@@ -85,10 +99,10 @@ class SupervisorWorkflow(Base):
         default=0,
         comment="累计消耗 token 数",
     )
-    artifacts: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+    workflow_snapshot: Mapped[Optional[Dict[str, Any]]] = mapped_column(
         JSON,
         nullable=True,
-        comment="流水线产物（outline / script / storyboard JSON）",
+        comment="版本化 workflow 快照",
     )
     final_result: Mapped[Optional[str]] = mapped_column(
         Text,

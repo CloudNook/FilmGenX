@@ -4,13 +4,12 @@ SupervisorWorkflow 业务逻辑层。
 封装流水线记录的业务操作：
 - create_workflow: 创建流水线记录
 - update_status: 更新执行状态
-- update_stage: 更新当前阶段
-- append_artifacts: 追加产物
+- update_active_node: 更新当前活跃节点
+- save_workflow_snapshot: 持久化工作流快照
 - get_workflow: 查询详情
 - list_workflows: 分页查询
 """
 
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +37,10 @@ class SupervisorWorkflowService:
         supervisor_session_id: str,
         user_request: str,
         model: str = "gemini-3-flash-preview",
+        workflow_profile: str = "default",
+        auto_run: bool = False,
+        hitl_enabled: bool = False,
+        review_nodes: Optional[List[str]] = None,
     ) -> SupervisorWorkflow:
         """
         创建一条新的流水线记录（初始状态 = running）。
@@ -61,25 +64,27 @@ class SupervisorWorkflowService:
             user_request=user_request,
             model=model,
             status="running",
+            workflow_profile=workflow_profile,
+            auto_run=auto_run,
+            hitl_enabled=hitl_enabled,
+            review_nodes=review_nodes,
         )
         await self.db.commit()
         await self.db.refresh(workflow)
         return workflow
 
-    async def update_stage(
+    async def update_active_node(
         self,
         supervisor_session_id: str,
-        stage: str,
+        active_node_key: Optional[str],
     ) -> Optional[SupervisorWorkflow]:
         """
-        更新当前流水线阶段。
-
-        阶段值：outline_writer | script_writer | storyboarder
+        更新当前 workflow 的活跃节点。
         """
         workflow = await self.repo.get_by_session_id(supervisor_session_id)
         if not workflow:
             return None
-        workflow.current_stage = stage
+        workflow.active_node_key = active_node_key
         await self.db.commit()
         await self.db.refresh(workflow)
         return workflow
@@ -129,25 +134,23 @@ class SupervisorWorkflowService:
         await self.db.refresh(workflow)
         return workflow
 
-    async def append_artifacts(
+    async def save_workflow_snapshot(
         self,
         supervisor_session_id: str,
-        stage: str,
-        artifact: Dict[str, Any],
+        workflow_snapshot: Dict[str, Any],
+        active_node_key: Optional[str] = None,
     ) -> Optional[SupervisorWorkflow]:
         """
-        追加阶段产物到 artifacts JSON。
-
-        artifacts 结构：{"outline_writer": {...}, "script_writer": {...}, "storyboarder": {...}}
+        保存 workflow 快照，并更新当前活跃节点。
         """
         workflow = await self.repo.get_by_session_id(supervisor_session_id)
         if not workflow:
             return None
 
-        if workflow.artifacts is None:
-            workflow.artifacts = {}
-        workflow.artifacts[stage] = artifact
-        workflow.current_stage = stage
+        workflow.workflow_snapshot = workflow_snapshot
+        workflow.active_node_key = active_node_key or self._infer_active_node_key(
+            workflow_snapshot
+        )
         await self.db.commit()
         await self.db.refresh(workflow)
         return workflow
@@ -163,7 +166,7 @@ class SupervisorWorkflowService:
             return None
         return await self.repo.mark_completed(
             workflow,
-            artifacts=workflow.artifacts,
+            workflow_snapshot=workflow.workflow_snapshot,
             final_result=final_result,
         )
 
@@ -218,3 +221,33 @@ class SupervisorWorkflowService:
             page_size=page_size,
             status=status,
         )
+
+    @staticmethod
+    def _infer_active_node_key(
+        workflow_snapshot: Optional[Dict[str, Any]],
+    ) -> Optional[str]:
+        """Infer the most actionable node from a workflow snapshot."""
+        if not isinstance(workflow_snapshot, dict):
+            return None
+
+        suggested_actions = workflow_snapshot.get("suggested_actions")
+        if isinstance(suggested_actions, list):
+            for action in suggested_actions:
+                if isinstance(action, dict) and action.get("node_key"):
+                    return str(action["node_key"])
+
+        nodes = workflow_snapshot.get("nodes")
+        if not isinstance(nodes, dict):
+            return None
+
+        for desired_status in (
+            "running",
+            "pending_confirmation",
+            "ready",
+            "stale",
+        ):
+            for node_key, node in nodes.items():
+                if isinstance(node, dict) and node.get("status") == desired_status:
+                    return str(node_key)
+
+        return None

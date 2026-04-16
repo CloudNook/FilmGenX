@@ -1,12 +1,30 @@
 """
 Supervisor 模块。
 
-Supervisor Agent 负责动态调度 SubAgent（大纲/剧本/分镜），
-通过 call_sub_agent / call_reviewer / get_workflow_state 工具驱动流水线。
+重构后的 Supervisor 是高层工作流编排器：
+- 用版本化工作流快照管理节点状态
+- 用 registry 管理可插拔专家 Agent
+- 继续复用底层 Agent runtime
 """
 
 from app.core.supervisor.context import SupervisorContext, ReviewEntry
 from app.core.supervisor.session import SupervisorSession
+from app.core.supervisor.registry import (
+    RegisteredAgent,
+    SupervisorAgentRegistry,
+    build_default_registry,
+    build_default_workflow_definitions,
+)
+from app.core.supervisor.workflow import (
+    SuggestedAction,
+    WorkflowNodeDefinition,
+    WorkflowNodeState,
+    WorkflowSnapshot,
+    apply_node_update,
+    build_suggested_actions,
+    build_workflow_snapshot,
+    confirm_node,
+)
 from app.core.supervisor.events import (
     SubAgentStartEvent,
     SubAgentEndEvent,
@@ -30,6 +48,18 @@ __all__ = [
     "SupervisorContext",
     "ReviewEntry",
     "SupervisorSession",
+    "RegisteredAgent",
+    "SupervisorAgentRegistry",
+    "WorkflowNodeDefinition",
+    "WorkflowNodeState",
+    "WorkflowSnapshot",
+    "SuggestedAction",
+    "build_default_registry",
+    "build_default_workflow_definitions",
+    "build_workflow_snapshot",
+    "build_suggested_actions",
+    "apply_node_update",
+    "confirm_node",
     # Events
     "SubAgentStartEvent",
     "SubAgentEndEvent",

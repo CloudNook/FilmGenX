@@ -1491,6 +1491,13 @@ export async function readAgentSSEStream(
   response: Response,
   onEvent: (event: AgentSSEEvent) => void,
 ): Promise<void> {
+  await readJsonSSEStream(response, onEvent);
+}
+
+async function readJsonSSEStream<T>(
+  response: Response,
+  onEvent: (event: T) => void,
+): Promise<void> {
   const reader = response.body?.getReader();
   if (!reader) throw new Error('No response body');
 
@@ -1509,12 +1516,209 @@ export async function readAgentSSEStream(
       const trimmed = line.trim();
       if (!trimmed || !trimmed.startsWith('data: ')) continue;
       const raw = trimmed.slice(6);
+      if (raw === '[DONE]') continue;
       try {
-        const event = JSON.parse(raw) as AgentSSEEvent;
+        const event = JSON.parse(raw) as T;
         onEvent(event);
       } catch {
         // 忽略解析失败的行
       }
     }
   }
+}
+
+export interface SupervisorWorkflowSummaryResponse {
+  id: number;
+  project_id: number;
+  owner_id: number;
+  supervisor_session_id: string;
+  user_request: string;
+  model: string;
+  status: string;
+  workflow_profile: string;
+  auto_run: boolean;
+  active_node_key: string | null;
+  loop_count: number;
+  total_tokens: number;
+  final_result: string | null;
+  error_message: string | null;
+  hitl_enabled: boolean;
+  review_nodes: string[] | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SupervisorWorkflowDetailResponse extends SupervisorWorkflowSummaryResponse {
+  workflow_snapshot: Record<string, unknown> | null;
+}
+
+export interface SupervisorInterruptStateResponse {
+  status: string;
+  interrupt: {
+    tool_name: string | null;
+    arguments: Record<string, unknown>;
+    context: Record<string, unknown>;
+  } | null;
+  workflow: Record<string, unknown> | null;
+}
+
+export type SupervisorSSEEvent =
+  | {
+      type: 'supervisor_started';
+      workflow_id: number;
+      supervisor_session_id: string;
+      status: string;
+      workflow_profile: string;
+      auto_run: boolean;
+    }
+  | { type: 'thinking'; content: string; source?: string }
+  | { type: 'text'; content: string; source?: string }
+  | {
+      type: 'tool_start';
+      tool_call_id: string;
+      tool_name: string;
+      arguments: Record<string, unknown>;
+      source?: string;
+    }
+  | {
+      type: 'tool_end';
+      tool_call_id: string;
+      tool_name: string;
+      result: unknown;
+      is_error: boolean;
+      source?: string;
+    }
+  | {
+      type: 'interrupt';
+      session_id: string;
+      tool_name: string;
+      tool_call_id: string;
+      arguments: Record<string, unknown>;
+      available_actions: string[];
+      context: Record<string, unknown>;
+      source?: string;
+    }
+  | {
+      type: 'sub_agent_start';
+      sub_agent_name: string;
+      session_id: string;
+      task_description: string;
+      source?: string;
+    }
+  | {
+      type: 'sub_agent_end';
+      sub_agent_name: string;
+      session_id: string;
+      result: Record<string, unknown>;
+      review_result?: Record<string, unknown> | null;
+      source?: string;
+    }
+  | {
+      type: 'review_start';
+      sub_agent_name: string;
+      criteria: string[];
+      source?: string;
+    }
+  | {
+      type: 'review_end';
+      sub_agent_name: string;
+      score: number;
+      passed: boolean;
+      feedback: string;
+      suggestions?: string[] | null;
+      source?: string;
+    }
+  | {
+      type: 'supervisor_done';
+      supervisor_session_id: string;
+      workflow: Record<string, unknown>;
+      final_result: string;
+      source?: string;
+    }
+  | { type: 'error'; error: string; source?: string };
+
+export const supervisorApi = {
+  list(projectId: number, page = 1, pageSize = 20) {
+    return request<PageResponse<SupervisorWorkflowSummaryResponse>>(
+      `/supervisor/projects/${projectId}/workflows?page=${page}&page_size=${pageSize}`,
+      { method: 'GET' },
+    );
+  },
+
+  get(projectId: number, workflowId: number) {
+    return request<SupervisorWorkflowDetailResponse>(
+      `/supervisor/projects/${projectId}/workflows/${workflowId}`,
+      { method: 'GET' },
+    );
+  },
+
+  start(
+    projectId: number,
+    userRequest: string,
+    options?: {
+      model?: string;
+      maxLoop?: number;
+      workflowProfile?: string;
+      autoRun?: boolean;
+      humanReview?: boolean;
+      reviewNodes?: string[];
+    },
+  ) {
+    const token = getToken();
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    return fetch(`${BASE_URL}/supervisor/stream`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        project_id: projectId,
+        user_request: userRequest,
+        model: options?.model,
+        max_loop: options?.maxLoop,
+        workflow_profile: options?.workflowProfile,
+        auto_run: options?.autoRun,
+        human_review: options?.humanReview,
+        review_nodes: options?.reviewNodes,
+      }),
+    });
+  },
+
+  state(sessionId: string) {
+    return request<SupervisorInterruptStateResponse>(
+      `/supervisor/${sessionId}/state`,
+      { method: 'GET' },
+    );
+  },
+
+  resume(
+    sessionId: string,
+    action: 'approve' | 'reject',
+    feedback?: string,
+  ) {
+    const token = getToken();
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    return fetch(`${BASE_URL}/supervisor/${sessionId}/resume`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        action,
+        feedback,
+      }),
+    });
+  },
+};
+
+export async function readSupervisorSSEStream(
+  response: Response,
+  onEvent: (event: SupervisorSSEEvent) => void,
+): Promise<void> {
+  await readJsonSSEStream(response, onEvent);
 }

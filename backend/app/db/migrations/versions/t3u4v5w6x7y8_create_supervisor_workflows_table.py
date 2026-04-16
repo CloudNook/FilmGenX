@@ -22,6 +22,10 @@ def upgrade() -> None:
     op.create_table(
         "supervisor_workflows",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
+        sa.Column("is_deleted", sa.Boolean(), nullable=False, server_default=sa.text("false")),
+        sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("project_id", sa.Integer(), sa.ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True),
         sa.Column("owner_id", sa.Integer(), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True),
         sa.Column("supervisor_session_id", sa.String(100), nullable=False, unique=True, index=True),

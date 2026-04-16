@@ -20,21 +20,21 @@ from app.core.agent.base import (
     ErrorEvent,
 )
 from app.core.supervisor.context import SupervisorContext
+from app.core.supervisor.registry import SupervisorAgentRegistry, build_default_registry
 from app.core.supervisor.reviewer import build_reviewer_prompt
+from app.core.supervisor.workflow import apply_node_update
 from app.core.tools.registry import register_tool
 
 logger = logging.getLogger(__name__)
 
-SUB_AGENT_NAMES = {"outline_writer", "script_writer", "storyboarder"}
-
-
-def _build_call_sub_agent_schema() -> Dict[str, Any]:
+def _build_call_sub_agent_schema(agent_names: Optional[List[str]] = None) -> Dict[str, Any]:
+    available_names = agent_names or build_default_registry().agent_names()
     return {
         "name": "call_sub_agent",
         "description": (
             "调用指定的 SubAgent 执行任务，实时返回流式事件。\n"
             "Args:\n"
-            "  sub_agent_name: SubAgent 名称，可选值：outline_writer | script_writer | storyboarder\n"
+            f"  sub_agent_name: SubAgent 名称，可选值：{' | '.join(available_names)}\n"
             "  task_description: 给 SubAgent 的具体任务描述（包含角色定义 + 任务 + 参考产物）\n"
             "  context_snapshot: 前序 SubAgent 产物的 JSON 字符串（选择性注入上下文）\n"
             "Returns: 流式事件（SubAgentStart → Thinking/Text/ToolStart/ToolEnd → SubAgentEnd）\n"
@@ -44,8 +44,8 @@ def _build_call_sub_agent_schema() -> Dict[str, Any]:
             "properties": {
                 "sub_agent_name": {
                     "type": "string",
-                    "description": "SubAgent 名称：outline_writer | script_writer | storyboarder",
-                    "enum": list(SUB_AGENT_NAMES),
+                    "description": f"SubAgent 名称：{' | '.join(available_names)}",
+                    "enum": available_names,
                 },
                 "task_description": {
                     "type": "string",
@@ -66,7 +66,7 @@ def _build_call_sub_agent_schema() -> Dict[str, Any]:
     description=(
         "调用指定的 SubAgent 执行任务，实时返回流式事件。\n"
         "Args:\n"
-        "  sub_agent_name: SubAgent 名称，可选值：outline_writer | script_writer | storyboarder\n"
+        "  sub_agent_name: SubAgent 名称，由当前 registry 决定\n"
         "  task_description: 给 SubAgent 的具体任务描述（包含角色定义 + 任务 + 参考产物）\n"
         "  context_snapshot: 前序 SubAgent 产物的 JSON 字符串（选择性注入上下文）\n"
         "Returns: 流式事件（SubAgentStart → Thinking/Text/ToolStart/ToolEnd → SubAgentEnd）\n"
@@ -77,6 +77,7 @@ async def call_sub_agent(
     task_description: str,
     context_snapshot: str = "",
     supervisor_context: Optional[SupervisorContext] = None,
+    registry: Optional[SupervisorAgentRegistry] = None,
     db=None,
     workflow_service=None,
 ) -> AsyncGenerator:
@@ -90,7 +91,9 @@ async def call_sub_agent(
     """
     from app.core.supervisor.events import SubAgentStartEvent, SubAgentEndEvent
 
-    if sub_agent_name not in SUB_AGENT_NAMES:
+    active_registry = registry or build_default_registry()
+    registered = active_registry.get(sub_agent_name)
+    if registered is None:
         yield SubAgentEndEvent(
             sub_agent_name=sub_agent_name,
             session_id="",
@@ -108,13 +111,19 @@ async def call_sub_agent(
         agent_name=sub_agent_name,
         session_id=sub_session_id,
         prompt="",
-        model="gemini-3-flash-preview",
+        model=registered.model,
+        tools=registered.tools,
+        skill_names=registered.skill_names,
         max_loop=20,
         persist="redis",
     )
 
     if supervisor_context is not None:
         supervisor_context.sub_agent_sessions[sub_agent_name] = sub_session_id
+        if supervisor_context.workflow is not None:
+            for node_key in registered.node_keys:
+                if node_key in supervisor_context.workflow.nodes:
+                    supervisor_context.workflow.nodes[node_key].status = "running"
 
     logger.info(
         f"[call_sub_agent] starting sub_agent={sub_agent_name}, "
@@ -156,8 +165,22 @@ async def call_sub_agent(
                     "sub_agent_name": sub_agent_name,
                 }
                 if supervisor_context is not None:
-                    supervisor_context.artifacts[sub_agent_name] = (
-                        event.result.raw_output
+                    if supervisor_context.workflow is not None:
+                        for node_key in registered.node_keys:
+                            if node_key in supervisor_context.workflow.nodes:
+                                apply_node_update(
+                                    supervisor_context.workflow,
+                                    node_key,
+                                    {"output": event.result.raw_output or ""},
+                                    updated_by="agent",
+                                    last_agent=sub_agent_name,
+                                )
+                    supervisor_context.execution_history.append(
+                        {
+                            "agent_name": sub_agent_name,
+                            "session_id": sub_session_id,
+                            "status": "completed",
+                        }
                     )
                 logger.info(
                     f"[call_sub_agent] completed sub_agent={sub_agent_name}"
@@ -170,13 +193,16 @@ async def call_sub_agent(
     # SubAgent 执行完毕后，写入 DB
     if workflow_service is not None and supervisor_context is not None:
         try:
-            await workflow_service.append_artifacts(
+            await workflow_service.save_workflow_snapshot(
                 supervisor_session_id=supervisor_context.supervisor_session_id,
-                stage=sub_agent_name,
-                artifact=accumulated_result.get("output") or {},
+                workflow_snapshot=(
+                    supervisor_context.workflow.model_dump()
+                    if supervisor_context.workflow is not None
+                    else {}
+                ),
             )
         except Exception as e:
-            logger.warning(f"[call_sub_agent] failed to persist artifacts: {e}")
+            logger.warning(f"[call_sub_agent] failed to persist workflow snapshot: {e}")
 
     yield SubAgentEndEvent(
         sub_agent_name=sub_agent_name,
@@ -294,8 +320,8 @@ def _build_get_workflow_state_schema() -> Dict[str, Any]:
     return {
         "name": "get_workflow_state",
         "description": (
-            "查询当前流水线状态和已有产物。\n"
-            "Returns: {current_phase, artifacts, review_history}\n"
+            "查询当前工作流状态。\n"
+            "Returns: {workflow, review_history, execution_history, sub_agent_sessions, auto_run}\n"
         ),
         "parameters": {
             "type": "object",
@@ -308,8 +334,8 @@ def _build_get_workflow_state_schema() -> Dict[str, Any]:
 @register_tool(
     name="get_workflow_state",
     description=(
-        "查询当前流水线状态（Supervisor 决策参考）。\n"
-        "Returns: {current_phase, artifacts, review_history, sub_agent_sessions}\n"
+        "查询当前工作流状态（Supervisor 决策参考）。\n"
+        "Returns: {workflow, review_history, execution_history, sub_agent_sessions, auto_run}\n"
     ),
 )
 async def get_workflow_state(
@@ -322,19 +348,24 @@ async def get_workflow_state(
     注意：此工具是给 Supervisor 用的，不是给 SubAgent 用的。
     """
     return {
-        "current_phase": supervisor_context.current_phase,
-        "artifacts": supervisor_context.artifacts,
+        "workflow": (
+            supervisor_context.workflow.model_dump()
+            if supervisor_context.workflow is not None
+            else None
+        ),
         "review_history": [
             r.model_dump() for r in supervisor_context.review_history
         ],
-        "sub_agent_sessions": supervisor_context.sub_agent_sessions,
+        "sub_agent_sessions": dict(supervisor_context.sub_agent_sessions),
+        "execution_history": list(supervisor_context.execution_history),
+        "auto_run": supervisor_context.auto_run,
     }
 
 
-def get_supervisor_tool_schemas() -> List[Dict[str, Any]]:
+def get_supervisor_tool_schemas(agent_names: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """返回所有 Supervisor 工具的 schema 列表。"""
     return [
-        _build_call_sub_agent_schema(),
+        _build_call_sub_agent_schema(agent_names),
         _build_call_reviewer_schema(),
         _build_get_workflow_state_schema(),
     ]
