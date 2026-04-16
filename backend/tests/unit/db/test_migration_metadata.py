@@ -96,3 +96,26 @@ def test_add_supervisor_workflow_base_columns_migration_backfills_missing_column
         "deleted_at",
     ]
     assert created_indexes == ["ix_supervisor_workflows_is_deleted"]
+
+
+def test_drop_agent_interrupt_state_migration_removes_legacy_table(monkeypatch):
+    migration = load_migration_module(
+        "w6x7y8z9a0b_drop_agent_interrupt_state_table.py"
+    )
+    dropped_tables: list[str] = []
+
+    class FakeInspector:
+        def get_table_names(self):
+            return ["agent_interrupt_state", "supervisor_workflows"]
+
+    monkeypatch.setattr(migration.op, "get_bind", lambda: object())
+    monkeypatch.setattr(migration.sa, "inspect", lambda bind: FakeInspector())
+    monkeypatch.setattr(
+        migration.op,
+        "drop_table",
+        lambda table_name: dropped_tables.append(table_name),
+    )
+
+    migration.upgrade()
+
+    assert dropped_tables == ["agent_interrupt_state"]
