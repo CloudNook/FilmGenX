@@ -7,6 +7,25 @@
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL || '/api/v1';
 
+function resolveStreamingBaseUrl(): string {
+  if (process.env.NEXT_PUBLIC_API_URL) {
+    return process.env.NEXT_PUBLIC_API_URL;
+  }
+
+  if (typeof window !== 'undefined') {
+    const { protocol, hostname } = window.location;
+    if (hostname === 'localhost' || hostname === '127.0.0.1') {
+      return `${protocol}//${hostname}:8000/api/v1`;
+    }
+  }
+
+  return BASE_URL;
+}
+
+function buildStreamingUrl(path: string): string {
+  return `${resolveStreamingBaseUrl()}${path}`;
+}
+
 // ---------------------------------------------------------------------------
 // Token 管理（localStorage）
 // ---------------------------------------------------------------------------
@@ -494,7 +513,7 @@ export const conversationsApi = {
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
     return fetch(
-      `${BASE_URL}/projects/${projectId}/conversations/${conversationId}/chat`,
+      buildStreamingUrl(`/projects/${projectId}/conversations/${conversationId}/chat`),
       {
         method: 'POST',
         headers,
@@ -512,7 +531,7 @@ export const conversationsApi = {
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
     return fetch(
-      `${BASE_URL}/projects/${projectId}/conversations/${conversationId}/summarize`,
+      buildStreamingUrl(`/projects/${projectId}/conversations/${conversationId}/summarize`),
       {
         method: 'POST',
         headers,
@@ -1453,7 +1472,7 @@ export const workspacesApi = {
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
     return fetch(
-      `${BASE_URL}/projects/${projectId}/workspaces/${workspaceId}/chat`,
+      buildStreamingUrl(`/projects/${projectId}/workspaces/${workspaceId}/chat`),
       {
         method: 'POST',
         headers,
@@ -1476,7 +1495,7 @@ export const workspacesApi = {
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
     return fetch(
-      `${BASE_URL}/projects/${projectId}/workspaces/${workspaceId}/chat`,
+      buildStreamingUrl(`/projects/${projectId}/workspaces/${workspaceId}/chat`),
       {
         method: 'POST',
         headers,
@@ -1551,6 +1570,7 @@ export interface SupervisorWorkflowSummaryResponse {
 
 export interface SupervisorWorkflowDetailResponse extends SupervisorWorkflowSummaryResponse {
   workflow_snapshot: Record<string, unknown> | null;
+  event_history: SupervisorSSEEvent[];
 }
 
 export interface SupervisorInterruptStateResponse {
@@ -1572,14 +1592,15 @@ export type SupervisorSSEEvent =
       workflow_profile: string;
       auto_run: boolean;
     }
-  | { type: 'thinking'; content: string; source?: string }
-  | { type: 'text'; content: string; source?: string }
+  | { type: 'thinking'; content: string; source?: string; session_id?: string }
+  | { type: 'text'; content: string; source?: string; session_id?: string }
   | {
       type: 'tool_start';
       tool_call_id: string;
       tool_name: string;
       arguments: Record<string, unknown>;
       source?: string;
+      session_id?: string;
     }
   | {
       type: 'tool_end';
@@ -1588,6 +1609,7 @@ export type SupervisorSSEEvent =
       result: unknown;
       is_error: boolean;
       source?: string;
+      session_id?: string;
     }
   | {
       type: 'interrupt';
@@ -1636,7 +1658,8 @@ export type SupervisorSSEEvent =
       final_result: string;
       source?: string;
     }
-  | { type: 'error'; error: string; source?: string };
+  | { type: 'user_message'; content: string; timestamp?: string | null }
+  | { type: 'error'; error: string; source?: string; session_id?: string };
 
 export const supervisorApi = {
   list(projectId: number, page = 1, pageSize = 20) {
@@ -1653,10 +1676,12 @@ export const supervisorApi = {
     );
   },
 
-  start(
+  chat(
     projectId: number,
-    userRequest: string,
+    content: string,
     options?: {
+      sessionId?: string;
+      resume?: { action: 'approve' | 'reject'; feedback?: string };
       model?: string;
       maxLoop?: number;
       workflowProfile?: string;
@@ -1671,12 +1696,13 @@ export const supervisorApi = {
     };
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
-    return fetch(`${BASE_URL}/supervisor/stream`, {
+    return fetch(buildStreamingUrl(`/supervisor/projects/${projectId}/chat`), {
       method: 'POST',
       headers,
       body: JSON.stringify({
-        project_id: projectId,
-        user_request: userRequest,
+        content,
+        session_id: options?.sessionId,
+        resume: options?.resume,
         model: options?.model,
         max_loop: options?.maxLoop,
         workflow_profile: options?.workflowProfile,
@@ -1695,23 +1721,17 @@ export const supervisorApi = {
   },
 
   resume(
+    projectId: number,
     sessionId: string,
     action: 'approve' | 'reject',
     feedback?: string,
   ) {
-    const token = getToken();
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-    if (token) headers['Authorization'] = `Bearer ${token}`;
-
-    return fetch(`${BASE_URL}/supervisor/${sessionId}/resume`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
+    return this.chat(projectId, '', {
+      sessionId,
+      resume: {
         action,
         feedback,
-      }),
+      },
     });
   },
 };

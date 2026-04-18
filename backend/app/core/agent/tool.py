@@ -1,11 +1,4 @@
-"""
-Tool 执行器。
-
-负责：
-- 根据 tool_call 查找对应工具
-- 执行工具并返回结果
-- 处理执行错误
-"""
+"""Tool execution utilities for agent tool calls."""
 
 import asyncio
 import logging
@@ -15,14 +8,11 @@ from app.core.agent.base import ToolCall, ToolEndEvent, ToolExecutionResult, Too
 from app.core.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
+_RUNNER_DONE = object()
 
 
 class ToolExecutor:
-    """
-    Tool 执行器。
-
-    根据 tool_call 查找并执行对应工具。
-    """
+    """Resolves registered tools and executes them."""
 
     def __init__(self, extra_kwargs: Optional[Dict[str, Any]] = None):
         self.extra_kwargs = extra_kwargs or {}
@@ -34,17 +24,14 @@ class ToolExecutor:
         self, tool_call: ToolCall
     ) -> AsyncGenerator[ToolEndEvent, None]:
         """
-        执行单次工具调用。
+        Execute a single tool call.
 
-        对于返回 AsyncGenerator 的工具（如 call_sub_agent），本方法会 yield
-        工具产生的所有中间事件，最后 yield ToolEndEvent。
-
-        Yields:
-            ToolEndEvent — 工具执行结果（含 result / is_error）
+        Streaming tools may yield intermediate events before a final
+        ``ToolEndEvent`` is produced.
         """
         tool_func = self.get_tool(tool_call.name)
         if tool_func is None:
-            logger.warning(f"Tool '{tool_call.name}' not found")
+            logger.warning("Tool '%s' not found", tool_call.name)
             yield ToolEndEvent(
                 tool_call_id=tool_call.id,
                 tool_name=tool_call.name,
@@ -55,6 +42,7 @@ class ToolExecutor:
 
         kwargs = dict(tool_call.arguments)
         import inspect
+
         tool_params = set(inspect.signature(tool_func.func).parameters)
         for k, v in self.extra_kwargs.items():
             if k not in kwargs and k in tool_params:
@@ -64,13 +52,11 @@ class ToolExecutor:
             raw_result = await tool_func.execute(**kwargs)
 
             if hasattr(raw_result, "__aiter__"):
-                # 工具返回 AsyncGenerator：yield 所有中间事件，最后补 ToolEndEvent
                 last_event = None
                 async for event in raw_result:
                     yield event
                     last_event = event
-                # async generator 工具可能不产出 ToolEndEvent，
-                # 但 execute_all 需要它来构建 tool_results，必须补一个
+
                 if not isinstance(last_event, ToolEndEvent):
                     result = None
                     if last_event is not None and hasattr(last_event, "result"):
@@ -82,7 +68,6 @@ class ToolExecutor:
                         is_error=False,
                     )
             else:
-                # 工具返回同步结果
                 yield ToolEndEvent(
                     tool_call_id=tool_call.id,
                     tool_name=tool_call.name,
@@ -90,7 +75,7 @@ class ToolExecutor:
                     is_error=False,
                 )
         except Exception as e:
-            logger.exception(f"Tool '{tool_call.name}' execution failed: {e}")
+            logger.exception("Tool '%s' execution failed: %s", tool_call.name, e)
             yield ToolEndEvent(
                 tool_call_id=tool_call.id,
                 tool_name=tool_call.name,
@@ -104,68 +89,55 @@ class ToolExecutor:
         concurrency: int = 4,
     ) -> AsyncGenerator[ToolEndEvent | ToolExecutionResult, None]:
         """
-        批量执行工具调用，支持并发控制。
+        Execute tool calls concurrently and stream events as they arrive.
 
-        Yields:
-            ToolEndEvent         — 工具执行完毕事件，流式实时产出
-            ToolExecutionResult  — 全部工具执行完毕后最后产出，供调用方收集结果
+        The shared queue acts as an event bus for all running tool tasks, so
+        long-lived streaming tools can push intermediate events immediately.
         """
         semaphore = asyncio.Semaphore(concurrency)
         tc_list = list(tool_calls)
-        n = len(tc_list)
-        tool_results: List[ToolResult] = [None] * n
-        queues: List[asyncio.Queue] = [asyncio.Queue() for _ in range(n)]
-        done_events: List[asyncio.Event] = [asyncio.Event() for _ in range(n)]
+        tool_results: List[Optional[ToolResult]] = [None] * len(tc_list)
+        event_bus: asyncio.Queue = asyncio.Queue()
 
         async def _runner(idx: int, tc: ToolCall):
-            async with semaphore:
-                async for ev in self.execute_tool_call(tc):
-                    await queues[idx].put(ev)
-                done_events[idx].set()
+            try:
+                async with semaphore:
+                    async for ev in self.execute_tool_call(tc):
+                        await event_bus.put((idx, ev))
+            finally:
+                await event_bus.put((idx, _RUNNER_DONE))
 
-        # 启动所有任务
-        pending: set[asyncio.Task] = {
-            asyncio.create_task(_runner(i, tc)) for i, tc in enumerate(tc_list)
-        }
+        tasks = [
+            asyncio.create_task(_runner(i, tc))
+            for i, tc in enumerate(tc_list)
+        ]
 
-        # 等待所有任务完成，同时 yield 事件
-        while pending:
-            done, pending = await asyncio.wait(
-                pending, return_when=asyncio.FIRST_COMPLETED
-            )
-            for i, evt in enumerate(done_events):
-                if evt.is_set():
-                    evt.clear()
-                    while not queues[i].empty():
-                        try:
-                            ev = queues[i].get_nowait()
-                            yield ev
-                            if isinstance(ev, ToolEndEvent):
-                                tool_results[i] = ToolResult(
-                                    tool_call_id=tc_list[i].id,
-                                    tool_name=tc_list[i].name,
-                                    result=ev.result,
-                                    is_error=ev.is_error,
-                                )
-                        except asyncio.QueueEmpty:
-                            break
+        completed_runners = 0
+        while completed_runners < len(tc_list):
+            idx, ev = await event_bus.get()
+            if ev is _RUNNER_DONE:
+                completed_runners += 1
+                continue
 
-        # 最后 drain 剩余事件（防止 race condition）
-        for q in queues:
-            while not q.empty():
-                try:
-                    ev = q.get_nowait()
-                    yield ev
-                except asyncio.QueueEmpty:
-                    break
+            yield ev
+            if isinstance(ev, ToolEndEvent):
+                tool_results[idx] = ToolResult(
+                    tool_call_id=tc_list[idx].id,
+                    tool_name=tc_list[idx].name,
+                    result=ev.result,
+                    is_error=ev.is_error,
+                )
 
-        # yield ToolExecutionResult（供调用方收集本批结果）
-        yield ToolExecutionResult(results=tool_results)
+        await asyncio.gather(*tasks)
+
+        yield ToolExecutionResult(
+            results=[result for result in tool_results if result is not None]
+        )
 
     async def execute_streaming_tool(
         self, tool_call: ToolCall
     ) -> AsyncGenerator[ToolEndEvent, None]:
-        """透传流式工具的所有事件。用于 call_sub_agent 等。"""
+        """Pass through events from a single streaming tool."""
         tool_func = self.get_tool(tool_call.name)
         if tool_func is None:
             yield ToolEndEvent(
@@ -178,6 +150,7 @@ class ToolExecutor:
 
         kwargs = dict(tool_call.arguments)
         import inspect as _inspect
+
         _tool_params = set(_inspect.signature(tool_func.func).parameters)
         for k, v in self.extra_kwargs.items():
             if k not in kwargs and k in _tool_params:
@@ -208,7 +181,9 @@ class ToolExecutor:
                     is_error=False,
                 )
         except Exception as e:
-            logger.exception(f"Tool '{tool_call.name}' streaming execution failed: {e}")
+            logger.exception(
+                "Tool '%s' streaming execution failed: %s", tool_call.name, e
+            )
             yield ToolEndEvent(
                 tool_call_id=tool_call.id,
                 tool_name=tool_call.name,

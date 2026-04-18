@@ -112,12 +112,12 @@ export default function SettingsPage() {
     } finally {
       setSaving(false);
     }
-  }, [username, user?.username, refreshUser]);
+  }, [username, user, refreshUser]);
 
   const handleReset = useCallback(() => {
     setUsername(user?.username || "");
     setSaveMessage(null);
-  }, [user?.username]);
+  }, [user]);
 
   const avatarFallback = (user?.username || "U").slice(0, 2).toUpperCase();
 

@@ -125,16 +125,13 @@ class SupervisorAgent:
         return await self._agent.run(initial_input)
 
     async def stream(self, initial_input: str) -> AsyncGenerator:
-        from app.core.supervisor.events import SupervisorDoneEvent
+        from app.core.supervisor.events import SupervisorDoneEvent, SupervisorErrorEvent
 
         accumulated_result = ""
         was_interrupted = False
 
         try:
             async for event in self._agent.stream(initial_input):
-                if hasattr(event, "source") and getattr(event, "source", None) is None:
-                    event.source = "supervisor"
-
                 if getattr(event, "type", None) == "text" and hasattr(event, "content"):
                     accumulated_result += event.content
 
@@ -151,7 +148,7 @@ class SupervisorAgent:
                 )
         except Exception as exc:
             logger.exception("[SupervisorAgent] stream error: %s", exc)
-            yield ErrorEvent(error=str(exc), source="supervisor")
+            yield SupervisorErrorEvent(error=str(exc), source="supervisor")
             yield SupervisorDoneEvent(
                 supervisor_session_id=self.supervisor_session_id,
                 workflow=self._build_workflow_payload(),
@@ -171,9 +168,6 @@ class SupervisorAgent:
             "",
             resume=decision,
         ):
-            if hasattr(event, "source") and getattr(event, "source", None) is None:
-                event.source = "supervisor"
-
             yield event
 
             if isinstance(event, DoneEvent):

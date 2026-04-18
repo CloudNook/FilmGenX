@@ -5,6 +5,8 @@ export interface SupervisorRunSummary {
 export interface SupervisorDisplayEntry {
   id: string;
   kind:
+    | 'user'
+    | 'decision'
     | 'thinking'
     | 'text'
     | 'tool_start'
@@ -28,24 +30,85 @@ export interface SupervisorDisplayEntry {
   feedback?: string;
   suggestions?: string[] | null;
   toolName?: string;
+  decisionAction?: 'approve' | 'reject';
   finalResult?: string;
   toolCallId?: string;
   toolArguments?: Record<string, unknown>;
   isError?: boolean;
+  pendingApproval?: boolean;
+  isComplete?: boolean;
+  timestamp?: string | null;
+}
+
+export interface SupervisorSessionGroup {
+  sessionId: string;
+  source: string;
+  title: string;
+  entries: SupervisorDisplayEntry[];
 }
 
 type AppendableEvent =
-  | { type: 'thinking'; content: string; source?: string }
-  | { type: 'text'; content: string; source?: string }
-  | { type: 'tool_start'; tool_call_id: string; tool_name: string; arguments: Record<string, unknown>; source?: string }
-  | { type: 'tool_end'; tool_call_id: string; tool_name: string; result: unknown; is_error: boolean; source?: string }
-  | { type: 'sub_agent_start'; sub_agent_name: string; session_id: string; task_description: string; source?: string }
-  | { type: 'sub_agent_end'; sub_agent_name: string; session_id: string; result: Record<string, unknown>; source?: string }
+  | {
+      type: 'supervisor_started';
+      workflow_id: number;
+      supervisor_session_id: string;
+      status: string;
+      workflow_profile: string;
+      auto_run: boolean;
+    }
+  | { type: 'user_message'; content: string; timestamp?: string | null }
+  | { type: 'thinking'; content: string; source?: string; session_id?: string }
+  | { type: 'text'; content: string; source?: string; session_id?: string }
+  | {
+      type: 'tool_start';
+      tool_call_id: string;
+      tool_name: string;
+      arguments: Record<string, unknown>;
+      source?: string;
+      session_id?: string;
+    }
+  | {
+      type: 'tool_end';
+      tool_call_id: string;
+      tool_name: string;
+      result: unknown;
+      is_error: boolean;
+      source?: string;
+      session_id?: string;
+    }
+  | {
+      type: 'sub_agent_start';
+      sub_agent_name: string;
+      session_id: string;
+      task_description: string;
+      source?: string;
+    }
+  | {
+      type: 'sub_agent_end';
+      sub_agent_name: string;
+      session_id: string;
+      result: Record<string, unknown>;
+      source?: string;
+    }
   | { type: 'review_start'; sub_agent_name: string; criteria: string[]; source?: string }
-  | { type: 'review_end'; sub_agent_name: string; score: number; passed: boolean; feedback: string; suggestions?: string[] | null; source?: string }
-  | { type: 'interrupt'; tool_name: string; source?: string }
+  | {
+      type: 'review_end';
+      sub_agent_name: string;
+      score: number;
+      passed: boolean;
+      feedback: string;
+      suggestions?: string[] | null;
+      source?: string;
+    }
+  | {
+      type: 'interrupt';
+      tool_name: string;
+      tool_call_id?: string;
+      session_id?: string;
+      source?: string;
+    }
   | { type: 'supervisor_done'; final_result: string; source?: string }
-  | { type: 'error'; error: string; source?: string };
+  | { type: 'error'; error: string; source?: string; session_id?: string };
 
 export function resolveInitialSupervisorRunId(
   runs: SupervisorRunSummary[],
@@ -64,32 +127,108 @@ export function appendSupervisorDisplayEvent(
   entries: SupervisorDisplayEntry[],
   event: AppendableEvent,
 ): SupervisorDisplayEntry[] {
+  const findMatchingToolIndex = (
+    currentEntries: SupervisorDisplayEntry[],
+    toolCallId?: string,
+    sessionId?: string,
+  ): number => {
+    if (!toolCallId) {
+      return -1;
+    }
+
+    return currentEntries.findLastIndex(
+      (entry) =>
+        entry.toolCallId === toolCallId &&
+        (entry.kind === 'tool_start' || entry.kind === 'tool_end') &&
+        (
+          entry.sessionId === sessionId ||
+          entry.sessionId == null ||
+          sessionId == null
+        ),
+    );
+  };
+
+  const completeLatestThinking = (
+    currentEntries: SupervisorDisplayEntry[],
+    source?: string,
+    sessionId?: string,
+  ): SupervisorDisplayEntry[] => {
+    const targetSource = source || 'supervisor';
+    const index = currentEntries.findLastIndex(
+      (entry) =>
+        entry.kind === 'thinking' &&
+        !entry.isComplete &&
+        (entry.source || 'supervisor') === targetSource &&
+        entry.sessionId === sessionId,
+    );
+
+    if (index === -1) {
+      return currentEntries;
+    }
+
+    return [
+      ...currentEntries.slice(0, index),
+      {
+        ...currentEntries[index],
+        isComplete: true,
+      },
+      ...currentEntries.slice(index + 1),
+    ];
+  };
+
+  if (event.type === 'supervisor_started') {
+    return entries;
+  }
+
+  if (event.type === 'user_message') {
+    return [
+      ...entries,
+      buildSupervisorUserEntry(event.content, {
+        timestamp: event.timestamp || null,
+      }),
+    ];
+  }
+
   if (event.type === 'thinking' || event.type === 'text') {
     const kind = event.type;
-    const last = entries[entries.length - 1];
-    if (last && last.kind === kind && last.source === (event.source || 'supervisor')) {
+    const source = event.source || 'supervisor';
+    const baseEntries =
+      event.type === 'text'
+        ? completeLatestThinking(entries, source, event.session_id)
+        : entries;
+    const last = baseEntries[baseEntries.length - 1];
+    if (
+      last &&
+      last.kind === kind &&
+      last.source === source &&
+      last.sessionId === event.session_id
+    ) {
       return [
-        ...entries.slice(0, -1),
+        ...baseEntries.slice(0, -1),
         {
           ...last,
           content: `${last.content || ''}${event.content}`,
         },
       ];
     }
+
     return [
-      ...entries,
+      ...baseEntries,
       {
-        id: `${kind}-${entries.length}`,
+        id: `${kind}-${source}-${event.session_id || 'root'}-${baseEntries.length}`,
         kind,
-        source: event.source || 'supervisor',
+        source,
+        sessionId: event.session_id,
         content: event.content,
+        isComplete: kind === 'text',
       },
     ];
   }
 
   if (event.type === 'sub_agent_start') {
+    const nextEntries = completeLatestThinking(entries, event.source, event.session_id);
     return [
-      ...entries,
+      ...nextEntries,
       {
         id: `sub-agent-start-${event.session_id}`,
         kind: 'sub_agent_start',
@@ -102,53 +241,95 @@ export function appendSupervisorDisplayEvent(
   }
 
   if (event.type === 'tool_start') {
+    const nextEntries = completeLatestThinking(entries, event.source, event.session_id);
     return [
-      ...entries,
+      ...nextEntries,
       {
-        id: `tool-start-${event.tool_call_id}`,
+        id: `tool-start-${event.tool_call_id}-${event.session_id || 'root'}`,
         kind: 'tool_start',
         source: event.source || 'supervisor',
+        sessionId: event.session_id,
         toolCallId: event.tool_call_id,
         toolName: event.tool_name,
         toolArguments: event.arguments,
+        pendingApproval: false,
       },
     ];
   }
 
   if (event.type === 'tool_end') {
+    const baseEntries = completeLatestThinking(entries, event.source, event.session_id);
+    const existingIndex = findMatchingToolIndex(
+      baseEntries,
+      event.tool_call_id,
+      event.session_id,
+    );
+    const nextEntry: SupervisorDisplayEntry = {
+      id: `tool-start-${event.tool_call_id}-${event.session_id || 'root'}`,
+      kind: 'tool_end',
+      source: event.source || 'supervisor',
+      sessionId: event.session_id,
+      toolCallId: event.tool_call_id,
+      toolName: event.tool_name,
+      result: event.result,
+      isError: event.is_error,
+      pendingApproval: false,
+    };
+
+    if (existingIndex === -1) {
+      return [...baseEntries, nextEntry];
+    }
+
+    const existingEntry = baseEntries[existingIndex];
     return [
-      ...entries,
+      ...baseEntries.slice(0, existingIndex),
       {
-        id: `tool-end-${event.tool_call_id}`,
-        kind: 'tool_end',
-        source: event.source || 'supervisor',
-        toolCallId: event.tool_call_id,
-        toolName: event.tool_name,
-        result: event.result,
-        isError: event.is_error,
+        ...existingEntry,
+        ...nextEntry,
+        toolArguments: existingEntry.toolArguments,
       },
+      ...baseEntries.slice(existingIndex + 1),
     ];
   }
 
   if (event.type === 'sub_agent_end') {
+    const baseEntries = completeLatestThinking(entries, event.source, event.session_id);
+    const existingIndex = baseEntries.findLastIndex(
+      (entry) =>
+        entry.sessionId === event.session_id &&
+        entry.kind === 'sub_agent_start',
+    );
+    const nextEntry: SupervisorDisplayEntry = {
+      id: `sub-agent-start-${event.session_id}`,
+      kind: 'sub_agent_end',
+      source: event.source || 'supervisor',
+      subAgentName: event.sub_agent_name,
+      sessionId: event.session_id,
+      result: event.result,
+    };
+
+    if (existingIndex === -1) {
+      return [...baseEntries, nextEntry];
+    }
+
+    const existingEntry = baseEntries[existingIndex];
     return [
-      ...entries,
+      ...baseEntries.slice(0, existingIndex),
       {
-        id: `sub-agent-end-${event.session_id}`,
-        kind: 'sub_agent_end',
-        source: event.source || 'supervisor',
-        subAgentName: event.sub_agent_name,
-        sessionId: event.session_id,
-        result: event.result,
+        ...existingEntry,
+        ...nextEntry,
+        taskDescription: existingEntry.taskDescription,
       },
+      ...baseEntries.slice(existingIndex + 1),
     ];
   }
 
   if (event.type === 'review_start') {
+    const nextEntries = completeLatestThinking(entries, event.source);
     return [
-      ...entries,
+      ...nextEntries,
       {
-        id: `review-start-${event.sub_agent_name}-${entries.length}`,
+        id: `review-start-${event.sub_agent_name}-${nextEntries.length}`,
         kind: 'review_start',
         source: event.source || 'supervisor',
         subAgentName: event.sub_agent_name,
@@ -158,10 +339,11 @@ export function appendSupervisorDisplayEvent(
   }
 
   if (event.type === 'review_end') {
+    const nextEntries = completeLatestThinking(entries, event.source);
     return [
-      ...entries,
+      ...nextEntries,
       {
-        id: `review-end-${event.sub_agent_name}-${entries.length}`,
+        id: `review-end-${event.sub_agent_name}-${nextEntries.length}`,
         kind: 'review_end',
         source: event.source || 'supervisor',
         subAgentName: event.sub_agent_name,
@@ -174,38 +356,133 @@ export function appendSupervisorDisplayEvent(
   }
 
   if (event.type === 'interrupt') {
+    const nextEntries = completeLatestThinking(entries, event.source, event.session_id);
+    const existingToolIndex = findMatchingToolIndex(
+      nextEntries,
+      event.tool_call_id,
+      event.session_id,
+    );
+    const entriesWithPendingTool =
+      existingToolIndex === -1
+        ? nextEntries
+        : [
+            ...nextEntries.slice(0, existingToolIndex),
+            {
+              ...nextEntries[existingToolIndex],
+              pendingApproval: true,
+            },
+            ...nextEntries.slice(existingToolIndex + 1),
+          ];
     return [
-      ...entries,
+      ...entriesWithPendingTool,
       {
-        id: `interrupt-${entries.length}`,
+        id: `interrupt-${entriesWithPendingTool.length}`,
         kind: 'interrupt',
         source: event.source || 'supervisor',
+        sessionId: event.session_id,
+        toolCallId: event.tool_call_id,
         toolName: event.tool_name,
       },
     ];
   }
 
   if (event.type === 'supervisor_done') {
-    return [
-      ...entries,
-      {
-        id: `done-${entries.length}`,
-        kind: 'done',
-        source: event.source || 'supervisor',
-        finalResult: event.final_result,
-      },
-    ];
+    return completeLatestThinking(entries, event.source);
   }
 
+  const nextEntries = completeLatestThinking(entries, event.source, event.session_id);
   return [
-    ...entries,
+    ...nextEntries,
     {
-      id: `error-${entries.length}`,
+      id: `error-${event.session_id || 'root'}-${nextEntries.length}`,
       kind: 'error',
       source: event.source || 'supervisor',
+      sessionId: event.session_id,
       content: event.error,
     },
   ];
+}
+
+export function buildSupervisorUserEntry(
+  content: string,
+  options?: {
+    id?: string;
+    timestamp?: string | null;
+  },
+): SupervisorDisplayEntry {
+  return {
+    id:
+      options?.id ||
+      `user-${options?.timestamp || Date.now().toString()}`,
+    kind: 'user',
+    content,
+    timestamp: options?.timestamp || null,
+  };
+}
+
+export function buildSupervisorDecisionEntry(
+  action: 'approve' | 'reject',
+  options?: {
+    id?: string;
+    toolName?: string | null;
+    timestamp?: string | null;
+  },
+): SupervisorDisplayEntry {
+  return {
+    id:
+      options?.id ||
+      `decision-${action}-${options?.timestamp || Date.now().toString()}`,
+    kind: 'decision',
+    decisionAction: action,
+    toolName: options?.toolName || null,
+    timestamp: options?.timestamp || null,
+  };
+}
+
+export function buildSupervisorDisplayEntries(
+  events: AppendableEvent[],
+): SupervisorDisplayEntry[] {
+  return events.reduce<SupervisorDisplayEntry[]>(
+    (entries, event) => appendSupervisorDisplayEvent(entries, event),
+    [],
+  );
+}
+
+export function splitSupervisorDisplayEntries(entries: SupervisorDisplayEntry[]): {
+  mainEntries: SupervisorDisplayEntry[];
+  sessionGroups: SupervisorSessionGroup[];
+} {
+  const mainEntries: SupervisorDisplayEntry[] = [];
+  const sessionGroups: SupervisorSessionGroup[] = [];
+  const sessionGroupMap = new Map<string, SupervisorSessionGroup>();
+
+  for (const entry of entries) {
+    if (!entry.sessionId?.startsWith('sub-')) {
+      mainEntries.push(entry);
+      continue;
+    }
+
+    const source = entry.source || 'sub-agent';
+    const existing = sessionGroupMap.get(entry.sessionId);
+    if (existing) {
+      existing.entries.push(entry);
+      if (!existing.title && entry.subAgentName) {
+        existing.title = entry.subAgentName;
+      }
+      continue;
+    }
+
+    const group: SupervisorSessionGroup = {
+      sessionId: entry.sessionId,
+      source,
+      title: entry.subAgentName || source,
+      entries: [entry],
+    };
+    sessionGroupMap.set(entry.sessionId, group);
+    sessionGroups.push(group);
+  }
+
+  return { mainEntries, sessionGroups };
 }
 
 export interface WorkflowNodeSummary {
@@ -232,11 +509,13 @@ export function buildWorkflowNodeSummaries(
 
   return Object.entries(nodes).map(([key, value]) => {
     const node = (value || {}) as Record<string, unknown>;
-    const data =
-      node.data && typeof node.data === 'object'
-        ? (node.data as Record<string, unknown>)
-        : {};
-    const rawOutput = data.output;
+    const artifact =
+      node.artifact && typeof node.artifact === 'object'
+        ? (node.artifact as Record<string, unknown>)
+        : node.data && typeof node.data === 'object'
+          ? (node.data as Record<string, unknown>)
+          : {};
+    const rawOutput = artifact.output;
     const outputPreview =
       typeof rawOutput === 'string'
         ? rawOutput.slice(0, 160)

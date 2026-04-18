@@ -10,6 +10,7 @@ from uuid import uuid4
 from app.core.agent.agent import Agent
 from app.core.agent.base import AgentConfig, ToolCall
 from app.core.agent.factory import create_agent
+from app.core.agent.persist.db_strategy import DBPersistStrategy
 from app.core.agent.tool import ToolExecutor
 from app.core.agent.base import (
     ToolStartEvent,
@@ -20,10 +21,21 @@ from app.core.agent.base import (
     ErrorEvent,
 )
 from app.core.supervisor.context import SupervisorContext
+from app.core.supervisor.concurrency import SubAgentConcurrencyLimiter
+from app.core.supervisor.events import (
+    SubAgentEndEvent,
+    SubAgentStartEvent,
+    SupervisorErrorEvent,
+    SupervisorTextEvent,
+    SupervisorThinkingEvent,
+    SupervisorToolEndEvent,
+    SupervisorToolStartEvent,
+)
 from app.core.supervisor.registry import SupervisorAgentRegistry, build_default_registry
 from app.core.supervisor.reviewer import build_reviewer_prompt
 from app.core.supervisor.workflow import apply_node_update
 from app.core.tools.registry import register_tool
+from app.db.session import AsyncSessionFactory
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +101,6 @@ async def call_sub_agent(
     - session_id 格式：sub-{agent_name}-{uuid4()[:8]}
     - 流式事件实时透传到 SSE
     """
-    from app.core.supervisor.events import SubAgentStartEvent, SubAgentEndEvent
-
     active_registry = registry or build_default_registry()
     registered = active_registry.get(sub_agent_name)
     if registered is None:
@@ -107,6 +117,20 @@ async def call_sub_agent(
     if context_snapshot:
         sub_prompt = f"{task_description}\n\n## 参考上下文\n{context_snapshot}"
 
+    limiter = SubAgentConcurrencyLimiter.get_instance()
+    persist_strategy = (
+        DBPersistStrategy(
+            session_factory=AsyncSessionFactory,
+            supervisor_session_id=(
+                supervisor_context.supervisor_session_id
+                if supervisor_context is not None
+                else None
+            ),
+        )
+        if supervisor_context is not None
+        else "redis"
+    )
+
     sub_agent = create_agent(
         agent_name=sub_agent_name,
         session_id=sub_session_id,
@@ -115,92 +139,110 @@ async def call_sub_agent(
         tools=registered.tools,
         skill_names=registered.skill_names,
         max_loop=20,
-        persist="redis",
+        persist=persist_strategy,
     )
 
-    if supervisor_context is not None:
-        supervisor_context.sub_agent_sessions[sub_agent_name] = sub_session_id
-        if supervisor_context.workflow is not None:
-            for node_key in registered.node_keys:
-                if node_key in supervisor_context.workflow.nodes:
-                    supervisor_context.workflow.nodes[node_key].status = "running"
-
-    logger.info(
-        f"[call_sub_agent] starting sub_agent={sub_agent_name}, "
-        f"session={sub_session_id}"
-    )
-
-    yield SubAgentStartEvent(
-        sub_agent_name=sub_agent_name,
-        session_id=sub_session_id,
-        task_description=task_description,
-    )
+    accumulated_result = {}
 
     try:
-        accumulated_result = {}
+        async with await limiter.acquire(sub_agent_name):
+            if supervisor_context is not None:
+                supervisor_context.sub_agent_sessions[sub_agent_name] = sub_session_id
+                if supervisor_context.workflow is not None:
+                    for node_key in registered.node_keys:
+                        if node_key in supervisor_context.workflow.nodes:
+                            supervisor_context.workflow.nodes[node_key].status = "running"
 
-        async for event in sub_agent.stream(initial_input=sub_prompt):
-            if isinstance(event, ThinkingEvent):
-                yield ThinkingEvent(content=event.content, source=sub_agent_name)
-            elif isinstance(event, TextEvent):
-                yield TextEvent(content=event.content, source=sub_agent_name)
-            elif isinstance(event, ToolStartEvent):
-                yield ToolStartEvent(
-                    tool_call_id=event.tool_call_id,
-                    tool_name=event.tool_name,
-                    arguments=event.arguments,
-                    source=sub_agent_name,
-                )
-            elif isinstance(event, ToolEndEvent):
-                yield ToolEndEvent(
-                    tool_call_id=event.tool_call_id,
-                    tool_name=event.tool_name,
-                    result=event.result,
-                    is_error=event.is_error,
-                    source=sub_agent_name,
-                )
-            elif isinstance(event, DoneEvent):
-                accumulated_result = {
-                    "output": event.result.raw_output or "",
-                    "sub_agent_name": sub_agent_name,
-                }
-                if supervisor_context is not None:
-                    if supervisor_context.workflow is not None:
-                        for node_key in registered.node_keys:
-                            if node_key in supervisor_context.workflow.nodes:
-                                apply_node_update(
-                                    supervisor_context.workflow,
-                                    node_key,
-                                    {"output": event.result.raw_output or ""},
-                                    updated_by="agent",
-                                    last_agent=sub_agent_name,
-                                )
-                    supervisor_context.execution_history.append(
-                        {
-                            "agent_name": sub_agent_name,
-                            "session_id": sub_session_id,
-                            "status": "completed",
-                        }
+            logger.info(
+                f"[call_sub_agent] starting sub_agent={sub_agent_name}, "
+                f"session={sub_session_id}"
+            )
+
+            yield SubAgentStartEvent(
+                sub_agent_name=sub_agent_name,
+                session_id=sub_session_id,
+                task_description=task_description,
+            )
+
+            async for event in sub_agent.stream(initial_input=sub_prompt):
+                if isinstance(event, ThinkingEvent):
+                    yield SupervisorThinkingEvent(
+                        content=event.content,
+                        source=sub_agent_name,
+                        session_id=sub_session_id,
                     )
-                logger.info(
-                    f"[call_sub_agent] completed sub_agent={sub_agent_name}"
-                )
+                elif isinstance(event, TextEvent):
+                    yield SupervisorTextEvent(
+                        content=event.content,
+                        source=sub_agent_name,
+                        session_id=sub_session_id,
+                    )
+                elif isinstance(event, ToolStartEvent):
+                    yield SupervisorToolStartEvent(
+                        tool_call_id=event.tool_call_id,
+                        tool_name=event.tool_name,
+                        arguments=event.arguments,
+                        source=sub_agent_name,
+                        session_id=sub_session_id,
+                    )
+                elif isinstance(event, ToolEndEvent):
+                    yield SupervisorToolEndEvent(
+                        tool_call_id=event.tool_call_id,
+                        tool_name=event.tool_name,
+                        result=event.result,
+                        is_error=event.is_error,
+                        source=sub_agent_name,
+                        session_id=sub_session_id,
+                    )
+                elif isinstance(event, DoneEvent):
+                    accumulated_result = {
+                        "output": event.result.raw_output or "",
+                        "sub_agent_name": sub_agent_name,
+                    }
+                    if supervisor_context is not None:
+                        if supervisor_context.workflow is not None:
+                            for node_key in registered.node_keys:
+                                if node_key in supervisor_context.workflow.nodes:
+                                    apply_node_update(
+                                        supervisor_context.workflow,
+                                        node_key,
+                                        {"output": event.result.raw_output or ""},
+                                        updated_by="agent",
+                                        last_agent=sub_agent_name,
+                                    )
+                        supervisor_context.execution_history.append(
+                            {
+                                "agent_name": sub_agent_name,
+                                "session_id": sub_session_id,
+                                "status": "completed",
+                            }
+                        )
+                    logger.info(
+                        f"[call_sub_agent] completed sub_agent={sub_agent_name}"
+                    )
     except Exception as e:
         logger.exception(f"[call_sub_agent] error in sub_agent={sub_agent_name}: {e}")
-        yield ErrorEvent(error=str(e), source=sub_agent_name)
+        yield SupervisorErrorEvent(
+            error=str(e),
+            source=sub_agent_name,
+            session_id=sub_session_id,
+        )
         accumulated_result = {"error": str(e), "sub_agent_name": sub_agent_name}
 
     # SubAgent 执行完毕后，写入 DB
     if workflow_service is not None and supervisor_context is not None:
         try:
-            await workflow_service.save_workflow_snapshot(
-                supervisor_session_id=supervisor_context.supervisor_session_id,
-                workflow_snapshot=(
-                    supervisor_context.workflow.model_dump()
-                    if supervisor_context.workflow is not None
-                    else {}
-                ),
-            )
+            from app.services.supervisor_workflow_service import SupervisorWorkflowService
+
+            async with AsyncSessionFactory() as db_session:
+                await SupervisorWorkflowService(db_session).save_workflow_snapshot(
+                    supervisor_session_id=supervisor_context.supervisor_session_id,
+                    workflow_snapshot=(
+                        supervisor_context.workflow.model_dump()
+                        if supervisor_context.workflow is not None
+                        else {}
+                    ),
+                )
         except Exception as e:
             logger.warning(f"[call_sub_agent] failed to persist workflow snapshot: {e}")
 

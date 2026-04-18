@@ -2,18 +2,62 @@
 Supervisor 流水线流式事件扩展。
 
 在 app.core.agent.base.StreamEvent 基础上新增：
+- 带 source / session_id 的 supervisor 流式事件
 - SubAgentStartEvent / SubAgentEndEvent
 - ReviewStartEvent / ReviewEndEvent
 - SupervisorDoneEvent
-
-每个事件携带 source 字段，用于前端渲染区分来源。
 """
 
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel
 
-from app.core.agent.base import StreamEvent  # noqa: F401 — re-exported for consumers
+from app.core.agent.base import StreamEvent  # noqa: F401 – re-exported for consumers
+
+
+class SupervisorThinkingEvent(BaseModel):
+    """带来源信息的 thinking 事件。"""
+    type: Literal["thinking"] = "thinking"
+    content: str
+    source: str = "supervisor"
+    session_id: Optional[str] = None
+
+
+class SupervisorTextEvent(BaseModel):
+    """带来源信息的 text 事件。"""
+    type: Literal["text"] = "text"
+    content: str
+    source: str = "supervisor"
+    session_id: Optional[str] = None
+
+
+class SupervisorToolStartEvent(BaseModel):
+    """带来源信息的 tool_start 事件。"""
+    type: Literal["tool_start"] = "tool_start"
+    tool_call_id: str
+    tool_name: str
+    arguments: Dict[str, Any]
+    source: str = "supervisor"
+    session_id: Optional[str] = None
+
+
+class SupervisorToolEndEvent(BaseModel):
+    """带来源信息的 tool_end 事件。"""
+    type: Literal["tool_end"] = "tool_end"
+    tool_call_id: str
+    tool_name: str
+    result: Any
+    is_error: bool = False
+    source: str = "supervisor"
+    session_id: Optional[str] = None
+
+
+class SupervisorErrorEvent(BaseModel):
+    """带来源信息的 error 事件。"""
+    type: Literal["error"] = "error"
+    error: str
+    source: str = "supervisor"
+    session_id: Optional[str] = None
 
 
 class SubAgentStartEvent(BaseModel):
@@ -32,6 +76,7 @@ class SubAgentEndEvent(BaseModel):
     session_id: str
     result: Dict[str, Any]
     review_result: Optional[Dict[str, Any]] = None
+    source: str = "supervisor"
 
 
 class ReviewStartEvent(BaseModel):
@@ -63,6 +108,11 @@ class SupervisorDoneEvent(BaseModel):
 
 
 SupervisorStreamEvent = Union[
+    SupervisorThinkingEvent,
+    SupervisorTextEvent,
+    SupervisorToolStartEvent,
+    SupervisorToolEndEvent,
+    SupervisorErrorEvent,
     SubAgentStartEvent,
     SubAgentEndEvent,
     ReviewStartEvent,

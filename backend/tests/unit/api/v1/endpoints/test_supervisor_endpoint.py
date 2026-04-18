@@ -3,20 +3,21 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 
 from app.api.v1.endpoints.supervisor import (
+    SupervisorResumePayload,
     SupervisorStartRequest,
-    SupervisorResumeRequest,
+    _create_supervisor,
+    chat_supervisor,
     get_supervisor_workflow,
     list_supervisor_workflows,
-    resume_supervisor_pipeline,
-    start_supervisor_pipeline,
 )
 from app.core.supervisor.workflow import WorkflowNodeDefinition, build_workflow_snapshot
 
 
 @pytest.mark.asyncio
-async def test_resume_supervisor_restores_workflow_runtime_config(monkeypatch):
+async def test_chat_supervisor_resume_restores_workflow_runtime_config(monkeypatch):
     workflow_snapshot = build_workflow_snapshot(
         profile="cinematic_series",
         definitions=[
@@ -35,6 +36,8 @@ async def test_resume_supervisor_restores_workflow_runtime_config(monkeypatch):
         workflow_snapshot=workflow_snapshot,
         workflow_profile="cinematic_series",
         auto_run=True,
+        hitl_enabled=False,
+        review_nodes=None,
     )
     db = MagicMock()
     db.commit = AsyncMock()
@@ -48,7 +51,7 @@ async def test_resume_supervisor_restores_workflow_runtime_config(monkeypatch):
         AsyncMock(return_value=stored_workflow),
     )
     monkeypatch.setattr(
-        "app.core.agent.persist.redis_strategy.RedisPersistStrategy.load_interrupt_state",
+        "app.api.v1.endpoints.supervisor.DBPersistStrategy.load_interrupt_state",
         AsyncMock(
             return_value=SimpleNamespace(
                 tool_name="call_sub_agent",
@@ -71,10 +74,17 @@ async def test_resume_supervisor_restores_workflow_runtime_config(monkeypatch):
         "app.core.supervisor.factory.create_supervisor",
         fake_create_supervisor,
     )
+    monkeypatch.setattr(
+        "app.api.v1.endpoints.supervisor._append_supervisor_event",
+        AsyncMock(return_value=None),
+    )
 
-    response = await resume_supervisor_pipeline(
-        session_id="sv-123",
-        body=SupervisorResumeRequest(action="approve"),
+    response = await chat_supervisor(
+        project_id=1,
+        body=SupervisorStartRequest(
+            session_id="sv-123",
+            resume=SupervisorResumePayload(action="approve"),
+        ),
         user_id=1,
         db=db,
     )
@@ -86,7 +96,26 @@ async def test_resume_supervisor_restores_workflow_runtime_config(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_start_supervisor_pipeline_emits_started_event(monkeypatch):
+async def test_chat_supervisor_resume_requires_session_id():
+    db = MagicMock()
+    db.commit = AsyncMock()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await chat_supervisor(
+            project_id=1,
+            body=SupervisorStartRequest(
+                resume=SupervisorResumePayload(action="approve"),
+            ),
+            user_id=1,
+            db=db,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "session_id" in str(exc_info.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_chat_supervisor_emits_started_event(monkeypatch):
     workflow = SimpleNamespace(
         id=7,
         status="running",
@@ -109,6 +138,10 @@ async def test_start_supervisor_pipeline_emits_started_event(monkeypatch):
         "app.services.supervisor_workflow_service.SupervisorWorkflowService.get_workflow_by_session",
         service_get,
     )
+    monkeypatch.setattr(
+        "app.api.v1.endpoints.supervisor._append_supervisor_event",
+        AsyncMock(return_value=None),
+    )
 
     fake_supervisor = SimpleNamespace(
         supervisor_session_id="sv-test-001",
@@ -122,7 +155,8 @@ async def test_start_supervisor_pipeline_emits_started_event(monkeypatch):
         lambda body, user_id, workflow_service: fake_supervisor,
     )
 
-    response = await start_supervisor_pipeline(
+    response = await chat_supervisor(
+        project_id=1,
         body=SupervisorStartRequest(project_id=1, user_request="生成一个 AI 漫剧"),
         user_id=1,
         db=db,
@@ -136,8 +170,40 @@ async def test_start_supervisor_pipeline_emits_started_event(monkeypatch):
     assert '"supervisor_session_id": "sv-test-001"' in decoded
 
 
+def test_create_supervisor_human_review_interrupts_call_sub_agent(monkeypatch):
+    captured_kwargs = {}
+
+    def fake_create_supervisor(**kwargs):
+        captured_kwargs.update(kwargs)
+        return SimpleNamespace(
+            supervisor_session_id="sv-test-hitl",
+            context=SimpleNamespace(workflow=None),
+            stream=None,
+        )
+
+    monkeypatch.setattr(
+        "app.core.supervisor.factory.create_supervisor",
+        fake_create_supervisor,
+    )
+
+    _create_supervisor(
+        SupervisorStartRequest(
+            project_id=1,
+            user_request="write outline",
+            human_review=True,
+        ),
+        user_id=1,
+        workflow_service=MagicMock(),
+    )
+
+    middlewares = captured_kwargs["middlewares"]
+    assert len(middlewares) == 1
+    hitl = middlewares[0]
+    assert hitl.auto_tool_list == {"get_workflow_state", "call_reviewer"}
+
+
 @pytest.mark.asyncio
-async def test_start_supervisor_pipeline_serializes_datetime_event_payload(monkeypatch):
+async def test_chat_supervisor_serializes_datetime_event_payload(monkeypatch):
     workflow = SimpleNamespace(
         id=9,
         status="running",
@@ -154,6 +220,10 @@ async def test_start_supervisor_pipeline_serializes_datetime_event_payload(monke
     monkeypatch.setattr(
         "app.services.supervisor_workflow_service.SupervisorWorkflowService.save_workflow_snapshot",
         AsyncMock(return_value=workflow),
+    )
+    monkeypatch.setattr(
+        "app.api.v1.endpoints.supervisor._append_supervisor_event",
+        AsyncMock(return_value=None),
     )
 
     event_time = datetime(2026, 4, 16, 12, 30, tzinfo=timezone.utc)
@@ -188,7 +258,8 @@ async def test_start_supervisor_pipeline_serializes_datetime_event_payload(monke
         lambda body, user_id, workflow_service: fake_supervisor,
     )
 
-    response = await start_supervisor_pipeline(
+    response = await chat_supervisor(
+        project_id=1,
         body=SupervisorStartRequest(project_id=1, user_request="测试时间序列化"),
         user_id=1,
         db=db,
@@ -200,6 +271,82 @@ async def test_start_supervisor_pipeline_serializes_datetime_event_payload(monke
 
     assert '"type": "supervisor_done"' in decoded
     assert '"updated_at": "2026-04-16T12:30:00+00:00"' in decoded
+
+
+@pytest.mark.asyncio
+async def test_chat_supervisor_continues_existing_session_instead_of_creating_new_run(monkeypatch):
+    workflow_snapshot = build_workflow_snapshot(
+        profile="default",
+        definitions=[
+            WorkflowNodeDefinition(
+                key="outline",
+                label="Outline",
+                node_type="text",
+                depends_on=[],
+            ),
+        ],
+    ).model_dump()
+    stored_workflow = SimpleNamespace(
+        id=11,
+        project_id=1,
+        owner_id=1,
+        status="completed",
+        user_request="make a trailer",
+        model="gemini-3-flash-preview",
+        workflow_snapshot=workflow_snapshot,
+        workflow_profile="default",
+        auto_run=False,
+        hitl_enabled=False,
+        review_nodes=None,
+        completed_at="2026-04-16T00:00:00Z",
+        error_message=None,
+        final_result="done",
+    )
+    db = MagicMock()
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+
+    monkeypatch.setattr(
+        "app.services.supervisor_workflow_service.SupervisorWorkflowService.get_workflow_by_session",
+        AsyncMock(return_value=stored_workflow),
+    )
+    monkeypatch.setattr(
+        "app.services.supervisor_workflow_service.SupervisorWorkflowService.create_workflow",
+        AsyncMock(side_effect=AssertionError("should not create a new workflow")),
+    )
+    monkeypatch.setattr(
+        "app.api.v1.endpoints.supervisor._append_supervisor_event",
+        AsyncMock(return_value=None),
+    )
+
+    fake_supervisor = SimpleNamespace(
+        supervisor_session_id="sv-continue-001",
+        context=SimpleNamespace(
+            workflow=SimpleNamespace(model_dump=lambda: {"profile": "default", "nodes": {}})
+        ),
+        stream=AsyncMock(return_value=_empty_async_iter()),
+    )
+    monkeypatch.setattr(
+        "app.api.v1.endpoints.supervisor._create_supervisor",
+        lambda body, user_id, workflow_service: fake_supervisor,
+    )
+
+    response = await chat_supervisor(
+        project_id=1,
+        body=SupervisorStartRequest(
+            session_id="sv-continue-001",
+            content="continue with a darker tone",
+        ),
+        user_id=1,
+        db=db,
+    )
+
+    first_chunk = await anext(response.body_iterator)
+    decoded = first_chunk.decode() if isinstance(first_chunk, bytes) else first_chunk
+
+    assert '"type": "supervisor_started"' in decoded
+    assert '"workflow_id": 11' in decoded
+    assert '"supervisor_session_id": "sv-continue-001"' in decoded
 
 
 @pytest.mark.asyncio
@@ -275,6 +422,10 @@ async def test_get_supervisor_workflow_returns_detail_response(monkeypatch):
     monkeypatch.setattr(
         "app.services.supervisor_workflow_service.SupervisorWorkflowService.get_workflow",
         AsyncMock(return_value=workflow),
+    )
+    monkeypatch.setattr(
+        "app.api.v1.endpoints.supervisor._load_supervisor_event_history",
+        AsyncMock(return_value=[]),
     )
 
     response = await get_supervisor_workflow(

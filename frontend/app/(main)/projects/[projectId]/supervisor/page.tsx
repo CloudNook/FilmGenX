@@ -1,6 +1,6 @@
 'use client';
 
-import { use, useCallback, useEffect, useRef, useState } from 'react';
+import { use, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { AppLayout } from '@/components/layout';
@@ -23,14 +23,23 @@ import { useAuth } from '@/lib/auth';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 import {
   appendSupervisorDisplayEvent,
+  buildSupervisorDecisionEntry,
+  buildSupervisorDisplayEntries,
+  buildSupervisorUserEntry,
   buildWorkflowNodeSummaries,
   resolveInitialSupervisorRunId,
+  splitSupervisorDisplayEntries,
   type SupervisorDisplayEntry,
 } from '@/lib/supervisor-display';
 import {
@@ -38,6 +47,8 @@ import {
   Bot,
   Brain,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   GitBranch,
   Loader2,
   Plus,
@@ -104,6 +115,66 @@ function getStatusBadgeClass(status: string) {
   }
 }
 
+function stripResolvedInterruptEntries(entries: SupervisorDisplayEntry[]) {
+  return entries
+    .filter((entry) => entry.kind !== 'interrupt')
+    .map((entry) =>
+      entry.pendingApproval
+        ? {
+            ...entry,
+            pendingApproval: false,
+          }
+        : entry
+    );
+}
+
+function AutoCollapseDetails({
+  entryId,
+  autoCollapse,
+  summary,
+  children,
+}: {
+  entryId: string;
+  autoCollapse: boolean;
+  summary?: string;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(!autoCollapse);
+
+  return (
+    <Collapsible
+      key={`${entryId}-${autoCollapse ? 'collapsed' : 'open'}`}
+      open={open}
+      onOpenChange={setOpen}
+      className="space-y-2"
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[11px] text-muted-foreground">
+          {open ? '详情已展开' : (summary || '详情已折叠')}
+        </span>
+        <CollapsibleTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-6 px-2 text-[11px] text-muted-foreground"
+          >
+            {open ? (
+              <ChevronDown className="mr-1 h-3.5 w-3.5" />
+            ) : (
+              <ChevronRight className="mr-1 h-3.5 w-3.5" />
+            )}
+            {open ? '收起' : '展开'}
+          </Button>
+        </CollapsibleTrigger>
+      </div>
+      <CollapsibleContent className="space-y-2">
+        {children}
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
 export default function SupervisorPage({
   params,
 }: {
@@ -132,16 +203,81 @@ export default function SupervisorPage({
   const [liveWorkflow, setLiveWorkflow] = useState<Record<string, unknown> | null>(null);
   const [hitl, setHitl] = useState<HitlState | null>(null);
 
+  const messageScrollAreaRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const shouldStickToBottomRef = useRef(true);
 
   const selectedRun =
     runs.find((run) => run.id === selectedRunId) || null;
+  const shouldUseLiveState =
+    (isStreaming || isResuming) &&
+    liveEntries.length > 0 &&
+    (
+      activeRunId == null ||
+      selectedRunId == null ||
+      selectedRunId === activeRunId
+    );
   const displayedWorkflow =
-    selectedRunId != null && selectedRunId === activeRunId && liveWorkflow
+    shouldUseLiveState && liveWorkflow
       ? liveWorkflow
       : selectedRunDetail?.workflow_snapshot || null;
+  const persistedEntries = useMemo(() => {
+    const entries = buildSupervisorDisplayEntries(selectedRunDetail?.event_history || []);
+    if (!selectedRunDetail?.user_request) {
+      return entries;
+    }
+    return [
+      buildSupervisorUserEntry(selectedRunDetail.user_request, {
+        id: `initial-user-${selectedRunDetail.id}`,
+        timestamp: selectedRunDetail.created_at,
+      }),
+      ...entries,
+    ];
+  }, [selectedRunDetail]);
+  const displayedEntries =
+    shouldUseLiveState && liveEntries.length > 0
+      ? liveEntries
+      : persistedEntries;
+  const visibleEntries = useMemo(() => {
+    if (selectedRunDetail?.status === 'waiting_review') {
+      if (hitl) {
+        return displayedEntries.filter((entry) => entry.kind !== 'interrupt');
+      }
+      return displayedEntries;
+    }
+    return stripResolvedInterruptEntries(displayedEntries);
+  }, [displayedEntries, hitl, selectedRunDetail?.status]);
+  const { mainEntries, sessionGroups } = useMemo(
+    () => splitSupervisorDisplayEntries(visibleEntries),
+    [visibleEntries],
+  );
+  const hasAssistantEntries = useMemo(
+    () => visibleEntries.some((entry) => entry.kind !== 'user'),
+    [visibleEntries],
+  );
+  const lastEntrySignature = useMemo(() => {
+    const lastEntry = visibleEntries[visibleEntries.length - 1];
+    if (!lastEntry) {
+      return selectedRunDetail?.final_result || '';
+    }
+    return JSON.stringify({
+      id: lastEntry.id,
+      kind: lastEntry.kind,
+      content: lastEntry.content,
+      finalResult: lastEntry.finalResult,
+      result: lastEntry.result,
+      toolName: lastEntry.toolName,
+      timestamp: lastEntry.timestamp,
+    });
+  }, [selectedRunDetail?.final_result, visibleEntries]);
   const workflowNodes = buildWorkflowNodeSummaries(displayedWorkflow);
   const userFallback = user?.username?.slice(0, 1) || 'U';
+
+  const getMessageViewport = useCallback(() => {
+    return messageScrollAreaRef.current?.querySelector(
+      '[data-slot="scroll-area-viewport"]'
+    ) as HTMLDivElement | null;
+  }, []);
 
   const reloadRuns = useCallback(async () => {
     const response = await supervisorApi.list(projectIdNum);
@@ -155,6 +291,23 @@ export default function SupervisorPage({
       if (!targetId) return null;
       const detail = await supervisorApi.get(projectIdNum, targetId);
       setSelectedRunDetail(detail);
+      setRuns((prev) =>
+        prev.map((run) =>
+          run.id === detail.id
+            ? {
+                ...run,
+                status: detail.status,
+                active_node_key: detail.active_node_key,
+                loop_count: detail.loop_count,
+                total_tokens: detail.total_tokens,
+                final_result: detail.final_result,
+                error_message: detail.error_message,
+                completed_at: detail.completed_at,
+                updated_at: detail.updated_at,
+              }
+            : run
+        )
+      );
       return detail;
     },
     [projectIdNum, selectedRunId],
@@ -207,15 +360,65 @@ export default function SupervisorPage({
   }, [selectedRunId, projectIdNum]);
 
   useEffect(() => {
+    if (!selectedRunId || isStreaming || isResuming) return;
+    if (activeRunId != null && selectedRunId === activeRunId) return;
+    if (
+      selectedRunDetail?.status !== 'running' &&
+      selectedRunDetail?.status !== 'waiting_review'
+    ) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      void reloadRuns();
+      void reloadSelectedRun(selectedRunId);
+    }, 3000);
+
+    return () => window.clearInterval(timer);
+  }, [
+    activeRunId,
+    isResuming,
+    isStreaming,
+    reloadRuns,
+    reloadSelectedRun,
+    selectedRunDetail?.status,
+    selectedRunId,
+  ]);
+
+  useEffect(() => {
+    const viewport = getMessageViewport();
+    if (!viewport) return;
+
+    const handleScroll = () => {
+      const distanceToBottom =
+        viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+      shouldStickToBottomRef.current = distanceToBottom < 96;
+    };
+
+    handleScroll();
+    viewport.addEventListener('scroll', handleScroll, { passive: true });
+    return () => viewport.removeEventListener('scroll', handleScroll);
+  }, [getMessageViewport, selectedRunId]);
+
+  useEffect(() => {
+    if (!shouldUseLiveState && selectedRunDetail?.status !== 'waiting_review') {
+      return;
+    }
+    if (!shouldStickToBottomRef.current) {
+      return;
+    }
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [liveEntries, selectedRunDetail?.final_result]);
+  }, [
+    lastEntrySignature,
+    selectedRunDetail?.final_result,
+    selectedRunDetail?.status,
+    shouldUseLiveState,
+  ]);
 
   useEffect(() => {
     const sessionId = selectedRunDetail?.supervisor_session_id;
     if (!sessionId || selectedRunDetail.status !== 'waiting_review') {
-      if (selectedRunId !== activeRunId) {
-        setHitl(null);
-      }
+      setHitl(null);
       return;
     }
 
@@ -295,21 +498,84 @@ export default function SupervisorPage({
     [autoRun, humanReview, model, projectIdNum, user?.id, workflowProfile],
   );
 
+  const applyLocalRunStatus = useCallback(
+    (
+      workflowId: number,
+      sessionId: string,
+      requestText: string,
+      status: 'completed' | 'failed',
+      finalResult?: string | null,
+    ) => {
+      const now = new Date().toISOString();
+      upsertRunSummary(workflowId, sessionId, requestText, status, finalResult);
+      setSelectedRunDetail((prev) => {
+        if (!prev || prev.id !== workflowId) {
+          return prev;
+        }
+        return {
+          ...prev,
+          status,
+          final_result: finalResult ?? prev.final_result,
+          completed_at: status === 'completed' ? now : prev.completed_at,
+          updated_at: now,
+        };
+      });
+    },
+    [upsertRunSummary],
+  );
+
   const handleStartSupervisor = useCallback(async () => {
     if (!inputValue.trim() || isStreaming || isResuming) return;
 
     const userRequest = inputValue.trim();
+    const continuingRun =
+      selectedRunId != null &&
+      selectedRunDetail != null &&
+      !!selectedRunDetail.supervisor_session_id;
+    const requestSessionId = continuingRun
+      ? selectedRunDetail.supervisor_session_id
+      : undefined;
+    const runRequestText = continuingRun
+      ? selectedRunDetail.user_request
+      : userRequest;
     let startedWorkflowId: number | null = null;
-    let startedSessionId: string | null = null;
+    let startedSessionId: string | null = requestSessionId || null;
+    let receivedInterrupt = false;
+    let receivedTerminalEvent = false;
+    let receivedError = false;
+
+    if (selectedRunDetail?.status === 'waiting_review') {
+      setLiveEntries((prev) =>
+        appendSupervisorDisplayEvent(prev, {
+          type: 'error',
+          error: '当前 Supervisor 正在等待审批，请先 approve/reject 后再继续对话。',
+        })
+      );
+      return;
+    }
 
     setIsStreaming(true);
     setInputValue('');
     setHitl(null);
-    setLiveEntries([]);
-    setLiveWorkflow(null);
+    setLiveEntries([
+      ...(continuingRun ? displayedEntries : []),
+      buildSupervisorUserEntry(userRequest, {
+        timestamp: new Date().toISOString(),
+      }),
+    ]);
+    if (continuingRun) {
+      setActiveRunId(selectedRunId);
+      setLiveWorkflow(displayedWorkflow);
+    } else {
+      setSelectedRunId(null);
+      setSelectedRunDetail(null);
+      setActiveRunId(null);
+      setLiveWorkflow(null);
+    }
 
     try {
-      const response = await supervisorApi.start(projectIdNum, userRequest, {
+      const response = await supervisorApi.chat(projectIdNum, userRequest, {
+        sessionId: requestSessionId,
         model,
         maxLoop,
         workflowProfile,
@@ -329,13 +595,14 @@ export default function SupervisorPage({
           upsertRunSummary(
             event.workflow_id,
             event.supervisor_session_id,
-            userRequest,
+            runRequestText,
             event.status,
           );
           return;
         }
 
         if (event.type === 'interrupt') {
+          receivedInterrupt = true;
           const interruptSessionId = event.session_id || startedSessionId || '';
           setHitl({
             sessionId: interruptSessionId,
@@ -349,20 +616,21 @@ export default function SupervisorPage({
             upsertRunSummary(
               startedWorkflowId,
               interruptSessionId,
-              userRequest,
+              runRequestText,
               'waiting_review',
             );
           }
         }
 
         if (event.type === 'supervisor_done') {
+          receivedTerminalEvent = true;
           setLiveWorkflow(event.workflow);
           startedSessionId = event.supervisor_session_id;
           if (startedWorkflowId) {
             upsertRunSummary(
               startedWorkflowId,
               event.supervisor_session_id,
-              userRequest,
+              runRequestText,
               'completed',
               event.final_result,
             );
@@ -370,10 +638,11 @@ export default function SupervisorPage({
         }
 
         if (event.type === 'error' && startedWorkflowId && startedSessionId) {
+          receivedError = true;
           upsertRunSummary(
             startedWorkflowId,
             startedSessionId,
-            userRequest,
+            runRequestText,
             'failed',
           );
         }
@@ -390,7 +659,21 @@ export default function SupervisorPage({
         null;
       if (finalRunId != null) {
         setSelectedRunId(finalRunId);
-        await reloadSelectedRun(finalRunId);
+        const detail = await reloadSelectedRun(finalRunId);
+        if (
+          !receivedInterrupt &&
+          !receivedError &&
+          !receivedTerminalEvent &&
+          detail?.status === 'running'
+        ) {
+          applyLocalRunStatus(
+            finalRunId,
+            startedSessionId || detail.supervisor_session_id,
+            runRequestText,
+            'completed',
+            detail.final_result,
+          );
+        }
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : '未知错误';
@@ -409,8 +692,13 @@ export default function SupervisorPage({
     maxLoop,
     model,
     projectIdNum,
+    displayedEntries,
+    displayedWorkflow,
     reloadRuns,
     reloadSelectedRun,
+    selectedRunDetail,
+    selectedRunId,
+    applyLocalRunStatus,
     upsertRunSummary,
     workflowProfile,
   ]);
@@ -419,20 +707,35 @@ export default function SupervisorPage({
     async (action: 'approve' | 'reject') => {
       const sessionId = hitl?.sessionId || selectedRunDetail?.supervisor_session_id;
       if (!sessionId || !selectedRunId || isResuming) return;
+      let receivedInterrupt = false;
+      let receivedTerminalEvent = false;
+      let receivedError = false;
 
       setIsResuming(true);
       setIsStreaming(true);
       setHitl(null);
-      setLiveEntries([]);
+      setActiveRunId(selectedRunId);
+      setLiveWorkflow(displayedWorkflow);
+      setLiveEntries(stripResolvedInterruptEntries(displayedEntries));
 
       try {
-        const response = await supervisorApi.resume(sessionId, action);
+        const response = await supervisorApi.resume(projectIdNum, sessionId, action);
         if (!response.ok) {
           throw new Error(`Resume request failed: ${response.status}`);
+        }
+        if (action === 'reject') {
+          setLiveEntries((prev) => [
+            ...prev,
+            buildSupervisorDecisionEntry(action, {
+              toolName: hitl?.toolName || null,
+              timestamp: new Date().toISOString(),
+            }),
+          ]);
         }
 
         await readSupervisorSSEStream(response, (event: SupervisorSSEEvent) => {
           if (event.type === 'interrupt') {
+            receivedInterrupt = true;
             setHitl({
               sessionId: event.session_id,
               toolName: event.tool_name,
@@ -450,6 +753,7 @@ export default function SupervisorPage({
           }
 
           if (event.type === 'supervisor_done') {
+            receivedTerminalEvent = true;
             setLiveWorkflow(event.workflow);
             upsertRunSummary(
               selectedRunId,
@@ -461,6 +765,7 @@ export default function SupervisorPage({
           }
 
           if (event.type === 'error') {
+            receivedError = true;
             upsertRunSummary(
               selectedRunId,
               sessionId,
@@ -473,7 +778,21 @@ export default function SupervisorPage({
         });
 
         await reloadRuns();
-        await reloadSelectedRun(selectedRunId);
+        const detail = await reloadSelectedRun(selectedRunId);
+        if (
+          !receivedInterrupt &&
+          !receivedError &&
+          !receivedTerminalEvent &&
+          detail?.status === 'running'
+        ) {
+          applyLocalRunStatus(
+            selectedRunId,
+            sessionId,
+            selectedRunDetail?.user_request || '',
+            'completed',
+            detail.final_result,
+          );
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : '未知错误';
         setLiveEntries((prev) =>
@@ -487,8 +806,12 @@ export default function SupervisorPage({
     [
       hitl,
       isResuming,
+      applyLocalRunStatus,
+      projectIdNum,
       reloadRuns,
       reloadSelectedRun,
+      displayedEntries,
+      displayedWorkflow,
       selectedRunDetail,
       selectedRunId,
       upsertRunSummary,
@@ -617,7 +940,7 @@ export default function SupervisorPage({
               )}
             </div>
 
-            <ScrollArea className="flex-1 min-h-0 p-6">
+            <ScrollArea ref={messageScrollAreaRef} className="flex-1 min-h-0 p-6">
               <div className="max-w-3xl mx-auto space-y-4">
                 {!selectedRunId && !isStreaming && (
                   <div className="text-center py-12">
@@ -633,35 +956,54 @@ export default function SupervisorPage({
                   </div>
                 )}
 
-                {(selectedRunDetail?.user_request || inputValue) && (
-                  <div className="flex gap-4 flex-row-reverse">
-                    <Avatar className="h-8 w-8 shrink-0">
-                      <AvatarFallback className="bg-primary text-primary-foreground">
-                        {userFallback}
-                      </AvatarFallback>
-                    </Avatar>
-                    <div className="text-right max-w-[80%]">
-                      <div className="inline-block rounded-2xl px-4 py-3 bg-primary text-primary-foreground rounded-tr-sm">
-                        <p className="text-sm whitespace-pre-wrap leading-relaxed">
-                          {selectedRunDetail?.user_request || '新的 Supervisor 请求'}
-                        </p>
-                      </div>
-                      {selectedRunDetail?.created_at && (
-                        <div className="flex justify-end mt-1">
-                          <span className="text-[10px] text-muted-foreground">
-                            {formatTime(selectedRunDetail.created_at)}
-                          </span>
-                        </div>
-                      )}
+                {mainEntries.map((entry) => (
+                  <SupervisorTimelineEntryCard
+                    key={entry.id}
+                    entry={entry}
+                    userFallback={userFallback}
+                  />
+                ))}
+
+                {sessionGroups.length > 0 && (
+                  <div className="space-y-3 pt-2">
+                    <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                      <Sparkles className="h-3.5 w-3.5" />
+                      Sub-Agent Sessions
                     </div>
+                    {sessionGroups.map((group) => (
+                      <div
+                        key={group.sessionId}
+                        className="rounded-2xl border border-border bg-card/70 p-4 space-y-3"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-medium text-foreground">
+                              {group.title}
+                            </p>
+                            <p className="text-[10px] text-muted-foreground font-mono break-all">
+                              {group.sessionId}
+                            </p>
+                          </div>
+                          <Badge variant="outline" className="text-[10px] border-primary/20 text-primary">
+                            {group.source}
+                          </Badge>
+                        </div>
+                        <div className="space-y-3">
+                          {group.entries.map((entry) => (
+                            <SupervisorTimelineEntryCard
+                              key={entry.id}
+                              entry={entry}
+                              userFallback={userFallback}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 )}
 
-                {liveEntries.map((entry) => (
-                  <SupervisorEntryCard key={entry.id} entry={entry} />
-                ))}
-
-                {!liveEntries.length && selectedRunDetail?.final_result && (
+                {!visibleEntries.some((entry) => entry.kind === 'text') &&
+                  selectedRunDetail?.final_result && (
                   <div className="flex gap-4">
                     <Avatar className="h-8 w-8 shrink-0">
                       <AvatarFallback className="bg-primary/10 text-primary">
@@ -730,7 +1072,7 @@ export default function SupervisorPage({
                   </div>
                 )}
 
-                {isStreaming && !liveEntries.length && (
+                {isStreaming && !hasAssistantEntries && (
                   <div className="flex gap-4">
                     <Avatar className="h-8 w-8 shrink-0">
                       <AvatarFallback className="bg-primary/10 text-primary">
@@ -975,11 +1317,118 @@ function ToggleRow({
   );
 }
 
+/*
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function SupervisorEntryCard({
   entry,
+  userFallback,
 }: {
   entry: SupervisorDisplayEntry;
+  userFallback: string;
 }) {
+  if (entry.kind === 'user') {
+    void toolStatusLabel;
+    return (
+      <div className="flex gap-4 flex-row-reverse">
+        <Avatar className="h-8 w-8 shrink-0">
+          <AvatarFallback className="bg-primary text-primary-foreground">
+            {userFallback}
+          </AvatarFallback>
+        </Avatar>
+        <div className="text-right max-w-[80%]">
+          <div className="inline-block rounded-2xl px-4 py-3 bg-primary text-primary-foreground rounded-tr-sm">
+            <p className="text-sm whitespace-pre-wrap leading-relaxed">
+              {entry.content}
+            </p>
+          </div>
+          {entry.timestamp && (
+            <div className="flex justify-end mt-1">
+              <span className="text-[10px] text-muted-foreground">
+                {formatTime(entry.timestamp)}
+              </span>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (entry.kind === 'decision') {
+    const isApproved = entry.decisionAction === 'approve';
+    return (
+      <div className="flex gap-4">
+        <Avatar className="h-8 w-8 shrink-0">
+          <AvatarFallback
+            className={cn(
+              'text-xs',
+              isApproved
+                ? 'bg-green-500/10 text-green-600'
+                : 'bg-orange-500/10 text-orange-600'
+            )}
+          >
+            {isApproved ? <CheckCircle2 className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
+          </AvatarFallback>
+        </Avatar>
+        <div
+          className={cn(
+            'max-w-[80%] w-full rounded-lg border px-4 py-3',
+            isApproved
+              ? 'border-green-500/20 bg-green-500/5'
+              : 'border-orange-500/20 bg-orange-500/5'
+          )}
+        >
+          <p className="text-sm font-medium text-foreground">
+            {isApproved ? '已批准继续执行' : '已拒绝本次执行'}
+          </p>
+          <p className="text-xs text-muted-foreground mt-1">
+            {entry.toolName ? (
+              <>
+                工具 <span className="font-mono">{entry.toolName}</span>{' '}
+                {isApproved ? '已通过人工审批，Supervisor 继续执行。' : '已被人工拒绝。'}
+              </>
+            ) : isApproved ? (
+              '人工审批已通过，Supervisor 继续执行。'
+            ) : (
+              '人工审批已拒绝。'
+            )}
+          </p>
+          {entry.timestamp && (
+            <div className="mt-1">
+              <span className="text-[10px] text-muted-foreground">
+                {formatTime(entry.timestamp)}
+              </span>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (entry.kind === 'thinking') {
+    return (
+      <div className="flex gap-4">
+        <Avatar className="h-8 w-8 shrink-0">
+          <AvatarFallback className="bg-muted text-muted-foreground">
+            <Bot className="h-4 w-4" />
+          </AvatarFallback>
+        </Avatar>
+        <div className="max-w-[80%] w-full">
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
+            {entry.isComplete ? (
+              <CheckCircle2 className="h-3 w-3 text-green-600" />
+            ) : (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            )}
+            {entry.source || 'supervisor'} {entry.isComplete ? '思考完成' : '思考中'}
+          </div>
+          <div className="rounded-xl px-4 py-3 bg-muted/50 border border-border text-sm text-muted-foreground italic whitespace-pre-wrap">
+            {entry.content}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (entry.kind === 'thinking') {
     return (
       <div className="flex gap-4">
@@ -1028,6 +1477,29 @@ function SupervisorEntryCard({
   }
 
   if (entry.kind === 'tool_start' || entry.kind === 'tool_end') {
+    const toolStatus = entry.pendingApproval
+      ? 'waiting_review'
+      : entry.kind === 'tool_start'
+        ? 'running'
+        : entry.isError
+          ? 'error'
+          : 'completed';
+    const autoCollapse =
+      entry.kind === 'tool_end' &&
+      !entry.pendingApproval &&
+      !entry.isError;
+    const autoCollapse =
+      entry.kind === 'tool_end' &&
+      !entry.pendingApproval &&
+      !entry.isError;
+    const toolStatusLabel = entry.pendingApproval
+      ? '等待审批'
+      : entry.kind === 'tool_start'
+        ? '执行中'
+        : entry.isError
+          ? '错误'
+          : '完成';
+
     return (
       <div className="flex gap-4">
         <Avatar className="h-8 w-8 shrink-0">
@@ -1037,13 +1509,75 @@ function SupervisorEntryCard({
         </Avatar>
         <div className="max-w-[80%] w-full rounded-lg border border-primary/10 bg-primary/5 px-4 py-3 space-y-2">
           <div className="flex items-center gap-2">
-            {entry.kind === 'tool_start' ? (
+            {entry.pendingApproval ? (
+              <ShieldAlert className="h-3.5 w-3.5 text-yellow-600" />
+            ) : entry.kind === 'tool_start' ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
             ) : (
               <Wrench className="h-3.5 w-3.5 text-primary" />
             )}
             <span className="text-sm font-medium text-foreground">{entry.toolName}</span>
-            <Badge variant="outline" className={cn('text-[10px]', getStatusBadgeClass(entry.kind === 'tool_start' ? 'running' : entry.isError ? 'error' : 'completed'))}>
+            <Badge variant="outline" className={cn('text-[10px]', getStatusBadgeClass(toolStatus))}>
+              {toolStatusLabel}
+            </Badge>
+          </div>
+          {entry.toolArguments && Object.keys(entry.toolArguments).length > 0 && (
+            <pre className="text-xs text-muted-foreground bg-background/60 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">
+              {JSON.stringify(entry.toolArguments, null, 2)}
+            </pre>
+          )}
+          {entry.kind === 'tool_end' && entry.result != null && (
+            <pre
+              className={cn(
+                'text-xs bg-background/60 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all',
+                entry.isError ? 'text-destructive' : 'text-muted-foreground'
+              )}
+            >
+              {typeof entry.result === 'string'
+                ? entry.result
+                : JSON.stringify(entry.result, null, 2)}
+            </pre>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (false && (entry.kind === 'tool_start' || entry.kind === 'tool_end')) {
+    void entry.pendingApproval;
+    const toolStatus = entry.pendingApproval
+      ? 'waiting_review'
+      : entry.kind === 'tool_start'
+        ? 'running'
+        : entry.isError
+          ? 'error'
+          : 'completed';
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const _toolStatusLabel = entry.pendingApproval
+      ? '等待审批'
+      : entry.kind === 'tool_start'
+        ? '执行中'
+        : entry.isError
+          ? '错误'
+          : '完成';
+    return (
+      <div className="flex gap-4">
+        <Avatar className="h-8 w-8 shrink-0">
+          <AvatarFallback className="bg-primary/10 text-primary">
+            <Wrench className="h-4 w-4" />
+          </AvatarFallback>
+        </Avatar>
+        <div className="max-w-[80%] w-full rounded-lg border border-primary/10 bg-primary/5 px-4 py-3 space-y-2">
+          <div className="flex items-center gap-2">
+            {entry.pendingApproval ? (
+              <ShieldAlert className="h-3.5 w-3.5 text-yellow-600" />
+            ) : entry.kind === 'tool_start' ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+            ) : (
+              <Wrench className="h-3.5 w-3.5 text-primary" />
+            )}
+            <span className="text-sm font-medium text-foreground">{entry.toolName}</span>
+            <Badge variant="outline" className={cn('text-[10px]', getStatusBadgeClass(toolStatus))}>
               {entry.kind === 'tool_start' ? '执行中' : entry.isError ? '错误' : '完成'}
             </Badge>
           </div>
@@ -1068,6 +1602,7 @@ function SupervisorEntryCard({
   }
 
   if (entry.kind === 'sub_agent_start' || entry.kind === 'sub_agent_end') {
+    const autoCollapse = entry.kind === 'sub_agent_end';
     return (
       <div className="flex gap-4">
         <Avatar className="h-8 w-8 shrink-0">
@@ -1113,6 +1648,7 @@ function SupervisorEntryCard({
   }
 
   if (entry.kind === 'review_start' || entry.kind === 'review_end') {
+    const autoCollapse = entry.kind === 'review_end';
     return (
       <div className="flex gap-4">
         <Avatar className="h-8 w-8 shrink-0">
@@ -1199,6 +1735,353 @@ function SupervisorEntryCard({
       <div className="max-w-[80%] w-full rounded-lg border border-destructive/20 bg-destructive/5 px-4 py-3">
         <p className="text-sm font-medium text-foreground">运行错误</p>
         <p className="text-xs text-muted-foreground mt-1 whitespace-pre-wrap break-words">
+          {entry.content}
+        </p>
+      </div>
+    </div>
+  );
+}
+*/
+function SupervisorTimelineEntryCard({
+  entry,
+  userFallback,
+}: {
+  entry: SupervisorDisplayEntry;
+  userFallback: string;
+}) {
+  if (entry.kind === 'user') {
+    return (
+      <div className="flex gap-4 flex-row-reverse">
+        <Avatar className="h-8 w-8 shrink-0">
+          <AvatarFallback className="bg-primary text-primary-foreground">
+            {userFallback}
+          </AvatarFallback>
+        </Avatar>
+        <div className="max-w-[80%] text-right">
+          <div className="inline-block rounded-2xl rounded-tr-sm bg-primary px-4 py-3 text-primary-foreground">
+            <p className="text-sm whitespace-pre-wrap leading-relaxed">
+              {entry.content}
+            </p>
+          </div>
+          {entry.timestamp && (
+            <div className="mt-1 flex justify-end">
+              <span className="text-[10px] text-muted-foreground">
+                {formatTime(entry.timestamp)}
+              </span>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (entry.kind === 'decision') {
+    const isApproved = entry.decisionAction === 'approve';
+    return (
+      <div className="flex gap-4">
+        <Avatar className="h-8 w-8 shrink-0">
+          <AvatarFallback
+            className={cn(
+              'text-xs',
+              isApproved
+                ? 'bg-green-500/10 text-green-600'
+                : 'bg-orange-500/10 text-orange-600'
+            )}
+          >
+            {isApproved ? <CheckCircle2 className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
+          </AvatarFallback>
+        </Avatar>
+        <div
+          className={cn(
+            'max-w-[80%] w-full rounded-lg border px-4 py-3',
+            isApproved
+              ? 'border-green-500/20 bg-green-500/5'
+              : 'border-orange-500/20 bg-orange-500/5'
+          )}
+        >
+          <p className="text-sm font-medium text-foreground">
+            {isApproved ? '已批准继续执行' : '已拒绝本次执行'}
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {entry.toolName ? (
+              <>
+                工具 <span className="font-mono">{entry.toolName}</span>
+                {isApproved ? ' 已通过人工审批，Supervisor 继续执行。' : ' 已被人工拒绝。'}
+              </>
+            ) : isApproved ? (
+              '人工审批已通过，Supervisor 继续执行。'
+            ) : (
+              '人工审批已拒绝。'
+            )}
+          </p>
+          {entry.timestamp && (
+            <div className="mt-1">
+              <span className="text-[10px] text-muted-foreground">
+                {formatTime(entry.timestamp)}
+              </span>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (entry.kind === 'thinking') {
+    return (
+      <div className="flex gap-4">
+        <Avatar className="h-8 w-8 shrink-0">
+          <AvatarFallback className="bg-muted text-muted-foreground">
+            <Bot className="h-4 w-4" />
+          </AvatarFallback>
+        </Avatar>
+        <div className="max-w-[80%]">
+          <div className="mb-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+            {entry.isComplete ? (
+              <CheckCircle2 className="h-3 w-3 text-green-600" />
+            ) : (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            )}
+            {(entry.source || 'supervisor')} {entry.isComplete ? '思考完成' : '思考中'}
+          </div>
+          <AutoCollapseDetails
+            entryId={entry.id}
+            autoCollapse={
+              entry.kind === 'tool_end' &&
+              !entry.pendingApproval &&
+              !entry.isError
+            }
+            summary="思考内容已折叠"
+          >
+            <div className="rounded-xl border border-border bg-muted/50 px-4 py-3 text-sm italic text-muted-foreground whitespace-pre-wrap">
+              {entry.content}
+            </div>
+          </AutoCollapseDetails>
+        </div>
+      </div>
+    );
+  }
+
+  if (entry.kind === 'text') {
+    return (
+      <div className="flex gap-4">
+        <Avatar className="h-8 w-8 shrink-0">
+          <AvatarFallback className="bg-primary/10 text-primary">
+            <Brain className="h-4 w-4" />
+          </AvatarFallback>
+        </Avatar>
+        <div className="max-w-[80%]">
+          <div className="mb-1 flex items-center gap-2">
+            <Badge variant="outline" className="border-primary/20 text-[10px] text-primary">
+              {entry.source || 'supervisor'}
+            </Badge>
+          </div>
+          <div className="inline-block rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-3">
+            <div className="prose prose-custom prose-sm dark:prose-invert max-w-none break-words">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {entry.content || ''}
+              </ReactMarkdown>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (entry.kind === 'tool_start' || entry.kind === 'tool_end') {
+    const toolStatus = entry.pendingApproval
+      ? 'waiting_review'
+      : entry.kind === 'tool_start'
+        ? 'running'
+        : entry.isError
+          ? 'error'
+          : 'completed';
+    const toolStatusLabel = entry.pendingApproval
+      ? '等待审批'
+      : entry.kind === 'tool_start'
+        ? '执行中'
+        : entry.isError
+          ? '错误'
+          : '完成';
+
+    return (
+      <div className="flex gap-4">
+        <Avatar className="h-8 w-8 shrink-0">
+          <AvatarFallback className="bg-primary/10 text-primary">
+            <Wrench className="h-4 w-4" />
+          </AvatarFallback>
+        </Avatar>
+        <div className="max-w-[80%] w-full space-y-2 rounded-lg border border-primary/10 bg-primary/5 px-4 py-3">
+          <div className="flex items-center gap-2">
+            {entry.pendingApproval ? (
+              <ShieldAlert className="h-3.5 w-3.5 text-yellow-600" />
+            ) : entry.kind === 'tool_start' ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+            ) : (
+              <Wrench className="h-3.5 w-3.5 text-primary" />
+            )}
+            <span className="text-sm font-medium text-foreground">{entry.toolName}</span>
+            <Badge variant="outline" className={cn('text-[10px]', getStatusBadgeClass(toolStatus))}>
+              {toolStatusLabel}
+            </Badge>
+          </div>
+          <AutoCollapseDetails
+            entryId={entry.id}
+            autoCollapse={
+              entry.kind === 'tool_end' &&
+              !entry.pendingApproval &&
+              !entry.isError
+            }
+            summary="参数与结果已折叠"
+          >
+            {entry.toolArguments && Object.keys(entry.toolArguments).length > 0 && (
+              <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded bg-background/60 p-2 text-xs text-muted-foreground">
+                {JSON.stringify(entry.toolArguments, null, 2)}
+              </pre>
+            )}
+            {entry.kind === 'tool_end' && entry.result != null && (
+              <pre
+                className={cn(
+                  'overflow-x-auto whitespace-pre-wrap break-all rounded bg-background/60 p-2 text-xs',
+                  entry.isError ? 'text-destructive' : 'text-muted-foreground'
+                )}
+              >
+                {typeof entry.result === 'string'
+                  ? entry.result
+                  : JSON.stringify(entry.result, null, 2)}
+              </pre>
+            )}
+          </AutoCollapseDetails>
+        </div>
+      </div>
+    );
+  }
+
+  if (entry.kind === 'sub_agent_start' || entry.kind === 'sub_agent_end') {
+    const autoCollapse = entry.kind === 'sub_agent_end';
+    return (
+      <div className="flex gap-4">
+        <Avatar className="h-8 w-8 shrink-0">
+          <AvatarFallback className="bg-primary/10 text-primary">
+            <Sparkles className="h-4 w-4" />
+          </AvatarFallback>
+        </Avatar>
+        <div className="max-w-[80%] w-full space-y-2 rounded-lg border border-primary/10 bg-primary/5 px-4 py-3">
+          <div className="flex items-center gap-2">
+            {entry.kind === 'sub_agent_start' ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+            ) : (
+              <CheckCircle2 className="h-3.5 w-3.5 text-green-600" />
+            )}
+            <span className="text-sm font-medium text-foreground">{entry.subAgentName}</span>
+            <Badge
+              variant="outline"
+              className={cn(
+                'text-[10px]',
+                getStatusBadgeClass(entry.kind === 'sub_agent_start' ? 'running' : 'completed')
+              )}
+            >
+              {entry.kind === 'sub_agent_start' ? '执行中' : '完成'}
+            </Badge>
+          </div>
+          <AutoCollapseDetails
+            entryId={entry.id}
+            autoCollapse={autoCollapse}
+            summary="任务说明与结果已折叠"
+          >
+            {entry.taskDescription && (
+              <p className="text-xs text-muted-foreground whitespace-pre-wrap break-words">
+                {entry.taskDescription}
+              </p>
+            )}
+            {entry.kind === 'sub_agent_end' && entry.result != null && (
+              <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded bg-background/60 p-2 text-xs text-muted-foreground">
+                {typeof entry.result === 'string'
+                  ? entry.result
+                  : JSON.stringify(entry.result, null, 2)}
+              </pre>
+            )}
+          </AutoCollapseDetails>
+        </div>
+      </div>
+    );
+  }
+
+  if (entry.kind === 'review_start' || entry.kind === 'review_end') {
+    const autoCollapse = entry.kind === 'review_end';
+    return (
+      <div className="flex gap-4">
+        <Avatar className="h-8 w-8 shrink-0">
+          <AvatarFallback className="bg-yellow-500/10 text-yellow-600">
+            <ShieldAlert className="h-4 w-4" />
+          </AvatarFallback>
+        </Avatar>
+        <div className="max-w-[80%] w-full space-y-2 rounded-lg border border-yellow-500/20 bg-yellow-500/5 px-4 py-3">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium text-foreground">
+              Reviewer · {entry.subAgentName}
+            </span>
+            {entry.kind === 'review_end' && (
+              <Badge
+                variant="outline"
+                className={cn('text-[10px]', getStatusBadgeClass(entry.passed ? 'completed' : 'error'))}
+              >
+                {entry.passed ? '通过' : '未通过'}
+              </Badge>
+            )}
+          </div>
+          <AutoCollapseDetails
+            entryId={entry.id}
+            autoCollapse={autoCollapse}
+            summary="评审细节已折叠"
+          >
+            {entry.criteria && (
+              <p className="text-xs text-muted-foreground">
+                Criteria: {entry.criteria.join(' / ')}
+              </p>
+            )}
+            {entry.feedback && (
+              <p className="text-xs text-muted-foreground whitespace-pre-wrap break-words">
+                {entry.feedback}
+              </p>
+            )}
+          </AutoCollapseDetails>
+        </div>
+      </div>
+    );
+  }
+
+  if (entry.kind === 'interrupt') {
+    return (
+      <div className="flex gap-4">
+        <Avatar className="h-8 w-8 shrink-0">
+          <AvatarFallback className="bg-yellow-500/10 text-yellow-600">
+            <ShieldAlert className="h-4 w-4" />
+          </AvatarFallback>
+        </Avatar>
+        <div className="max-w-[80%] w-full rounded-lg border border-yellow-500/20 bg-yellow-500/5 px-4 py-3">
+          <p className="text-sm font-medium text-foreground">等待人工审阅</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            工具 <span className="font-mono text-yellow-600">{entry.toolName}</span> 正在等待审批
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (entry.kind === 'done') {
+    return null;
+  }
+
+  return (
+    <div className="flex gap-4">
+      <Avatar className="h-8 w-8 shrink-0">
+        <AvatarFallback className="bg-destructive/10 text-destructive">
+          <XCircle className="h-4 w-4" />
+        </AvatarFallback>
+      </Avatar>
+      <div className="max-w-[80%] w-full rounded-lg border border-destructive/20 bg-destructive/5 px-4 py-3">
+        <p className="text-sm font-medium text-foreground">运行错误</p>
+        <p className="mt-1 whitespace-pre-wrap break-words text-xs text-muted-foreground">
           {entry.content}
         </p>
       </div>
