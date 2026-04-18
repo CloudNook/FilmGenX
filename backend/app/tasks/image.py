@@ -247,15 +247,26 @@ async def _run_image_generation(task: ImageGenerationTask, task_db_id: int) -> d
                         )
                         asset_id = new_asset.id
 
-                    # Update character with generated image
-                    if character:
-                        reference_urls = list(character.reference_image_urls or [])
+                # Update character/location cover fields with generated image.
+                if character:
+                    character_update_data = {
+                        "pic_url": image_url,
+                        "pic_name": filename,
+                    }
+                    if hasattr(character, "reference_image_urls"):
+                        reference_urls = list(getattr(character, "reference_image_urls", []) or [])
                         if image_url not in reference_urls:
                             reference_urls.append(image_url)
-                            await character_repo.update(
-                                character,
-                                {"reference_image_urls": reference_urls},
-                            )
+                        character_update_data["reference_image_urls"] = reference_urls
+                    await character_repo.update(character, character_update_data)
+                elif location:
+                    await location_repo.update(
+                        location,
+                        {
+                            "pic_url": image_url,
+                            "pic_name": filename,
+                        },
+                    )
 
                 # 将生成的图片写入 ShotGroup.image_start_url（首帧参考图）
                 if shot_group_id:

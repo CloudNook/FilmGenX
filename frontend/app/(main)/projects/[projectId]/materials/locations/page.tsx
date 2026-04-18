@@ -6,9 +6,11 @@ import {
   assetsApi,
   locationsApi,
   projectsApi,
+  tasksApi,
   type AssetResponse,
   type LocationResponse,
   type ProjectResponse,
+  type TaskResponse,
 } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -48,6 +50,7 @@ import {
   MapPin,
   Plus,
   Search,
+  Sparkles,
   Trash2,
   Trees,
   Upload,
@@ -68,6 +71,16 @@ const locationTypeIcons: Record<string, typeof Building> = {
   fantasy: Layers,
   mixed: Layers,
 };
+
+const FINAL_TASK_STATES = new Set(['success', 'completed', 'failed', 'cancelled']);
+const SUCCESS_TASK_STATES = new Set(['success', 'completed']);
+
+const STYLE_PRESETS = [
+  { value: 'anime', label: 'Anime' },
+  { value: 'cinematic', label: 'Cinematic' },
+  { value: 'realistic', label: 'Realistic' },
+  { value: 'sketch', label: 'Sketch' },
+];
 
 interface PendingImageFile {
   id: string;
@@ -91,6 +104,12 @@ function createPendingImageFiles(files: FileList | null, limit: number): Pending
     nextFiles.push({ id: `${Date.now()}-${Math.random()}`, file, preview: URL.createObjectURL(file) });
   });
   return nextFiles;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function EmptyState({ title, description }: { title: string; description: string }) {
@@ -261,6 +280,14 @@ export default function LocationsPage({ params }: { params: Promise<{ projectId:
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [uploadingPic, setUploadingPic] = useState(false);
   const [deletingPic, setDeletingPic] = useState(false);
+  const [genPrompt, setGenPrompt] = useState('');
+  const [genNegativePrompt, setGenNegativePrompt] = useState('');
+  const [genAspectRatio, setGenAspectRatio] = useState('16:9');
+  const [genResolution, setGenResolution] = useState('1K');
+  const [genStylePreset, setGenStylePreset] = useState('cinematic');
+  const [useCurrentPicAsRef, setUseCurrentPicAsRef] = useState(true);
+  const [manualRefUrl, setManualRefUrl] = useState('');
+  const [generatingMaterial, setGeneratingMaterial] = useState(false);
   const picFileInputRef = useRef<HTMLInputElement>(null);
   const uploadFilesRef = useRef<PendingImageFile[]>([]);
 
@@ -362,6 +389,81 @@ export default function LocationsPage({ params }: { params: Promise<{ projectId:
       setUploadingSceneImage(false);
     }
   }, [locDetail, uploadFiles, uploadFilesToLocation, resetPreviewFiles, loadLocationAssets]);
+
+  const handleGenerateLocationMaterial = useCallback(async () => {
+    if (!locDetail) {
+      toast.error('请先选择场景');
+      return;
+    }
+    if (!genPrompt.trim()) {
+      toast.error('请输入提示词');
+      return;
+    }
+
+    const refUrls = Array.from(
+      new Set(
+        [
+          useCurrentPicAsRef ? locDetail.pic_url : null,
+          manualRefUrl.trim() || null,
+        ].filter((item): item is string => Boolean(item)),
+      ),
+    );
+
+    setGeneratingMaterial(true);
+    try {
+      const task = await tasksApi.triggerImage({
+        project_id: projectIdNum,
+        location_id: locDetail.id,
+        prompt: genPrompt.trim(),
+        negative_prompt: genNegativePrompt.trim() || undefined,
+        aspect_ratio: genAspectRatio,
+        resolution: genResolution,
+        style_preset: genStylePreset || undefined,
+        reference_image_urls: refUrls.length > 0 ? refUrls : undefined,
+        save_to_shot: true,
+      });
+
+      let latestTask: TaskResponse | null = null;
+      for (let i = 0; i < 120; i += 1) {
+        await sleep(2000);
+        const currentTask = await tasksApi.get(task.id);
+        if (FINAL_TASK_STATES.has(currentTask.status)) {
+          latestTask = currentTask;
+          break;
+        }
+      }
+
+      if (!latestTask) {
+        throw new Error('任务执行超时，请稍后在素材库查看结果');
+      }
+      if (!SUCCESS_TASK_STATES.has(latestTask.status)) {
+        throw new Error(latestTask.error_message || '生成失败');
+      }
+
+      const [updatedLocation] = await Promise.all([
+        loadLocationDetail(locDetail.id),
+        loadLocationAssets(locDetail.id),
+      ]);
+      setLocations((prev) => prev.map((item) => (item.id === updatedLocation.id ? updatedLocation : item)));
+      toast.success(refUrls.length > 0 ? '图生图生成成功' : '文生图生成成功');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '生成失败');
+    } finally {
+      setGeneratingMaterial(false);
+    }
+  }, [
+    genAspectRatio,
+    genNegativePrompt,
+    genPrompt,
+    genResolution,
+    genStylePreset,
+    loadLocationAssets,
+    loadLocationDetail,
+    locDetail,
+    manualRefUrl,
+    projectIdNum,
+    useCurrentPicAsRef,
+  ]);
 
   // Create location
   const handleCreateLocation = useCallback(async () => {
@@ -548,6 +650,115 @@ export default function LocationsPage({ params }: { params: Promise<{ projectId:
                   </Button>
                 )}
               </div>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle>AI 生成素材</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">提示词 *</label>
+                    <Textarea
+                      value={genPrompt}
+                      onChange={(e) => setGenPrompt(e.target.value)}
+                      placeholder="输入场景生成提示词，如：古风竹林夜景，薄雾，月光，电影级构图..."
+                      rows={4}
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">负向提示词（可选）</label>
+                    <Input
+                      value={genNegativePrompt}
+                      onChange={(e) => setGenNegativePrompt(e.target.value)}
+                      placeholder="如：低清晰度、过曝、人物变形"
+                    />
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">画幅</label>
+                      <select
+                        className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                        value={genAspectRatio}
+                        onChange={(e) => setGenAspectRatio(e.target.value)}
+                        disabled={generatingMaterial}
+                      >
+                        <option value="1:1">1:1</option>
+                        <option value="16:9">16:9</option>
+                        <option value="9:16">9:16</option>
+                        <option value="4:3">4:3</option>
+                        <option value="3:4">3:4</option>
+                      </select>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">分辨率</label>
+                      <select
+                        className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                        value={genResolution}
+                        onChange={(e) => setGenResolution(e.target.value)}
+                        disabled={generatingMaterial}
+                      >
+                        <option value="512">512</option>
+                        <option value="1K">1K</option>
+                        <option value="2K">2K</option>
+                        <option value="4K">4K</option>
+                      </select>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">风格</label>
+                      <select
+                        className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                        value={genStylePreset}
+                        onChange={(e) => setGenStylePreset(e.target.value)}
+                        disabled={generatingMaterial}
+                      >
+                        {STYLE_PRESETS.map((item) => (
+                          <option key={item.value} value={item.value}>
+                            {item.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2 rounded-lg border bg-muted/20 p-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-medium">图生图参考</span>
+                      {locDetail.pic_url ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant={useCurrentPicAsRef ? 'default' : 'outline'}
+                          onClick={() => setUseCurrentPicAsRef((prev) => !prev)}
+                          disabled={generatingMaterial}
+                        >
+                          {useCurrentPicAsRef ? '已使用当前封面' : '使用当前封面'}
+                        </Button>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">当前场景没有封面图，可仅使用下方 URL</span>
+                      )}
+                    </div>
+                    <Input
+                      value={manualRefUrl}
+                      onChange={(e) => setManualRefUrl(e.target.value)}
+                      placeholder="可选：输入参考图 URL（支持图生图）"
+                      disabled={generatingMaterial}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      不填参考图时会走文生图；填写任一参考图后会自动走图生图。
+                    </p>
+                  </div>
+
+                  <Button
+                    onClick={handleGenerateLocationMaterial}
+                    disabled={generatingMaterial || !genPrompt.trim()}
+                  >
+                    {generatingMaterial ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Sparkles className="h-4 w-4 mr-2" />}
+                    {generatingMaterial ? '生成中...' : '生成并保存到场景'}
+                  </Button>
+                </CardContent>
+              </Card>
 
               {/* 上传图片到素材库 */}
               <Card>
