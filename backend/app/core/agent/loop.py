@@ -13,6 +13,8 @@ import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, List, Optional
 
+from fastapi.encoders import jsonable_encoder
+
 from app.core.agent.base import (
     AgentConfig, AgentMessage, AgentResult, ToolCall, ToolExecutionResult,
     ToolResult, ThinkingEvent, TextEvent, ToolStartEvent, ToolEndEvent,
@@ -181,11 +183,25 @@ class AgentLoop:
 
     @staticmethod
     def _serialize_tool_result_content(result: Any) -> str:
-        return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+        return result if isinstance(result, str) else AgentLoop._to_json_string(result)
 
     @staticmethod
     def _format_tool_result(tool_name: str, result: Any) -> str:
-        return f"[TOOL: {tool_name}] {json.dumps(result, ensure_ascii=False)}"
+        return f"[TOOL: {tool_name}] {AgentLoop._to_json_string(result)}"
+
+    @staticmethod
+    def _to_json_string(value: Any) -> str:
+        """
+        将任意工具结果转成稳定 JSON 字符串。
+
+        先使用 jsonable_encoder 处理 datetime/date/UUID/Decimal 等常见类型，
+        再通过 default=str 兜底，避免序列化阶段中断整个 AgentLoop。
+        """
+        return json.dumps(
+            jsonable_encoder(value),
+            ensure_ascii=False,
+            default=str,
+        )
 
     def _build_assistant_metadata(
         self,

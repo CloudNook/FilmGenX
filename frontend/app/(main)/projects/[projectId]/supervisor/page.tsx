@@ -39,7 +39,6 @@ import {
   buildSupervisorUserEntry,
   buildWorkflowNodeSummaries,
   resolveInitialSupervisorRunId,
-  splitSupervisorDisplayEntries,
   type SupervisorDisplayEntry,
 } from '@/lib/supervisor-display';
 import {
@@ -69,6 +68,21 @@ interface HitlState {
   availableActions: string[];
   context: Record<string, unknown>;
 }
+
+type TimelineBlock =
+  | {
+      kind: 'entry';
+      id: string;
+      entry: SupervisorDisplayEntry;
+    }
+  | {
+      kind: 'sub_session';
+      id: string;
+      sessionId: string;
+      source: string;
+      title: string;
+      entries: SupervisorDisplayEntry[];
+    };
 
 function getSupervisorSelectionStorageKey(projectId: number) {
   return `filmgenx_supervisor_selected_${projectId}`;
@@ -247,10 +261,50 @@ export default function SupervisorPage({
     }
     return stripResolvedInterruptEntries(displayedEntries);
   }, [displayedEntries, hitl, selectedRunDetail?.status]);
-  const { mainEntries, sessionGroups } = useMemo(
-    () => splitSupervisorDisplayEntries(visibleEntries),
-    [visibleEntries],
-  );
+  const timelineBlocks = useMemo<TimelineBlock[]>(() => {
+    const blocks: TimelineBlock[] = [];
+    const sessionIndex = new Map<string, number>();
+
+    for (const entry of visibleEntries) {
+      const sessionId = entry.sessionId;
+      if (!sessionId?.startsWith('sub-')) {
+        blocks.push({
+          kind: 'entry',
+          id: `entry-${entry.id}`,
+          entry,
+        });
+        continue;
+      }
+
+      const blockIndex = sessionIndex.get(sessionId);
+      if (blockIndex == null) {
+        blocks.push({
+          kind: 'sub_session',
+          id: `sub-session-${sessionId}`,
+          sessionId,
+          source: entry.source || 'sub-agent',
+          title: entry.subAgentName || entry.source || sessionId,
+          entries: [entry],
+        });
+        sessionIndex.set(sessionId, blocks.length - 1);
+        continue;
+      }
+
+      const block = blocks[blockIndex];
+      if (block.kind !== 'sub_session') {
+        continue;
+      }
+      block.entries.push(entry);
+      if (
+        (!block.title || block.title === block.source || block.title === block.sessionId) &&
+        entry.subAgentName
+      ) {
+        block.title = entry.subAgentName;
+      }
+    }
+
+    return blocks;
+  }, [visibleEntries]);
   const hasAssistantEntries = useMemo(
     () => visibleEntries.some((entry) => entry.kind !== 'user'),
     [visibleEntries],
@@ -956,51 +1010,27 @@ export default function SupervisorPage({
                   </div>
                 )}
 
-                {mainEntries.map((entry) => (
-                  <SupervisorTimelineEntryCard
-                    key={entry.id}
-                    entry={entry}
-                    userFallback={userFallback}
-                  />
-                ))}
-
-                {sessionGroups.length > 0 && (
-                  <div className="space-y-3 pt-2">
-                    <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                      <Sparkles className="h-3.5 w-3.5" />
-                      Sub-Agent Sessions
-                    </div>
-                    {sessionGroups.map((group) => (
-                      <div
-                        key={group.sessionId}
-                        className="rounded-2xl border border-border bg-card/70 p-4 space-y-3"
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <p className="text-sm font-medium text-foreground">
-                              {group.title}
-                            </p>
-                            <p className="text-[10px] text-muted-foreground font-mono break-all">
-                              {group.sessionId}
-                            </p>
-                          </div>
-                          <Badge variant="outline" className="text-[10px] border-primary/20 text-primary">
-                            {group.source}
-                          </Badge>
-                        </div>
-                        <div className="space-y-3">
-                          {group.entries.map((entry) => (
-                            <SupervisorTimelineEntryCard
-                              key={entry.id}
-                              entry={entry}
-                              userFallback={userFallback}
-                            />
-                          ))}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                {timelineBlocks.map((block) => {
+                  if (block.kind === 'entry') {
+                    return (
+                      <SupervisorTimelineEntryCard
+                        key={block.id}
+                        entry={block.entry}
+                        userFallback={userFallback}
+                      />
+                    );
+                  }
+                  return (
+                    <SubAgentSessionCard
+                      key={block.id}
+                      title={block.title}
+                      source={block.source}
+                      sessionId={block.sessionId}
+                      entries={block.entries}
+                      userFallback={userFallback}
+                    />
+                  );
+                })}
 
                 {!visibleEntries.some((entry) => entry.kind === 'text') &&
                   selectedRunDetail?.final_result && (
@@ -1314,6 +1344,123 @@ function ToggleRow({
         />
       </button>
     </label>
+  );
+}
+
+function SubAgentSessionCard({
+  title,
+  source,
+  sessionId,
+  entries,
+  userFallback,
+}: {
+  title: string;
+  source: string;
+  sessionId: string;
+  entries: SupervisorDisplayEntry[];
+  userFallback: string;
+}) {
+  const hasCompleted = entries.some((entry) => entry.kind === 'sub_agent_end');
+  const hasError = entries.some(
+    (entry) =>
+      entry.kind === 'error' ||
+      (entry.kind === 'tool_end' && entry.isError),
+  );
+  const waitingReview = entries.some(
+    (entry) =>
+      entry.kind === 'interrupt' ||
+      entry.pendingApproval === true,
+  );
+
+  const status: string = hasError
+    ? 'failed'
+    : waitingReview
+      ? 'waiting_review'
+      : hasCompleted
+        ? 'completed'
+        : 'running';
+  const statusLabel = hasError
+    ? '错误'
+    : waitingReview
+      ? '等待审批'
+      : hasCompleted
+        ? '完成'
+        : '运行中';
+
+  const latestText = [...entries]
+    .reverse()
+    .find((entry) => entry.kind === 'text' && entry.content?.trim());
+  const preview = latestText?.content?.trim().slice(0, 96);
+
+  const [open, setOpen] = useState(!hasCompleted);
+  const hadCompletedRef = useRef(hasCompleted);
+
+  useEffect(() => {
+    if (!hadCompletedRef.current && hasCompleted) {
+      setOpen(false);
+    }
+    hadCompletedRef.current = hasCompleted;
+  }, [hasCompleted]);
+
+  return (
+    <Collapsible
+      open={open}
+      onOpenChange={setOpen}
+      className="rounded-xl border border-border bg-card"
+    >
+      <CollapsibleTrigger asChild>
+        <button
+          type="button"
+          className="flex w-full items-start justify-between gap-3 px-4 py-3 text-left hover:bg-secondary/30"
+        >
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <Sparkles className="h-3.5 w-3.5 text-primary" />
+              <span className="text-sm font-medium text-foreground">
+                {title}
+              </span>
+              <Badge
+                variant="outline"
+                className={cn('text-[10px]', getStatusBadgeClass(status))}
+              >
+                {statusLabel}
+              </Badge>
+              <Badge variant="outline" className="text-[10px]">
+                {entries.length} 条
+              </Badge>
+            </div>
+            <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
+              <span>{source || 'sub-agent'}</span>
+              <span>·</span>
+              <span className="font-mono">{sessionId}</span>
+            </div>
+            {preview && (
+              <p className="mt-2 line-clamp-2 text-xs text-muted-foreground">
+                {preview}
+              </p>
+            )}
+          </div>
+          <div className="shrink-0 pt-1 text-muted-foreground">
+            {open ? (
+              <ChevronDown className="h-4 w-4" />
+            ) : (
+              <ChevronRight className="h-4 w-4" />
+            )}
+          </div>
+        </button>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="border-t border-border px-4 py-3">
+        <div className="space-y-3">
+          {entries.map((entry) => (
+            <SupervisorTimelineEntryCard
+              key={`${sessionId}-${entry.id}`}
+              entry={entry}
+              userFallback={userFallback}
+            />
+          ))}
+        </div>
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 
