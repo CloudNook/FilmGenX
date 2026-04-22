@@ -98,6 +98,18 @@ class ReviewEndEvent(BaseModel):
     source: str = "supervisor"
 
 
+class SupervisorStartedEvent(BaseModel):
+    """Supervisor 流开始事件。"""
+
+    type: Literal["supervisor_started"] = "supervisor_started"
+    workflow_id: int
+    supervisor_session_id: str
+    status: str
+    workflow_profile: str
+    auto_run: bool
+    source: str = "supervisor"
+
+
 class SupervisorDoneEvent(BaseModel):
     """Supervisor 流水线执行完毕。"""
     type: Literal["supervisor_done"] = "supervisor_done"
@@ -117,5 +129,6 @@ SupervisorStreamEvent = Union[
     SubAgentEndEvent,
     ReviewStartEvent,
     ReviewEndEvent,
+    SupervisorStartedEvent,
     SupervisorDoneEvent,
 ]

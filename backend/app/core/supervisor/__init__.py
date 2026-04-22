@@ -7,8 +7,12 @@ Supervisor 模块。
 - 继续复用底层 Agent runtime
 """
 
-from app.core.supervisor.context import SupervisorContext, ReviewEntry
-from app.core.supervisor.session import SupervisorSession
+from app.core.supervisor.context import (
+    ExecutionRecord,
+    ReviewEntry,
+    SubAgentSessionRecord,
+    SupervisorContext,
+)
 from app.core.supervisor.registry import (
     RegisteredAgent,
     SupervisorAgentRegistry,
@@ -33,6 +37,18 @@ from app.core.supervisor.events import (
     SupervisorDoneEvent,
     SupervisorStreamEvent,
 )
+from app.core.supervisor.errors import (
+    SupervisorInterruptNotFoundError,
+    SupervisorInvalidStateError,
+    SupervisorRuntimeError,
+    SupervisorSessionNotFoundError,
+)
+from app.core.supervisor.persist import SupervisorEventStore, SupervisorWorkflowStore
+from app.core.supervisor.query import (
+    SupervisorInterruptStateRecord,
+    SupervisorQuery,
+    SupervisorWorkflowDetailRecord,
+)
 from app.core.supervisor.supervisor import SupervisorAgent
 from app.core.supervisor.factory import create_supervisor
 from app.core.supervisor.tools import (
@@ -44,10 +60,11 @@ from app.core.supervisor.tools import (
 from app.core.supervisor.reviewer import build_reviewer_prompt
 
 __all__ = [
-    # Context & Session
+    # Context
     "SupervisorContext",
     "ReviewEntry",
-    "SupervisorSession",
+    "SubAgentSessionRecord",
+    "ExecutionRecord",
     "RegisteredAgent",
     "SupervisorAgentRegistry",
     "WorkflowNodeDefinition",
@@ -67,6 +84,15 @@ __all__ = [
     "ReviewEndEvent",
     "SupervisorDoneEvent",
     "SupervisorStreamEvent",
+    "SupervisorRuntimeError",
+    "SupervisorInvalidStateError",
+    "SupervisorInterruptNotFoundError",
+    "SupervisorSessionNotFoundError",
+    "SupervisorEventStore",
+    "SupervisorWorkflowStore",
+    "SupervisorQuery",
+    "SupervisorWorkflowDetailRecord",
+    "SupervisorInterruptStateRecord",
     # Core
     "SupervisorAgent",
     "create_supervisor",

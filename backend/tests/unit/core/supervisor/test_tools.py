@@ -8,10 +8,11 @@ from app.core.agent.base import (
     ToolEndEvent,
     ToolStartEvent,
 )
+from app.core.agent.persist.db_strategy import DBPersistStrategy
 from app.core.supervisor.concurrency import SubAgentConcurrencyLimiter
 from app.core.supervisor.context import SupervisorContext
 from app.core.supervisor.registry import RegisteredAgent, SupervisorAgentRegistry
-from app.core.supervisor.tools import call_sub_agent
+from app.core.supervisor.tools import call_reviewer, call_sub_agent
 from app.core.supervisor.tools import get_workflow_state
 from app.core.supervisor.workflow import WorkflowNodeDefinition
 
@@ -39,6 +40,41 @@ async def test_get_workflow_state_returns_structured_snapshot():
     assert payload["review_history"] == []
     assert "current_phase" not in payload
     assert "artifacts" not in payload
+
+
+@pytest.mark.asyncio
+async def test_get_workflow_state_serializes_typed_context_records():
+    ctx = SupervisorContext(
+        supervisor_session_id="sv-typed-001",
+        user_request="start",
+        workflow_definitions=[
+            WorkflowNodeDefinition(
+                key="outline",
+                label="Outline",
+                node_type="text",
+                depends_on=[],
+            ),
+        ],
+    )
+    ctx.register_sub_agent_session("outline_agent", "sub-outline-001")
+    ctx.record_execution(
+        agent_name="outline_agent",
+        session_id="sub-outline-001",
+        status="completed",
+        node_keys=["outline"],
+    )
+
+    payload = await get_workflow_state(supervisor_context=ctx)
+
+    assert payload["sub_agent_sessions"] == {"outline_agent": "sub-outline-001"}
+    assert payload["execution_history"] == [
+        {
+            "agent_name": "outline_agent",
+            "session_id": "sub-outline-001",
+            "status": "completed",
+            "node_keys": ["outline"],
+        }
+    ]
 
 
 class _FakeAgent:
@@ -286,3 +322,86 @@ async def test_call_sub_agent_emits_error_event_without_mutating_base_model(monk
     assert events[1].session_id.startswith("sub-outline_agent-")
     assert events[-1].type == "sub_agent_end"
     assert events[-1].result["error"] == "sub-agent boom"
+
+
+@pytest.mark.asyncio
+async def test_call_sub_agent_binds_db_persist_to_supervisor_session(monkeypatch):
+    captured = {}
+
+    def _fake_create_agent(**kwargs):
+        captured.update(kwargs)
+        return _FakeAgent()
+
+    monkeypatch.setattr("app.core.supervisor.tools.create_agent", _fake_create_agent)
+
+    ctx = SupervisorContext(
+        supervisor_session_id="sv-persist-001",
+        user_request="start",
+        workflow_definitions=[
+            WorkflowNodeDefinition(
+                key="outline",
+                label="Outline",
+                node_type="text",
+                depends_on=[],
+            ),
+        ],
+    )
+    registry = SupervisorAgentRegistry(
+        agents=[
+            RegisteredAgent(
+                name="outline_agent",
+                label="Outline",
+                description="Writes outlines",
+                node_keys=["outline"],
+            )
+        ]
+    )
+
+    async for _event in call_sub_agent(
+        sub_agent_name="outline_agent",
+        task_description="Generate outline",
+        supervisor_context=ctx,
+        registry=registry,
+    ):
+        pass
+
+    persist = captured["persist"]
+    assert isinstance(persist, DBPersistStrategy)
+    assert persist.default_supervisor_session_id == "sv-persist-001"
+
+
+@pytest.mark.asyncio
+async def test_call_reviewer_binds_db_persist_to_supervisor_session(monkeypatch):
+    captured = {}
+
+    class _ReviewerAgent:
+        async def run(self, initial_input: str):
+            return AgentResult(
+                agent_name="reviewer",
+                raw_output='{"score": 8.5, "passed": true, "feedback": "looks good", "suggestions": ["tighten pacing"]}',
+                finished=True,
+            )
+
+    def _fake_create_agent(**kwargs):
+        captured.update(kwargs)
+        return _ReviewerAgent()
+
+    monkeypatch.setattr("app.core.supervisor.tools.create_agent", _fake_create_agent)
+
+    ctx = SupervisorContext(
+        supervisor_session_id="sv-review-001",
+        user_request="start",
+        workflow_definitions=[],
+    )
+
+    review = await call_reviewer(
+        content="outline content",
+        review_criteria=["coherence"],
+        supervisor_context=ctx,
+    )
+
+    persist = captured["persist"]
+    assert isinstance(persist, DBPersistStrategy)
+    assert persist.default_supervisor_session_id == "sv-review-001"
+    assert review["passed"] is True
+    assert ctx.review_history and ctx.review_history[0].feedback == "looks good"

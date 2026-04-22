@@ -4,12 +4,12 @@ Supervisor Workflow 流水线记录表。
 存储每次 Supervisor 流水线的执行元数据：
   - 关联项目 / 用户
   - supervisor_session_id（映射到 SupervisorContext）
-  - 版本化 workflow 快照
+  - 结构化 workflow 状态（节点 / 依赖单独建模）
   - 执行状态和统计
 """
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Dict, Any, List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -19,6 +19,10 @@ from app.db.base import Base
 if TYPE_CHECKING:
     from app.models.user import User
     from app.models.project import Project
+    from app.models.supervisor_workflow_node import (
+        SupervisorWorkflowNode,
+        SupervisorWorkflowNodeDependency,
+    )
 
 
 class SupervisorWorkflow(Base):
@@ -26,7 +30,8 @@ class SupervisorWorkflow(Base):
     Supervisor 流水线执行记录。
 
     每发起一次 /api/v1/supervisor/stream 产生一条记录，
-    流水线结束后更新 status / workflow_snapshot / final_result。
+    流水线结束后更新 status / final_result；
+    工作流节点状态由结构化子表持久化。
     """
 
     __tablename__ = "supervisor_workflows"
@@ -48,7 +53,7 @@ class SupervisorWorkflow(Base):
         nullable=False,
         unique=True,
         index=True,
-        comment="SupervisorSession UUID（sv- 前缀），映射到 SupervisorContext",
+        comment="Supervisor 会话 ID（sv- 前缀），映射到 SupervisorContext",
     )
     user_request: Mapped[str] = mapped_column(
         Text,
@@ -99,11 +104,6 @@ class SupervisorWorkflow(Base):
         default=0,
         comment="累计消耗 token 数",
     )
-    workflow_snapshot: Mapped[Optional[Dict[str, Any]]] = mapped_column(
-        JSON,
-        nullable=True,
-        comment="版本化 workflow 快照",
-    )
     final_result: Mapped[Optional[str]] = mapped_column(
         Text,
         nullable=True,
@@ -135,7 +135,13 @@ class SupervisorWorkflow(Base):
     # Relations
     project: Mapped["Project"] = relationship("Project", back_populates="supervisor_workflows")
     owner: Mapped["User"] = relationship("User")
-
-    # SubAgent 会话记录（反向引用 SupervisorSession）
-    # NOTE: SupervisorSession 的 SubAgent 信息在内存中，
-    # 如需持久化，可在 agent_messages 表加 supervisor_session_id 字段（Task 13）
+    nodes: Mapped[List["SupervisorWorkflowNode"]] = relationship(
+        "SupervisorWorkflowNode",
+        back_populates="workflow",
+        cascade="all, delete-orphan",
+    )
+    dependencies: Mapped[List["SupervisorWorkflowNodeDependency"]] = relationship(
+        "SupervisorWorkflowNodeDependency",
+        back_populates="workflow",
+        cascade="all, delete-orphan",
+    )

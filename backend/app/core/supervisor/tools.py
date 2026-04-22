@@ -7,18 +7,14 @@ import logging
 from typing import Any, AsyncGenerator, Dict, List, Optional
 from uuid import uuid4
 
-from app.core.agent.agent import Agent
-from app.core.agent.base import AgentConfig, ToolCall
 from app.core.agent.factory import create_agent
 from app.core.agent.persist.db_strategy import DBPersistStrategy
-from app.core.agent.tool import ToolExecutor
 from app.core.agent.base import (
     ToolStartEvent,
     ToolEndEvent,
     ThinkingEvent,
     TextEvent,
     DoneEvent,
-    ErrorEvent,
 )
 from app.core.supervisor.context import SupervisorContext
 from app.core.supervisor.concurrency import SubAgentConcurrencyLimiter
@@ -88,10 +84,8 @@ async def call_sub_agent(
     sub_agent_name: str,
     task_description: str,
     context_snapshot: str = "",
-    supervisor_context: Optional[SupervisorContext] = None,
+    supervisor_context: SupervisorContext | None = None,
     registry: Optional[SupervisorAgentRegistry] = None,
-    db=None,
-    workflow_service=None,
 ) -> AsyncGenerator:
     """
     调用指定的 SubAgent 执行任务，实时 yield 所有流式事件。
@@ -118,17 +112,11 @@ async def call_sub_agent(
         sub_prompt = f"{task_description}\n\n## 参考上下文\n{context_snapshot}"
 
     limiter = SubAgentConcurrencyLimiter.get_instance()
-    persist_strategy = (
-        DBPersistStrategy(
-            session_factory=AsyncSessionFactory,
-            supervisor_session_id=(
-                supervisor_context.supervisor_session_id
-                if supervisor_context is not None
-                else None
-            ),
-        )
-        if supervisor_context is not None
-        else "redis"
+    if supervisor_context is None:
+        raise RuntimeError("call_sub_agent requires supervisor_context")
+    persist_strategy = DBPersistStrategy(
+        session_factory=AsyncSessionFactory,
+        supervisor_session_id=supervisor_context.supervisor_session_id,
     )
 
     sub_agent = create_agent(
@@ -146,12 +134,14 @@ async def call_sub_agent(
 
     try:
         async with await limiter.acquire(sub_agent_name):
-            if supervisor_context is not None:
-                supervisor_context.sub_agent_sessions[sub_agent_name] = sub_session_id
-                if supervisor_context.workflow is not None:
-                    for node_key in registered.node_keys:
-                        if node_key in supervisor_context.workflow.nodes:
-                            supervisor_context.workflow.nodes[node_key].status = "running"
+            supervisor_context.register_sub_agent_session(
+                sub_agent_name,
+                sub_session_id,
+            )
+            if supervisor_context.workflow is not None:
+                for node_key in registered.node_keys:
+                    if node_key in supervisor_context.workflow.nodes:
+                        supervisor_context.workflow.nodes[node_key].status = "running"
 
             logger.info(
                 f"[call_sub_agent] starting sub_agent={sub_agent_name}, "
@@ -199,24 +189,22 @@ async def call_sub_agent(
                         "output": event.result.raw_output or "",
                         "sub_agent_name": sub_agent_name,
                     }
-                    if supervisor_context is not None:
-                        if supervisor_context.workflow is not None:
-                            for node_key in registered.node_keys:
-                                if node_key in supervisor_context.workflow.nodes:
-                                    apply_node_update(
-                                        supervisor_context.workflow,
-                                        node_key,
-                                        {"output": event.result.raw_output or ""},
-                                        updated_by="agent",
-                                        last_agent=sub_agent_name,
-                                    )
-                        supervisor_context.execution_history.append(
-                            {
-                                "agent_name": sub_agent_name,
-                                "session_id": sub_session_id,
-                                "status": "completed",
-                            }
-                        )
+                    if supervisor_context.workflow is not None:
+                        for node_key in registered.node_keys:
+                            if node_key in supervisor_context.workflow.nodes:
+                                apply_node_update(
+                                    supervisor_context.workflow,
+                                    node_key,
+                                    {"output": event.result.raw_output or ""},
+                                    updated_by="agent",
+                                    last_agent=sub_agent_name,
+                                )
+                    supervisor_context.record_execution(
+                        agent_name=sub_agent_name,
+                        session_id=sub_session_id,
+                        status="completed",
+                        node_keys=registered.node_keys,
+                    )
                     logger.info(
                         f"[call_sub_agent] completed sub_agent={sub_agent_name}"
                     )
@@ -228,23 +216,6 @@ async def call_sub_agent(
             session_id=sub_session_id,
         )
         accumulated_result = {"error": str(e), "sub_agent_name": sub_agent_name}
-
-    # SubAgent 执行完毕后，写入 DB
-    if workflow_service is not None and supervisor_context is not None:
-        try:
-            from app.services.supervisor_workflow_service import SupervisorWorkflowService
-
-            async with AsyncSessionFactory() as db_session:
-                await SupervisorWorkflowService(db_session).save_workflow_snapshot(
-                    supervisor_session_id=supervisor_context.supervisor_session_id,
-                    workflow_snapshot=(
-                        supervisor_context.workflow.model_dump()
-                        if supervisor_context.workflow is not None
-                        else {}
-                    ),
-                )
-        except Exception as e:
-            logger.warning(f"[call_sub_agent] failed to persist workflow snapshot: {e}")
 
     yield SubAgentEndEvent(
         sub_agent_name=sub_agent_name,
@@ -291,8 +262,7 @@ def _build_call_reviewer_schema() -> Dict[str, Any]:
 async def call_reviewer(
     content: str,
     review_criteria: List[str],
-    supervisor_context: Optional[SupervisorContext] = None,
-    db=None,
+    supervisor_context: SupervisorContext,
 ) -> Dict[str, Any]:
     """
     调用 Reviewer Agent 评估内容质量。
@@ -302,14 +272,16 @@ async def call_reviewer(
     """
     reviewer_session_id = f"reviewer-{str(uuid4())[:8]}"
     reviewer_prompt = build_reviewer_prompt(content, review_criteria)
-
     reviewer_agent = create_agent(
         agent_name="reviewer",
         session_id=reviewer_session_id,
         prompt=reviewer_prompt,
         model="gemini-3-flash-preview",
         max_loop=10,
-        persist="redis",
+        persist=DBPersistStrategy(
+            session_factory=AsyncSessionFactory,
+            supervisor_session_id=supervisor_context.supervisor_session_id,
+        ),
     )
 
     try:
@@ -332,15 +304,17 @@ async def call_reviewer(
         score = float(review_data.get("score", 7.0))
         passed = review_data.get("passed", score >= 7.0)
 
-        if supervisor_context is not None:
-            from app.core.supervisor.context import ReviewEntry
-            supervisor_context.review_history.append(ReviewEntry(
+        from app.core.supervisor.context import ReviewEntry
+
+        supervisor_context.record_review(
+            ReviewEntry(
                 agent=review_data.get("agent", "unknown"),
                 score=score,
                 passed=passed,
                 feedback=review_data.get("feedback", ""),
                 suggestions=review_data.get("suggestions", []),
-            ))
+            )
+        )
 
         return {
             "score": score,
@@ -398,8 +372,13 @@ async def get_workflow_state(
         "review_history": [
             r.model_dump() for r in supervisor_context.review_history
         ],
-        "sub_agent_sessions": dict(supervisor_context.sub_agent_sessions),
-        "execution_history": list(supervisor_context.execution_history),
+        "sub_agent_sessions": supervisor_context.sub_agent_session_ids(),
+        "execution_history": [
+            record.model_dump(exclude={"metadata"}, exclude_defaults=True)
+            if not record.metadata
+            else record.model_dump()
+            for record in supervisor_context.execution_history
+        ],
         "auto_run": supervisor_context.auto_run,
     }
 

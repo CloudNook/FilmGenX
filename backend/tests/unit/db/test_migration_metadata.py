@@ -119,3 +119,44 @@ def test_drop_agent_interrupt_state_migration_removes_legacy_table(monkeypatch):
     migration.upgrade()
 
     assert dropped_tables == ["agent_interrupt_state"]
+
+
+def test_normalize_supervisor_workflow_state_migration_creates_structured_tables(
+    monkeypatch,
+):
+    migration = load_migration_module(
+        "y2z3a4b5c6d7_normalize_supervisor_workflow_state.py"
+    )
+    created_tables: list[str] = []
+    dropped_columns: list[str] = []
+
+    class FakeBatchOp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def drop_column(self, column_name):
+            dropped_columns.append(column_name)
+
+    monkeypatch.setattr(
+        migration.op,
+        "create_table",
+        lambda name, *columns, **kwargs: created_tables.append(name),
+    )
+    monkeypatch.setattr(migration.op, "f", lambda name: name)
+    monkeypatch.setattr(migration.op, "create_index", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        migration.op,
+        "batch_alter_table",
+        lambda table_name: FakeBatchOp(),
+    )
+
+    migration.upgrade()
+
+    assert created_tables == [
+        "supervisor_workflow_nodes",
+        "supervisor_workflow_node_dependencies",
+    ]
+    assert dropped_columns == ["workflow_snapshot"]

@@ -34,7 +34,7 @@ class ToolFunc:
         self.parameters_schema = parameters_schema or self._infer_schema(func)
 
     # 框架运行时注入的参数，不属于工具接口，不暴露给 LLM
-    _INJECTED_PARAMS = frozenset({"db", "supervisor_context", "workflow_service"})
+    _INJECTED_PARAMS = frozenset({"db", "supervisor_context", "workflow_store"})
 
     def _annotation_to_schema(self, annotation: Any) -> Dict[str, Any]:
         if annotation == inspect.Parameter.empty:

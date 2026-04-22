@@ -5,7 +5,7 @@ Supervisor 功能验证脚本。
 1. create_supervisor 工厂创建
 2. 默认 registry / workflow 骨架
 3. 工具 schema 注册
-4. SupervisorContext / SupervisorSession
+4. SupervisorContext
 5. workflow graph 基本行为
 6. 流式事件类型
 7. ConcurrencyLimiter
@@ -60,7 +60,6 @@ try:
         "storyboard_agent",
     ]
     assert hasattr(supervisor, "_tool_ctx")
-    assert supervisor._tool_ctx.get("workflow_service") is None
     assert supervisor._tool_ctx.get("registry") is supervisor.registry
     green(f"create_supervisor() OK — session={supervisor.supervisor_session_id}")
 except Exception as e:
@@ -69,21 +68,20 @@ except Exception as e:
     traceback.print_exc()
 
 # ─────────────────────────────────────────────────────────────
-# 2. workflow_service 注入
+# 2. tool context
 # ─────────────────────────────────────────────────────────────
-section("2. workflow_service 注入")
+section("2. tool context")
 
 try:
-    mock_service = MagicMock()
     supervisor2 = create_supervisor(
         user_request="test",
         persist=None,
-        workflow_service=mock_service,
     )
-    assert supervisor2._tool_ctx.get("workflow_service") is mock_service
-    green("workflow_service 注入 OK")
+    assert supervisor2._tool_ctx.get("registry") is supervisor2.registry
+    assert "workflow_store" not in supervisor2._tool_ctx
+    green("tool context OK")
 except Exception as e:
-    red(f"workflow_service 注入失败: {e}")
+    red(f"tool context 失败: {e}")
 
 # ─────────────────────────────────────────────────────────────
 # 3. SupervisorAgent 核心属性
@@ -97,10 +95,6 @@ try:
     assert supervisor.context.workflow is not None
     assert supervisor.context.workflow.nodes["outline"].status == "ready"
     green("SupervisorContext 绑定 OK")
-
-    assert hasattr(supervisor, "session")
-    assert hasattr(supervisor.session, "supervisor_session_id")
-    green("SupervisorSession 绑定 OK")
 
     assert hasattr(supervisor, "_agent")
     assert hasattr(supervisor._agent, "run")
@@ -177,22 +171,21 @@ except Exception as e:
     traceback.print_exc()
 
 # ─────────────────────────────────────────────────────────────
-# 6. SupervisorSession
+# 6. Typed sub-agent state
 # ─────────────────────────────────────────────────────────────
-section("6. SupervisorSession")
+section("6. Typed sub-agent state")
 
 try:
-    from app.core.supervisor.session import SupervisorSession
+    from app.core.supervisor.context import SupervisorContext
 
-    sess = SupervisorSession("sv-test-456")
-    sess.register_sub_session("script_agent", "sub-script-def456")
-    sub = sess.get_sub_session("script_agent")
-    assert sub == "sub-script-def456"
-    all_sessions = sess.get_all_sessions()
-    assert "script_agent" in all_sessions
-    green("SupervisorSession OK")
+    ctx = SupervisorContext(supervisor_session_id="sv-test-456", user_request="test")
+    ctx.register_sub_agent_session("script_agent", "sub-script-def456")
+    sub = ctx.sub_agent_sessions["script_agent"]
+    assert sub.session_id == "sub-script-def456"
+    assert ctx.sub_agent_session_ids()["script_agent"] == "sub-script-def456"
+    green("Typed sub-agent state OK")
 except Exception as e:
-    red(f"SupervisorSession 失败: {e}")
+    red(f"Typed sub-agent state 失败: {e}")
 
 # ─────────────────────────────────────────────────────────────
 # 7. 流式事件类型
@@ -391,7 +384,7 @@ try:
         ],
     )
     apply_node_update(ctx.workflow, "outline", {"title": "测试大纲"}, updated_by="user")
-    ctx.sub_agent_sessions["outline_agent"] = "sub-outline-001"
+    ctx.register_sub_agent_session("outline_agent", "sub-outline-001")
 
     state = asyncio.run(get_workflow_state(ctx))
 
@@ -416,7 +409,7 @@ try:
     # 检查字段存在
     assert hasattr(SupervisorWorkflow, "user_request")
     assert hasattr(SupervisorWorkflow, "status")
-    assert hasattr(SupervisorWorkflow, "workflow_snapshot")
+    assert not hasattr(SupervisorWorkflow, "workflow_snapshot")
     assert hasattr(SupervisorWorkflow, "active_node_key")
     assert hasattr(SupervisorWorkflow, "workflow_profile")
     assert hasattr(SupervisorWorkflow, "auto_run")
@@ -428,110 +421,92 @@ except Exception as e:
     red(f"SupervisorWorkflow 模型失败: {e}")
 
 # ─────────────────────────────────────────────────────────────
-# 12. SupervisorWorkflowService（mock DB）
+# 12. SupervisorWorkflowStore（mock DB）
 # ─────────────────────────────────────────────────────────────
-section("12. SupervisorWorkflowService（mock DB）")
+section("12. SupervisorWorkflowStore（mock DB）")
 
 try:
-    from app.services.supervisor_workflow_service import SupervisorWorkflowService
-    from app.repositories.supervisor_workflow import SupervisorWorkflowRepository
-    from app.models.supervisor_workflow import SupervisorWorkflow
+    from app.core.supervisor.persist import SupervisorWorkflowStore
+    from app.core.supervisor.workflow import build_workflow_snapshot
 
     mock_session = MagicMock()
     mock_session.commit = AsyncMock()
     mock_session.refresh = AsyncMock()
     mock_session.flush = AsyncMock()
 
-    # Mock repo 内部方法
-    service = SupervisorWorkflowService(db=mock_session)
+    store = SupervisorWorkflowStore(db=mock_session)
 
     async def run_service_test():
-        # mock ProjectRepository.get_by_id_and_owner
-        mock_project = MagicMock()
-        mock_project.id = 1
+        mock_wf = MagicMock()
+        mock_wf.id = 42
+        mock_wf.supervisor_session_id = "sv-verify-001"
 
-        with patch("app.repositories.project.ProjectRepository.get_by_id_and_owner", new_callable=AsyncMock) as mock_get_proj:
-            mock_get_proj.return_value = mock_project
-
-            # mock repo.create
-            mock_wf = MagicMock(spec=SupervisorWorkflow)
-            mock_wf.id = 42
-            mock_wf.supervisor_session_id = "sv-verify-001"
-            mock_wf.workflow_snapshot = {}
-
-            with patch.object(service.repo, "create", new_callable=AsyncMock) as mock_create:
-                mock_create.return_value = mock_wf
-                wf = await service.create_workflow(
-                    project_id=1,
-                    owner_id=1,
-                    supervisor_session_id="sv-verify-001",
-                    user_request="验证脚本测试",
-                    model="gemini-3-flash-preview",
-                    workflow_profile="default",
-                    auto_run=False,
-                )
-                green(f"create_workflow OK — id={wf.id}")
-
-        with patch.object(service.repo, "get_by_session_id", new_callable=AsyncMock) as mock_get:
-            mock_wf2 = MagicMock(spec=SupervisorWorkflow)
-            mock_wf2.loop_count = 0
-            mock_wf2.workflow_snapshot = {}
-            mock_wf2.active_node_key = None
-            mock_get.return_value = mock_wf2
-
-            await service.update_active_node("sv-verify-001", "outline")
-            green("update_active_node OK")
-
-            count = await service.increment_loop_count("sv-verify-001")
-            green(f"increment_loop_count OK — count={count}")
-
-            await service.save_workflow_snapshot(
-                "sv-verify-001",
-                {"profile": "default", "nodes": {"outline": {"status": "ready"}}},
+        with patch.object(store, "_create_workflow_record", new_callable=AsyncMock) as mock_create:
+            mock_create.return_value = mock_wf
+            wf = await store.create_workflow(
+                project_id=1,
+                owner_id=1,
+                supervisor_session_id="sv-verify-001",
+                user_request="验证脚本测试",
+                model="gemini-3-flash-preview",
+                workflow_profile="default",
+                auto_run=False,
             )
-            green("save_workflow_snapshot OK")
+            assert wf.id == 42
+            green(f"create_workflow OK — id={wf.id}")
 
-            with patch.object(service.repo, "get_by_session_id", new_callable=AsyncMock) as mock_get2:
-                mock_wf3 = MagicMock(spec=SupervisorWorkflow)
-                mock_wf3.workflow_snapshot = {
-                    "profile": "default",
-                    "nodes": {"outline": {"status": "fresh"}},
-                }
-                mock_get2.return_value = mock_wf3
-                with patch.object(service.repo, "mark_completed", new_callable=AsyncMock) as mock_complete:
-                    mock_wf4 = MagicMock()
-                    mock_wf4.status = "completed"
-                    mock_complete.return_value = mock_wf4
-                    await service.mark_completed("sv-verify-001", final_result="流水线完成")
-                    green("mark_completed OK")
+        workflow_snapshot = build_workflow_snapshot(profile="default", definitions=[])
+        mock_wf2 = MagicMock()
+        mock_wf2.active_node_key = None
+
+        with patch.object(store, "get_workflow_by_session", new_callable=AsyncMock) as mock_get:
+            with patch.object(store, "_replace_workflow_state", new_callable=AsyncMock) as mock_replace:
+                mock_get.return_value = mock_wf2
+                await store.save_workflow_state(
+                    "sv-verify-001",
+                    workflow_snapshot,
+                    active_node_key="outline",
+                )
+                assert mock_replace.await_count == 1
+                assert mock_wf2.active_node_key == "outline"
+                green("save_workflow_state OK")
+
+        mock_wf3 = MagicMock()
+        with patch.object(store, "get_workflow_by_session", new_callable=AsyncMock) as mock_get2:
+            mock_get2.return_value = mock_wf3
+            await store.mark_completed("sv-verify-001", final_result="流水线完成")
+            green("mark_completed OK")
 
     asyncio.run(run_service_test())
     assert mock_session.commit.call_count >= 3
     green(f"DB commit 调用次数: {mock_session.commit.call_count} >= 3")
 except Exception as e:
-    red(f"SupervisorWorkflowService 失败: {e}")
+    red(f"SupervisorWorkflowStore 失败: {e}")
     import traceback
     traceback.print_exc()
 
 # ─────────────────────────────────────────────────────────────
-# 13. SupervisorWorkflowRepository
+# 13. Supervisor stores
 # ─────────────────────────────────────────────────────────────
-section("13. SupervisorWorkflowRepository")
+section("13. Supervisor stores")
 
 try:
-    from app.repositories.supervisor_workflow import SupervisorWorkflowRepository
+    from app.core.supervisor.persist import SupervisorEventStore, SupervisorWorkflowStore
 
     mock_session = MagicMock()
-    repo = SupervisorWorkflowRepository(session=mock_session)
+    workflow_store = SupervisorWorkflowStore(db=mock_session)
+    event_store = SupervisorEventStore(db=mock_session)
 
-    assert hasattr(repo, "get_by_session_id")
-    assert hasattr(repo, "get_by_id_and_project")
-    assert hasattr(repo, "list_by_project")
-    assert hasattr(repo, "mark_completed")
-    assert hasattr(repo, "mark_failed")
-    green("SupervisorWorkflowRepository 方法 OK")
+    assert hasattr(workflow_store, "get_workflow_by_session")
+    assert hasattr(workflow_store, "get_workflow")
+    assert hasattr(workflow_store, "list_workflows")
+    assert hasattr(workflow_store, "mark_completed")
+    assert hasattr(workflow_store, "mark_failed")
+    assert hasattr(event_store, "append_event")
+    assert hasattr(event_store, "list_events_by_session")
+    green("Supervisor stores 方法 OK")
 except Exception as e:
-    red(f"SupervisorWorkflowRepository 失败: {e}")
+    red(f"Supervisor stores 失败: {e}")
 
 # ─────────────────────────────────────────────────────────────
 # 14. SupervisorStreamEvent Union 类型覆盖

@@ -1,6 +1,6 @@
-"""
-Supervisor 流水线工作内存。
-"""
+"""Supervisor runtime context and typed state records."""
+
+from __future__ import annotations
 
 from typing import Any, Dict, List
 
@@ -15,11 +15,29 @@ from app.core.supervisor.workflow import (
 
 class ReviewEntry(BaseModel):
     """评估历史条目。"""
+
     agent: str
     score: float
     passed: bool
     feedback: str
-    suggestions: list[str] = []
+    suggestions: list[str] = Field(default_factory=list)
+
+
+class SubAgentSessionRecord(BaseModel):
+    """强类型 sub-agent 会话记录。"""
+
+    agent_name: str
+    session_id: str
+
+
+class ExecutionRecord(BaseModel):
+    """强类型执行历史记录。"""
+
+    agent_name: str
+    session_id: str
+    status: str
+    node_keys: list[str] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class SupervisorContext(BaseModel):
@@ -41,9 +59,9 @@ class SupervisorContext(BaseModel):
         default=None,
         description="当前版本化工作流快照",
     )
-    sub_agent_sessions: Dict[str, str] = Field(
+    sub_agent_sessions: Dict[str, SubAgentSessionRecord] = Field(
         default_factory=dict,
-        description="sub_agent_name → session_id 的映射",
+        description="sub_agent_name → session record 的映射",
     )
     review_history: List[ReviewEntry] = Field(
         default_factory=list,
@@ -53,7 +71,7 @@ class SupervisorContext(BaseModel):
         default_factory=dict,
         description="附加元数据",
     )
-    execution_history: List[Dict[str, Any]] = Field(
+    execution_history: List[ExecutionRecord] = Field(
         default_factory=list,
         description="结构化执行历史",
     )
@@ -70,3 +88,45 @@ class SupervisorContext(BaseModel):
                 definitions=self.workflow_definitions,
             )
         return self
+
+    def register_sub_agent_session(self, sub_agent_name: str, session_id: str) -> None:
+        """记录或更新某个 sub-agent 的会话。"""
+
+        self.sub_agent_sessions[sub_agent_name] = SubAgentSessionRecord(
+            agent_name=sub_agent_name,
+            session_id=session_id,
+        )
+
+    def record_execution(
+        self,
+        *,
+        agent_name: str,
+        session_id: str,
+        status: str,
+        node_keys: list[str] | None = None,
+        metadata: Dict[str, Any] | None = None,
+    ) -> None:
+        """追加一条强类型执行记录。"""
+
+        self.execution_history.append(
+            ExecutionRecord(
+                agent_name=agent_name,
+                session_id=session_id,
+                status=status,
+                node_keys=list(node_keys or []),
+                metadata=dict(metadata or {}),
+            )
+        )
+
+    def record_review(self, entry: ReviewEntry) -> None:
+        """追加一条评审记录。"""
+
+        self.review_history.append(entry)
+
+    def sub_agent_session_ids(self) -> Dict[str, str]:
+        """返回给工具和协议层使用的轻量映射。"""
+
+        return {
+            agent_name: record.session_id
+            for agent_name, record in self.sub_agent_sessions.items()
+        }

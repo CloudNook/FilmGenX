@@ -32,6 +32,5 @@
 #       factory.py      - create_supervisor() 工厂
 #       tools.py        - call_sub_agent / call_reviewer / get_workflow_state
 #       context.py      - SupervisorContext 工作内存
-#       session.py      - SupervisorSession 管理
 #       events.py       - SupervisorStreamEvent 事件类型
 #       reviewer.py     - Reviewer Agent 配置
