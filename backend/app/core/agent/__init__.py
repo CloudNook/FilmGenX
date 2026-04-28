@@ -9,6 +9,12 @@ from app.core.agent.base import (
     AgentMessage,
     AgentResult,
     LLMResponse,
+    ReviewError,
+    Reviewer,
+    ReviewOutput,
+    ReviewPolicy,
+    ReviewRequest,
+    ReviewResult,
     StructuredToolCall,
     ToolCall,
     ToolResult,
@@ -25,6 +31,7 @@ from app.core.agent.base import (
 from app.core.agent.factory import create_agent
 from app.core.agent.loop import AgentLoop
 from app.core.agent.llm import LLMAdapter
+from app.core.agent.review import ReviewHarness
 from app.core.agent.tool import ToolExecutor
 from app.core.agent.persist import (
     PersistStrategy,
@@ -45,6 +52,12 @@ __all__ = [
     "AgentMessage",
     "AgentResult",
     "LLMResponse",
+    "ReviewError",
+    "Reviewer",
+    "ReviewOutput",
+    "ReviewPolicy",
+    "ReviewRequest",
+    "ReviewResult",
     "StructuredToolCall",
     "ToolCall",
     "ToolResult",
@@ -62,6 +75,7 @@ __all__ = [
     # 核心组件
     "AgentLoop",
     "LLMAdapter",
+    "ReviewHarness",
     "ToolExecutor",
     # 持久化
     "PersistStrategy",

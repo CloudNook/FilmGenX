@@ -9,7 +9,7 @@ import logging
 from typing import TYPE_CHECKING, List, Optional
 from uuid import uuid4
 
-from app.core.agent.base import AgentConfig, AgentResult, DoneEvent, AgentInterrupted, InterruptEvent, ErrorEvent, ResumeDecision
+from app.core.agent.base import AgentConfig, AgentResult, DoneEvent, AgentInterrupted, InterruptEvent, ErrorEvent, ResumeDecision, Reviewer
 from app.core.agent.loop import AgentLoop
 from app.core.agent.llm import LLMAdapter
 from app.core.agent.tool import ToolExecutor
@@ -40,6 +40,7 @@ class Agent:
         middlewares: List[AgentMiddleware] | None = None,
         persist: "PersistStrategy | None" = None,
         skill_names: List[str] | None = None,
+        reviewer: Reviewer | None = None,
     ):
         self.agent_id = str(uuid4())
         self.config = config
@@ -47,6 +48,7 @@ class Agent:
         self.middlewares = middlewares or []
         self.persist = persist
         self.skill_names = skill_names or []
+        self.reviewer = reviewer
         self._chain = MiddlewareChain(self.middlewares)
         self._llm: Optional[LLMAdapter] = None
         self._tool_executor: Optional[ToolExecutor] = None
@@ -155,6 +157,7 @@ class Agent:
                 chain=self._chain,
                 on_loop_start=on_loop_start,
                 on_loop_end=on_loop_end,
+                reviewer=self.reviewer,
             )
             ctx.llm = self._llm
             ctx.loop = loop
@@ -251,6 +254,7 @@ class Agent:
             chain=self._chain,
             on_loop_start=on_loop_start,
             on_loop_end=on_loop_end,
+            reviewer=self.reviewer,
         )
         ctx.llm = self._llm
         ctx.loop = loop
@@ -280,4 +284,3 @@ class Agent:
 
         async for event in self._chain.stream(ctx, _generate()):
             yield event
-

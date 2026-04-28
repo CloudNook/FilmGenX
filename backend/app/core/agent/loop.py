@@ -19,10 +19,11 @@ from app.core.agent.base import (
     AgentConfig, AgentMessage, AgentResult, ToolCall, ToolExecutionResult,
     ToolResult, ThinkingEvent, TextEvent, ToolStartEvent, ToolEndEvent,
     DoneEvent, ErrorEvent, InterruptEvent, InterruptDecision, AgentInterrupted,
-    AgentCheckpoint, ResumeDecision,
+    AgentCheckpoint, ResumeDecision, Reviewer,
 )
 from app.core.agent.llm import LLMAdapter
 from app.core.agent.persist.base import PersistStrategy
+from app.core.agent.review import ReviewFeedbackMessage, ReviewHarness
 from app.core.agent.tool import ToolExecutor
 from app.core.agent.usage import merge_usage
 
@@ -67,6 +68,7 @@ class AgentLoop:
         on_loop_start: Optional[Any] = None,
         on_loop_end: Optional[Any] = None,
         chain: "MiddlewareChain" = None,
+        reviewer: Optional[Reviewer] = None,
     ):
         self.config = config
         self.llm = llm
@@ -77,6 +79,13 @@ class AgentLoop:
         self.on_loop_start = on_loop_start
         self.on_loop_end = on_loop_end
         self.chain = chain
+        self.review_harness = ReviewHarness(
+            config=config,
+            session_id=session_id,
+            request_id=request_id,
+            persist=persist,
+            reviewer=reviewer,
+        )
         self.messages: List[Dict[str, Any]] = []
         self.loop_count = 0
         self._seq = 0  # 全局序号，run() 开始时从历史最大 seq + 1 初始化
@@ -222,6 +231,70 @@ class AgentLoop:
         if accumulated_usage:
             metadata["accumulated_usage"] = accumulated_usage
         return metadata or None
+
+    async def _append_review_feedback(
+        self,
+        result: AgentResult,
+        feedback: ReviewFeedbackMessage,
+    ) -> None:
+        self.messages.append({
+            "role": "user",
+            "content": feedback.content,
+            "metadata": feedback.metadata,
+        })
+        seq = self._alloc_seq()
+        result.messages.append(
+            AgentMessage(
+                role="user",
+                content=feedback.content,
+                seq=seq,
+                agent_name=self.config.agent_name,
+                metadata=feedback.metadata,
+            )
+        )
+        await self._persist(
+            "user",
+            feedback.content,
+            seq=seq,
+            loop_count=self.loop_count,
+            metadata=feedback.metadata,
+        )
+
+    async def _handle_candidate_review(
+        self,
+        *,
+        candidate_output: str,
+        result: AgentResult,
+        ctx: Optional["MiddlewareContext"],
+    ) -> str:
+        """Review a candidate output and prepare the next loop action."""
+
+        review = await self.review_harness.review_candidate(
+            candidate_output=candidate_output,
+            result=result,
+            ctx=ctx,
+            messages=self.messages,
+            loop_count=self.loop_count,
+        )
+        if review is None or review.passed:
+            return "passed"
+
+        if self.review_harness.can_revise(result):
+            await self._append_review_feedback(
+                result,
+                self.review_harness.build_feedback_message(review),
+            )
+            if self.on_loop_end is not None:
+                await self.on_loop_end(result.messages)
+            return "revise"
+
+        result.error = "Review failed"
+        result.finished = False
+        result.finished_at = datetime.now(timezone.utc)
+        result.loop_count = self.loop_count
+        if self.on_loop_end is not None:
+            await self.on_loop_end(result.messages)
+        return "failed"
 
     def _add_usage(self, result: AgentResult, usage: Optional[Dict[str, Any]]) -> None:
         """将本轮 LLM usage 累加到 result.usage（本次请求合计，供积分系统使用），
@@ -568,6 +641,16 @@ class AgentLoop:
                 )
                 finished = self._check_finished(response, response.content)
                 if finished:
+                    review_action = await self._handle_candidate_review(
+                        candidate_output=response.content,
+                        result=result,
+                        ctx=ctx,
+                    )
+                    if review_action == "revise":
+                        continue
+                    if review_action == "failed":
+                        return result
+
                     result.finished = True
                     result.finished_at = datetime.now(timezone.utc)
                     result.raw_output = response.content
@@ -1181,6 +1264,7 @@ class AgentLoop:
                 accumulated_content = ""
                 accumulated_thinking = ""
                 final_chunk: Optional[Any] = None  # LLMResponse，终止 chunk
+                buffer_text_until_review = self.review_harness.enabled
 
                 async for chunk in self.llm.generate_stream(
                     messages=list(self.messages),
@@ -1191,7 +1275,8 @@ class AgentLoop:
                         yield ThinkingEvent(content=chunk.thinking)
                     if chunk.content:
                         accumulated_content += chunk.content
-                        yield TextEvent(content=chunk.content)
+                        if not buffer_text_until_review:
+                            yield TextEvent(content=chunk.content)
                     if chunk.finish_reason is not None:
                         # 终止 chunk，不再有文本，携带完整 tool_calls 和 usage
                         final_chunk = chunk
@@ -1370,6 +1455,18 @@ class AgentLoop:
                 )
                 finished = self._check_finished(final_chunk, accumulated_content)
                 if finished:
+                    review_action = await self._handle_candidate_review(
+                        candidate_output=accumulated_content,
+                        result=result,
+                        ctx=ctx,
+                    )
+                    if review_action == "revise":
+                        continue
+                    if review_action == "failed":
+                        yield ErrorEvent(error=result.error)
+                        yield DoneEvent(result=result)
+                        return
+
                     result.finished = True
                     result.finished_at = datetime.now(timezone.utc)
                     result.raw_output = accumulated_content
@@ -1377,6 +1474,8 @@ class AgentLoop:
                     if self.on_loop_end is not None:
                         await self.on_loop_end(result.messages)
 
+                    if buffer_text_until_review and accumulated_content:
+                        yield TextEvent(content=accumulated_content)
                     yield DoneEvent(result=result)
                     return
 

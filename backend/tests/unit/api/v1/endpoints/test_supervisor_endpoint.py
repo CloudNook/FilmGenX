@@ -209,7 +209,14 @@ async def test_chat_supervisor_resume_uses_stream_api(monkeypatch):
     assert decoded == "data: [DONE]\n\n"
     assert captured["initial_input"] == ""
     assert captured["resume"].action == "approve"
-    assert captured["resume"].feedback is None
+    assert not hasattr(captured["resume"], "feedback")
+
+
+def test_supervisor_resume_payload_exposes_only_action():
+    payload = SupervisorResumePayload(action="approve")
+
+    assert payload.model_dump() == {"action": "approve"}
+    assert "feedback" not in SupervisorResumePayload.model_json_schema()["properties"]
 
 
 @pytest.mark.asyncio

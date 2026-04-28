@@ -11,7 +11,7 @@ import logging
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from app.core.agent.agent import Agent
-from app.core.agent.base import AgentConfig
+from app.core.agent.base import AgentConfig, Reviewer, ReviewPolicy
 from app.core.agent.persist.base import PersistStrategy
 from app.core.agent.persist.redis_strategy import RedisPersistStrategy
 from app.core.middleware.chain import AgentMiddleware
@@ -75,6 +75,8 @@ def create_agent(
     max_loop: int = 20,
     persist: PersistArg = None,
     middlewares: Optional[List[AgentMiddleware]] = None,
+    review_policy: Optional[ReviewPolicy] = None,
+    reviewer: Optional[Reviewer] = None,
 ) -> Agent:
     """
     创建 Agent 实例。
@@ -109,6 +111,7 @@ def create_agent(
         max_tokens=max_tokens,
         tools=tools or [],
         max_loop=max_loop,
+        review_policy=review_policy,
     )
 
     persist_strategy = _resolve_persist(persist)
@@ -119,4 +122,5 @@ def create_agent(
         skill_names=skill_names or [],
         persist=persist_strategy,
         middlewares=middlewares,
+        reviewer=reviewer,
     )

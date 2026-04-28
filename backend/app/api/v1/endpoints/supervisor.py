@@ -93,10 +93,6 @@ class SupervisorResumePayload(BaseModel):
         ...,
         description="approve | reject",
     )
-    feedback: Optional[str] = Field(
-        None,
-        description="Feedback text for a rejected review",
-    )
 
 
 class SupervisorStartRequest(BaseModel):
@@ -253,7 +249,6 @@ async def _stream_supervisor(
     resume_decision = (
         ResumeDecision(
             action=body.resume.action,
-            feedback=body.resume.feedback,
         )
         if body.resume is not None
         else None

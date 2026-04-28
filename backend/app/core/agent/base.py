@@ -7,7 +7,7 @@ Agent 核心数据模型。
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Awaitable, Dict, List, Literal, Optional, Protocol, TypeAlias
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -61,6 +61,57 @@ class LLMResponse(BaseModel):
     raw: Optional[Dict[str, Any]] = Field(default=None, description="Provider 原生响应数据")
 
 
+class ReviewError(Exception):
+    """Raised when reviewer execution or output normalization fails."""
+
+
+class ReviewResult(BaseModel):
+    """Review Agent 对候选输出的结构化评审结果。"""
+
+    score: float = Field(default=0.0, ge=0, le=10, description="0-10 分质量评分")
+    passed: bool = Field(default=False, description="是否通过评审")
+    feedback: str = Field(default="", description="评审反馈")
+    suggestions: List[str] = Field(default_factory=list, description="可执行修改建议")
+
+
+class ReviewRequest(BaseModel):
+    """发送给 reviewer 的候选输出评审请求。"""
+
+    agent_name: str
+    session_id: str = ""
+    request_id: str = ""
+    user_input: str = ""
+    candidate_output: str
+    loop_count: int = 0
+    review_round: int = 1
+    criteria: List[str] = Field(default_factory=list)
+
+
+ReviewOutput: TypeAlias = ReviewResult | dict[str, Any]
+
+
+class Reviewer(Protocol):
+    """Callable contract for custom Agent reviewers."""
+
+    def __call__(
+        self,
+        request: ReviewRequest,
+    ) -> ReviewOutput | Awaitable[ReviewOutput]:
+        ...
+
+
+class ReviewPolicy(BaseModel):
+    """Agent 输出评审策略。"""
+
+    enabled: bool = True
+    min_score: float = Field(default=8.0, ge=0, le=10)
+    max_revision_rounds: int = Field(default=1, ge=0, le=10)
+    reviewer_agent_name: str = "reviewer"
+    reviewer_model: str = "gemini-3-flash-preview"
+    review_prompt: Optional[str] = None
+    criteria: List[str] = Field(default_factory=list)
+
+
 class AgentConfig(BaseModel):
     """Agent 配置参数。"""
 
@@ -73,6 +124,10 @@ class AgentConfig(BaseModel):
     max_tokens: Optional[int] = Field(None, gt=0, description="最大 token 数")
     max_loop: int = Field(default=20, ge=1, le=100, description="最大循环次数")
     tools: List[Dict[str, Any]] = Field(default_factory=list, description="工具列表")
+    review_policy: Optional[ReviewPolicy] = Field(
+        default=None,
+        description="可选 Review Agent 评审策略",
+    )
 
 
 class AgentMessage(BaseModel):
@@ -123,6 +178,7 @@ class AgentResult(BaseModel):
     usage: Optional[Dict[str, Any]] = Field(None, description="累计 token 用量，供 credit/billing/监控使用")
     schema_data: Optional[Dict[str, Any]] = Field(None, description="最终结构化结果，供业务代码直接消费，例如落库或编排工作流")
     schema_error: Optional[str] = Field(None, description="最终结构化后处理失败时的错误信息，不影响原始文本结果")
+    review_history: List[ReviewResult] = Field(default_factory=list, description="候选输出的评审历史")
     raw_output: Optional[str] = Field(None, description="最终自然语言输出，适合展示给用户或写入日志")
     error: Optional[str] = Field(None, description="Agent 执行失败或提前退出时的错误信息")
     finished: bool = Field(default=False, description="是否正常完成整个 Agent 流程")
@@ -257,10 +313,6 @@ class ResumeDecision(BaseModel):
     action: Literal["approve", "reject"] = Field(
         ...,
         description="approve | reject",
-    )
-    feedback: Optional[str] = Field(
-        None,
-        description="可选的审阅补充信息；当前 reject 默认仅记录“工具调用被拒绝”状态",
     )
 
 
