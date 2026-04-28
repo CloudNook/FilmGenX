@@ -156,3 +156,28 @@ class RedisPersistStrategy(PersistStrategy):
 
         key = f"agent:interrupt:{session_id}"
         await redis_client.delete(key)
+
+    async def append_review_record(
+        self,
+        session_id: str,
+        request_id: str,
+        agent_name: str,
+        review_round: int,
+        loop_count: int,
+        candidate_seq: int,
+        review: Dict[str, Any],
+    ) -> None:
+        from app.utils import redis_client
+
+        key = f"agent:reviews:{session_id}"
+        record = {
+            "session_id": session_id,
+            "request_id": request_id,
+            "agent_name": agent_name,
+            "review_round": review_round,
+            "loop_count": loop_count,
+            "candidate_seq": candidate_seq,
+            "review": review,
+        }
+        await redis_client.rpush(key, json.dumps(record, ensure_ascii=False))
+        await redis_client.expire(key, self.ttl)

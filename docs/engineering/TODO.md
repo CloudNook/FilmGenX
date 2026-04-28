@@ -14,6 +14,13 @@
 | 2026-04-24 | Agent core | 将 Review Harness 细节从 `AgentLoop` 抽到 `app.core.agent.review`。 | Done | `AgentLoop` 保留候选结果 review 控制点，reviewer 调用、默认 prompt、JSON 解析和 feedback 构造由 `ReviewHarness` 承担。 |
 | 2026-04-24 | Agent core | 为业务自定义 reviewer 增加显式 core 协议。 | Done | 新增 `Reviewer` Protocol、`ReviewOutput` 和 `ReviewError`，非法 reviewer 返回值会给出明确错误。 |
 | 2026-04-28 | 工程文档 | 扩展 `AGENTS.md` 和 TODO，记录长期 Agent 框架、AI 视频业务和 RoadBook 方向。 | Done | 新增当前能力、RoadBook 概念、业务落地方向、技术问题和必读代码地图。 |
+| 2026-04-29 | Agent core | 新增 `ReviewStartEvent` / `ReviewEndEvent` 流式事件。 | Done | `ReviewHarness.review_candidate` 返回 `ReviewOutcome`（review + events），AgentLoop 在 stream_run 中 yield，便于前端展示评审进度。 |
+| 2026-04-29 | Agent core | `ReviewPolicy.on_exhausted` 策略可配置。 | Done | 支持 `"fail"`（默认）和 `"accept_last"`；`AgentResult.review_exhausted` 标记是否耗尽修订次数。 |
+| 2026-04-29 | Agent core | Review 持久化接入 `PersistStrategy.append_review_record`。 | Done | 默认 no-op；Redis 策略实现 `agent:reviews:{session_id}` list，支撑后续 trace/replay。 |
+| 2026-04-29 | 测试 | 新增 `test_create_agent_review.py`：7 用例覆盖 create_agent + review_policy 全链路。 | Superseded | 后续被 ReviewerAgent 重构覆盖；见下条。 |
+| 2026-04-29 | Agent core | Reviewer 重构：拆出 `ReviewerAgent` + `create_reviewer_agent` 工厂。 | Done | 删除 `ReviewPolicy` 和 `_run_default_reviewer` 隐式分支；`create_agent(reviewer=...)` 是唯一挂载入口；reviewer 携带 `max_revision_rounds / on_exhausted / min_score / json_schema`。 |
+| 2026-04-29 | Agent core | `AgentConfig.response_schema` 透传到 LLMAdapter，OpenAI adapter 升级为 `response_format=json_schema` 模式。 | Done | Reviewer 输出走 Provider 原生结构化输出；Gemini 已就绪，OpenAI GPT-4o+ 可用。 |
+| 2026-04-29 | 测试 | `test_create_agent_review.py` 重写为 11 个用例覆盖 ReviewerAgent 全链路。 | Done | 覆盖默认 reviewer、自定义 prompt/schema/criteria、on_exhausted=fail/accept_last、流式事件、纯函数 reviewer、reviewer=None、response_schema 透传、持久化、非法 JSON / 非法 ReviewResult。 |
 
 ## 待办事项
 
@@ -28,7 +35,7 @@
 | High | RoadBook | 实现 reject -> adjust -> approve 的偏好归纳。 | Pending | 从 HITL 工具调用被拒、后续参数调整、最终 approve 中总结用户偏好。 |
 | High | RoadBook | 实现显式记忆写入。 | Pending | 用户说“记住这个”“以后都这样”“放到全局信息”时，将信息写入 RoadBook。 |
 | High | RoadBook | 实现 RoadBook 召回和注入策略。 | Pending | 只注入当前任务相关条目，并保留来源和适用说明，避免上下文污染。 |
-| High | Agent core | 完善 Review Harness 的事件、持久化和默认 reviewer Agent 策略。 | Pending | 需要后续增加 ReviewEvent、结构化 review 存储、可配置 exhausted 行为。 |
+| High | Agent core | 完善 Review Harness 的事件、持久化和默认 reviewer Agent 策略。 | In Progress | ReviewStart/EndEvent、Redis 评审记录、on_exhausted、ReviewerAgent + create_reviewer_agent + structured output 已落地；剩余：DB 持久化（DBPersistStrategy.append_review_record）、escalate_hitl 策略、领域特化 reviewer prompt 库。 |
 | High | Harness Engineering | 建立 Agent 运行 trace / replay / evaluation 基础能力。 | Pending | 支撑失败复盘、版本对比、prompt/roadbook/review 变化后的回放评估。 |
 | Medium | Agent core | 分片清理 `AgentLoop` 的工具执行、resume 和流式/非流式重复代码。 | Pending | 每片都必须保持现有测试绿灯；优先抽 ToolCall runner 和 Candidate lifecycle。 |
 | High | Core 边界 | 后续 Agent 框架能力继续保持 `backend/app/core` 内接口驱动。 | Ongoing | 避免 core 框架耦合具体业务实现。 |

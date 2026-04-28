@@ -78,7 +78,14 @@ class OpenAIAdapter(ProviderAdapter):
         if "max_tokens" in kwargs:
             config["max_tokens"] = kwargs["max_tokens"]
         if kwargs.get("response_schema"):
-            config["response_format"] = {"type": "json_object"}
+            config["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "response",
+                    "schema": kwargs["response_schema"],
+                    "strict": True,
+                },
+            }
 
         tool_schemas = self.to_tool_schema(tools) if tools else []
         if tool_schemas:

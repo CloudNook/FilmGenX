@@ -266,18 +266,30 @@ class AgentLoop:
         candidate_output: str,
         result: AgentResult,
         ctx: Optional["MiddlewareContext"],
-    ) -> str:
-        """Review a candidate output and prepare the next loop action."""
+        candidate_seq: int = 0,
+    ) -> tuple[str, list[Any]]:
+        """
+        Review a candidate output and prepare the next loop action.
 
-        review = await self.review_harness.review_candidate(
+        Returns:
+            (action, events)
+            - action: "passed" | "revise" | "failed" | "accept_last"
+            - events: list of ReviewStartEvent / ReviewEndEvent for streaming layer
+        """
+
+        outcome = await self.review_harness.review_candidate(
             candidate_output=candidate_output,
             result=result,
             ctx=ctx,
             messages=self.messages,
             loop_count=self.loop_count,
+            candidate_seq=candidate_seq,
         )
+        review = outcome.review
+        events = outcome.events
+
         if review is None or review.passed:
-            return "passed"
+            return "passed", events
 
         if self.review_harness.can_revise(result):
             await self._append_review_feedback(
@@ -286,7 +298,14 @@ class AgentLoop:
             )
             if self.on_loop_end is not None:
                 await self.on_loop_end(result.messages)
-            return "revise"
+            return "revise", events
+
+        # Exhausted — apply on_exhausted policy
+        result.review_exhausted = True
+        if self.review_harness.on_exhausted == "accept_last":
+            if self.on_loop_end is not None:
+                await self.on_loop_end(result.messages)
+            return "accept_last", events
 
         result.error = "Review failed"
         result.finished = False
@@ -294,7 +313,7 @@ class AgentLoop:
         result.loop_count = self.loop_count
         if self.on_loop_end is not None:
             await self.on_loop_end(result.messages)
-        return "failed"
+        return "failed", events
 
     def _add_usage(self, result: AgentResult, usage: Optional[Dict[str, Any]]) -> None:
         """将本轮 LLM usage 累加到 result.usage（本次请求合计，供积分系统使用），
@@ -465,6 +484,7 @@ class AgentLoop:
                 response = await self.llm.generate(
                     messages=list(self.messages),
                     system_prompt=self._build_system_prompt(),
+                    response_schema=self.config.response_schema,
                 )
 
                 # Step 2: 将 assistant 消息加入历史
@@ -641,16 +661,18 @@ class AgentLoop:
                 )
                 finished = self._check_finished(response, response.content)
                 if finished:
-                    review_action = await self._handle_candidate_review(
+                    review_action, _review_events = await self._handle_candidate_review(
                         candidate_output=response.content,
                         result=result,
                         ctx=ctx,
+                        candidate_seq=_assistant_seq,
                     )
                     if review_action == "revise":
                         continue
                     if review_action == "failed":
                         return result
 
+                    # passed or accept_last → return last candidate as final
                     result.finished = True
                     result.finished_at = datetime.now(timezone.utc)
                     result.raw_output = response.content
@@ -1269,6 +1291,7 @@ class AgentLoop:
                 async for chunk in self.llm.generate_stream(
                     messages=list(self.messages),
                     system_prompt=self._build_system_prompt(),
+                    response_schema=self.config.response_schema,
                 ):
                     if chunk.thinking:
                         accumulated_thinking += chunk.thinking
@@ -1455,11 +1478,14 @@ class AgentLoop:
                 )
                 finished = self._check_finished(final_chunk, accumulated_content)
                 if finished:
-                    review_action = await self._handle_candidate_review(
+                    review_action, review_events = await self._handle_candidate_review(
                         candidate_output=accumulated_content,
                         result=result,
                         ctx=ctx,
+                        candidate_seq=_assistant_seq,
                     )
+                    for ev in review_events:
+                        yield ev
                     if review_action == "revise":
                         continue
                     if review_action == "failed":
@@ -1467,6 +1493,7 @@ class AgentLoop:
                         yield DoneEvent(result=result)
                         return
 
+                    # passed or accept_last → return last candidate as final
                     result.finished = True
                     result.finished_at = datetime.now(timezone.utc)
                     result.raw_output = accumulated_content

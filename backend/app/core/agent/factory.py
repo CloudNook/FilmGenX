@@ -11,7 +11,7 @@ import logging
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from app.core.agent.agent import Agent
-from app.core.agent.base import AgentConfig, Reviewer, ReviewPolicy
+from app.core.agent.base import AgentConfig, Reviewer
 from app.core.agent.persist.base import PersistStrategy
 from app.core.agent.persist.redis_strategy import RedisPersistStrategy
 from app.core.middleware.chain import AgentMiddleware
@@ -75,8 +75,8 @@ def create_agent(
     max_loop: int = 20,
     persist: PersistArg = None,
     middlewares: Optional[List[AgentMiddleware]] = None,
-    review_policy: Optional[ReviewPolicy] = None,
     reviewer: Optional[Reviewer] = None,
+    response_schema: Optional[Dict[str, Any]] = None,
 ) -> Agent:
     """
     创建 Agent 实例。
@@ -88,17 +88,20 @@ def create_agent(
     DB session 从 persist（DBPersistStrategy）中获取。
 
     Args:
-        agent_name:  Agent 名称
-        session_id:  会话 ID，用于多轮对话持久化
-        prompt:      系统提示词（基础部分）
-        model:       LLM 模型名称
-        temperature: 温度参数
-        max_tokens:  最大 token 数
-        tools:       工具列表
-        skill_names: 绑定的 Skill 名称列表，run/stream 时懒加载注入 prompt
-        max_loop:    最大循环次数
-        persist:     持久化策略，"redis" | PersistStrategy 实例 | None
-        middlewares: 中间件列表
+        agent_name:      Agent 名称
+        session_id:      会话 ID，用于多轮对话持久化
+        prompt:          系统提示词（基础部分）
+        model:           LLM 模型名称
+        temperature:     温度参数
+        max_tokens:      最大 token 数
+        tools:           工具列表
+        skill_names:     绑定的 Skill 名称列表，run/stream 时懒加载注入 prompt
+        max_loop:        最大循环次数
+        persist:         持久化策略，"redis" | PersistStrategy 实例 | None
+        middlewares:     中间件列表
+        reviewer:        可选 Reviewer（满足 Reviewer Protocol，例如 ReviewerAgent 实例）。
+                         不传则完全无 review 链路；传入则候选输出会经过 reviewer 评审。
+        response_schema: 可选 JSON Schema，启用 Provider 原生结构化输出。
 
     Returns:
         Agent 实例，需调用 run() / stream() 执行
@@ -111,7 +114,7 @@ def create_agent(
         max_tokens=max_tokens,
         tools=tools or [],
         max_loop=max_loop,
-        review_policy=review_policy,
+        response_schema=response_schema,
     )
 
     persist_strategy = _resolve_persist(persist)

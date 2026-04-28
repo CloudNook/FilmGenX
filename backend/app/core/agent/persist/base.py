@@ -108,3 +108,30 @@ class PersistStrategy(ABC):
         """清除中断状态，resume 完成后调用。"""
         ...
 
+    async def append_review_record(
+        self,
+        session_id: str,
+        request_id: str,
+        agent_name: str,
+        review_round: int,
+        loop_count: int,
+        candidate_seq: int,
+        review: Dict[str, Any],
+    ) -> None:
+        """
+        追加一条 Review 评审记录。
+
+        默认 no-op；具体策略可选择落库到独立存储（Redis list / DB 表），
+        以支持 trace / replay / 评估能力。
+
+        Args:
+            session_id:    会话 ID
+            request_id:    单次执行 ID
+            agent_name:    被评审的 Agent
+            review_round:  评审轮次（1 起）
+            loop_count:    候选产生时的 loop 计数
+            candidate_seq: 候选 assistant 消息的 seq（指向被评审的输出）
+            review:        ReviewResult 的字典形式（score / passed / feedback / suggestions）
+        """
+        return None
+

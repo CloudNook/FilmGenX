@@ -100,18 +100,6 @@ class Reviewer(Protocol):
         ...
 
 
-class ReviewPolicy(BaseModel):
-    """Agent 输出评审策略。"""
-
-    enabled: bool = True
-    min_score: float = Field(default=8.0, ge=0, le=10)
-    max_revision_rounds: int = Field(default=1, ge=0, le=10)
-    reviewer_agent_name: str = "reviewer"
-    reviewer_model: str = "gemini-3-flash-preview"
-    review_prompt: Optional[str] = None
-    criteria: List[str] = Field(default_factory=list)
-
-
 class AgentConfig(BaseModel):
     """Agent 配置参数。"""
 
@@ -124,9 +112,12 @@ class AgentConfig(BaseModel):
     max_tokens: Optional[int] = Field(None, gt=0, description="最大 token 数")
     max_loop: int = Field(default=20, ge=1, le=100, description="最大循环次数")
     tools: List[Dict[str, Any]] = Field(default_factory=list, description="工具列表")
-    review_policy: Optional[ReviewPolicy] = Field(
+    response_schema: Optional[Dict[str, Any]] = Field(
         default=None,
-        description="可选 Review Agent 评审策略",
+        description=(
+            "可选 JSON Schema，启用 Provider 原生结构化输出（Gemini response_schema / "
+            "OpenAI response_format=json_schema）。AgentLoop 会在每次 LLM 调用时透传。"
+        ),
     )
 
 
@@ -179,6 +170,7 @@ class AgentResult(BaseModel):
     schema_data: Optional[Dict[str, Any]] = Field(None, description="最终结构化结果，供业务代码直接消费，例如落库或编排工作流")
     schema_error: Optional[str] = Field(None, description="最终结构化后处理失败时的错误信息，不影响原始文本结果")
     review_history: List[ReviewResult] = Field(default_factory=list, description="候选输出的评审历史")
+    review_exhausted: bool = Field(default=False, description="评审修订轮次是否耗尽（即使最终 finished=True 也可能为 True）")
     raw_output: Optional[str] = Field(None, description="最终自然语言输出，适合展示给用户或写入日志")
     error: Optional[str] = Field(None, description="Agent 执行失败或提前退出时的错误信息")
     finished: bool = Field(default=False, description="是否正常完成整个 Agent 流程")
@@ -336,5 +328,48 @@ class InterruptEvent(BaseModel):
     context: Dict[str, Any] = Field(default_factory=dict)
 
 
+class ReviewStartEvent(BaseModel):
+    """
+    Review Agent 开始评审一个候选输出。
+
+    流式场景下，候选 TextEvent 会被 buffer 直到 review 通过；
+    前端可借此事件展示「评审中」状态。
+    """
+    type: Literal["review_start"] = "review_start"
+    agent_name: str
+    session_id: str = ""
+    request_id: str = ""
+    review_round: int
+    loop_count: int = 0
+    candidate_preview: str = ""
+
+
+class ReviewEndEvent(BaseModel):
+    """
+    Review Agent 完成一次评审。
+
+    携带本轮评审结果。前端可据此展示分数、反馈、是否进入修订循环。
+    """
+    type: Literal["review_end"] = "review_end"
+    agent_name: str
+    session_id: str = ""
+    request_id: str = ""
+    review_round: int
+    loop_count: int = 0
+    review: ReviewResult
+    will_revise: bool = False
+    exhausted: bool = False
+
+
 # 所有事件类型的联合，用于类型标注
-StreamEvent = ThinkingEvent | TextEvent | ToolStartEvent | ToolEndEvent | DoneEvent | ErrorEvent | InterruptEvent
+StreamEvent = (
+    ThinkingEvent
+    | TextEvent
+    | ToolStartEvent
+    | ToolEndEvent
+    | DoneEvent
+    | ErrorEvent
+    | InterruptEvent
+    | ReviewStartEvent
+    | ReviewEndEvent
+)

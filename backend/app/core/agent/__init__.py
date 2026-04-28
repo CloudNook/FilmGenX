@@ -12,7 +12,6 @@ from app.core.agent.base import (
     ReviewError,
     Reviewer,
     ReviewOutput,
-    ReviewPolicy,
     ReviewRequest,
     ReviewResult,
     StructuredToolCall,
@@ -26,12 +25,20 @@ from app.core.agent.base import (
     ErrorEvent,
     InterruptEvent,
     ResumeDecision,
+    ReviewStartEvent,
+    ReviewEndEvent,
     StreamEvent,
 )
 from app.core.agent.factory import create_agent
 from app.core.agent.loop import AgentLoop
 from app.core.agent.llm import LLMAdapter
 from app.core.agent.review import ReviewHarness
+from app.core.agent.reviewer import (
+    DEFAULT_REVIEWER_JSON_SCHEMA,
+    DEFAULT_REVIEWER_PROMPT,
+    ReviewerAgent,
+    create_reviewer_agent,
+)
 from app.core.agent.tool import ToolExecutor
 from app.core.agent.persist import (
     PersistStrategy,
@@ -45,8 +52,10 @@ from app.core.tools import ToolRegistry, get_tool_registry, register_tool
 __all__ = [
     # 工厂函数
     "create_agent",
+    "create_reviewer_agent",
     # Agent 主类
     "Agent",
+    "ReviewerAgent",
     # 数据模型
     "AgentConfig",
     "AgentMessage",
@@ -55,12 +64,14 @@ __all__ = [
     "ReviewError",
     "Reviewer",
     "ReviewOutput",
-    "ReviewPolicy",
     "ReviewRequest",
     "ReviewResult",
     "StructuredToolCall",
     "ToolCall",
     "ToolResult",
+    # Reviewer 默认 prompt / schema
+    "DEFAULT_REVIEWER_PROMPT",
+    "DEFAULT_REVIEWER_JSON_SCHEMA",
     # 流式事件
     "ThinkingEvent",
     "TextEvent",
@@ -71,6 +82,8 @@ __all__ = [
     "InterruptEvent",
     "ResumeDecision",
     "AgentCheckpoint",
+    "ReviewStartEvent",
+    "ReviewEndEvent",
     "StreamEvent",
     # 核心组件
     "AgentLoop",

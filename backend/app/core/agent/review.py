@@ -1,21 +1,37 @@
-"""Review harness for Agent candidate outputs."""
+"""Review harness for Agent candidate outputs.
+
+ReviewHarness 只负责把 reviewer 嵌入 AgentLoop 的候选评审控制点：
+- 触发评审、累计 review_history、构造 synthetic feedback、发出 ReviewStart/EndEvent、持久化评审记录。
+- 不再自己起 reviewer Agent；reviewer 必须由调用方显式构造（推荐 `create_reviewer_agent`）并通过
+  `create_agent(..., reviewer=...)` 注入。
+- 重试与耗尽控制（max_revision_rounds / on_exhausted / min_score）从 reviewer 上读取，
+  reviewer 不携带这些字段时使用 ReviewerAgent 的默认值。
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import inspect
-import json
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from app.core.agent.base import (
     AgentConfig,
     AgentResult,
+    ReviewEndEvent,
     ReviewError,
     Reviewer,
     ReviewRequest,
     ReviewResult,
+    ReviewStartEvent,
 )
 from app.core.agent.persist.base import PersistStrategy
+
+
+# Reviewer 未提供 loop 配置时的回落默认值。
+# 与 ReviewerAgent 的字段默认保持同步，避免出现两套默认值。
+_DEFAULT_MAX_REVISION_ROUNDS = 1
+_DEFAULT_ON_EXHAUSTED = "fail"
+_DEFAULT_MIN_SCORE = 8.0
 
 
 @dataclass(frozen=True)
@@ -24,6 +40,14 @@ class ReviewFeedbackMessage:
 
     content: str
     metadata: dict[str, Any]
+
+
+@dataclass
+class ReviewOutcome:
+    """Result of running review_candidate, including events and the review result."""
+
+    review: Optional[ReviewResult]
+    events: List[Any]
 
 
 class ReviewHarness:
@@ -44,17 +68,37 @@ class ReviewHarness:
         self.persist = persist
         self.reviewer = reviewer
 
+    # ------------------------------------------------------------------
+    # Reviewer-driven configuration
+    # ------------------------------------------------------------------
+
     @property
     def enabled(self) -> bool:
-        policy = self.config.review_policy
-        return bool(policy and policy.enabled)
+        return self.reviewer is not None
+
+    @property
+    def max_revision_rounds(self) -> int:
+        return int(
+            getattr(self.reviewer, "max_revision_rounds", _DEFAULT_MAX_REVISION_ROUNDS)
+        )
+
+    @property
+    def on_exhausted(self) -> str:
+        return str(getattr(self.reviewer, "on_exhausted", _DEFAULT_ON_EXHAUSTED))
+
+    @property
+    def min_score(self) -> float:
+        return float(getattr(self.reviewer, "min_score", _DEFAULT_MIN_SCORE))
 
     def can_revise(self, result: AgentResult) -> bool:
-        policy = self.config.review_policy
-        if policy is None:
+        if self.reviewer is None:
             return False
         failed_reviews = sum(1 for review in result.review_history if not review.passed)
-        return failed_reviews <= policy.max_revision_rounds
+        return failed_reviews <= self.max_revision_rounds
+
+    # ------------------------------------------------------------------
+    # Review lifecycle
+    # ------------------------------------------------------------------
 
     async def review_candidate(
         self,
@@ -64,11 +108,25 @@ class ReviewHarness:
         ctx: Optional[Any],
         messages: list[dict[str, Any]],
         loop_count: int,
-    ) -> ReviewResult | None:
+        candidate_seq: int = 0,
+    ) -> ReviewOutcome:
         if not self.enabled:
-            return None
+            return ReviewOutcome(review=None, events=[])
 
-        policy = self.config.review_policy
+        review_round = len(result.review_history) + 1
+        events: List[Any] = []
+
+        events.append(
+            ReviewStartEvent(
+                agent_name=self.config.agent_name,
+                session_id=self.session_id,
+                request_id=self.request_id,
+                review_round=review_round,
+                loop_count=loop_count,
+                candidate_preview=(candidate_output or "")[:200],
+            )
+        )
+
         request = ReviewRequest(
             agent_name=self.config.agent_name,
             session_id=self.session_id,
@@ -76,22 +134,43 @@ class ReviewHarness:
             user_input=self._resolve_user_input(ctx, messages),
             candidate_output=candidate_output,
             loop_count=loop_count,
-            review_round=len(result.review_history) + 1,
-            criteria=list(policy.criteria if policy is not None else []),
+            review_round=review_round,
+            criteria=list(getattr(self.reviewer, "criteria", []) or []),
         )
 
-        if self.reviewer is not None:
-            review_value = self.reviewer(request)
-            if inspect.isawaitable(review_value):
-                review_value = await review_value
-            review_result = self._coerce_review_result(review_value)
-        else:
-            review_result = await self._run_default_reviewer(request)
+        review_value = self.reviewer(request)
+        if inspect.isawaitable(review_value):
+            review_value = await review_value
+        review_result = self._coerce_review_result(review_value)
 
-        if policy is not None and review_result.score < policy.min_score:
+        if review_result.score < self.min_score:
             review_result.passed = False
         result.review_history.append(review_result)
-        return review_result
+
+        will_revise = (not review_result.passed) and self.can_revise(result)
+        exhausted = (not review_result.passed) and not will_revise
+
+        events.append(
+            ReviewEndEvent(
+                agent_name=self.config.agent_name,
+                session_id=self.session_id,
+                request_id=self.request_id,
+                review_round=review_round,
+                loop_count=loop_count,
+                review=review_result,
+                will_revise=will_revise,
+                exhausted=exhausted,
+            )
+        )
+
+        await self._persist_review_record(
+            review=review_result,
+            review_round=review_round,
+            loop_count=loop_count,
+            candidate_seq=candidate_seq,
+        )
+
+        return ReviewOutcome(review=review_result, events=events)
 
     def build_feedback_message(self, review: ReviewResult) -> ReviewFeedbackMessage:
         suggestions = (
@@ -118,6 +197,10 @@ class ReviewHarness:
             },
         )
 
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
     def _resolve_user_input(
         self,
         ctx: Optional[Any],
@@ -131,26 +214,6 @@ class ReviewHarness:
             if message.get("role") == "user":
                 return str(message.get("content") or "")
         return ""
-
-    def _build_review_prompt(self, request: ReviewRequest) -> str:
-        criteria = (
-            "\n".join(f"- {item}" for item in request.criteria)
-            or "- 整体质量、完整性、可执行性"
-        )
-        return (
-            "你是一个严格的 Review Agent。请客观评估候选输出是否满足用户请求。\n"
-            "只返回 JSON，不要输出 JSON 之外的文本。\n\n"
-            f"## 用户请求\n{request.user_input}\n\n"
-            f"## 候选输出\n{request.candidate_output}\n\n"
-            f"## 评审维度\n{criteria}\n\n"
-            "JSON 格式：\n"
-            "{\n"
-            '  "score": 8.5,\n'
-            '  "passed": true,\n'
-            '  "feedback": "具体反馈",\n'
-            '  "suggestions": ["建议1", "建议2"]\n'
-            "}"
-        )
 
     @staticmethod
     def _coerce_review_result(value: Any) -> ReviewResult:
@@ -167,48 +230,22 @@ class ReviewHarness:
             "Reviewer must return ReviewResult or dict compatible with ReviewResult"
         )
 
-    async def _run_default_reviewer(self, request: ReviewRequest) -> ReviewResult:
-        policy = self.config.review_policy
-        if policy is None:
-            return ReviewResult(passed=True, score=10.0)
-
-        from app.core.agent.factory import create_agent
-
-        prompt = policy.review_prompt or self._build_review_prompt(request)
-        review_agent = create_agent(
-            agent_name=policy.reviewer_agent_name,
-            session_id=f"review-{self.session_id}-{self.request_id}-{request.review_round}",
-            prompt=prompt,
-            model=policy.reviewer_model,
-            max_loop=1,
-            persist=self.persist,
-            review_policy=None,
-        )
-        review_result = await review_agent.run("请评审候选输出并返回 JSON。")
-        return self._parse_reviewer_output(review_agent, review_result.raw_output or "{}")
-
-    def _parse_reviewer_output(self, review_agent: Any, raw_output: str) -> ReviewResult:
-        parsed = None
-        if getattr(review_agent._llm, "parse_json", None):
-            parsed = review_agent._llm.parse_json(raw_output)
-        if parsed is None:
-            try:
-                parsed = json.loads(raw_output)
-            except json.JSONDecodeError:
-                parsed = {
-                    "score": 0.0,
-                    "passed": False,
-                    "feedback": raw_output,
-                    "suggestions": [],
-                }
-
-        policy = self.config.review_policy
-        min_score = policy.min_score if policy is not None else 0.0
-        score = float(parsed.get("score", 0.0))
-        passed = bool(parsed.get("passed", score >= min_score)) and score >= min_score
-        return ReviewResult(
-            score=score,
-            passed=passed,
-            feedback=str(parsed.get("feedback", "")),
-            suggestions=list(parsed.get("suggestions") or []),
+    async def _persist_review_record(
+        self,
+        *,
+        review: ReviewResult,
+        review_round: int,
+        loop_count: int,
+        candidate_seq: int,
+    ) -> None:
+        if self.persist is None:
+            return
+        await self.persist.append_review_record(
+            session_id=self.session_id,
+            request_id=self.request_id,
+            agent_name=self.config.agent_name,
+            review_round=review_round,
+            loop_count=loop_count,
+            candidate_seq=candidate_seq,
+            review=review.model_dump(),
         )
