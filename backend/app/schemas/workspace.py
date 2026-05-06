@@ -101,6 +101,10 @@ class WorkspaceChatRequest(BaseModel):
         None,
         description="HITL 白名单工具列表，设置后启用 HumanInTheLoopMiddleware；列表内的工具自动放行，其余工具触发人工审阅",
     )
+    enable_review: bool = Field(
+        False,
+        description="启用 ReviewerAgent：每轮 Agent 输出后自动评审，不通过则触发修订循环",
+    )
     resume: Optional[WorkspaceResumeAction] = Field(
         None,
         description="HITL Resume：设置此字段则进入 resume 模式，content 可为空",

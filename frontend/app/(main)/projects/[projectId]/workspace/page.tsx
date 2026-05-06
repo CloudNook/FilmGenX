@@ -47,6 +47,8 @@ import {
   ShieldAlert,
   CheckCircle2,
   XCircle,
+  Star,
+  ClipboardCheck,
 } from 'lucide-react';
 import {
   Dialog,
@@ -62,6 +64,7 @@ import {
   resolveInitialWorkspaceId,
   type DisplayGroup,
   type ToolCallDisplay,
+  type ReviewDisplay,
 } from '@/lib/workspace-display';
 
 // ---------------------------------------------------------------------------
@@ -72,10 +75,20 @@ import {
 // 流式消息状态
 // ---------------------------------------------------------------------------
 
+interface ReviewState {
+  round: number;
+  status: 'evaluating' | 'done';
+  score?: number;
+  passed?: boolean;
+  feedback?: string;
+  suggestions?: string[];
+}
+
 interface StreamingState {
   thinking: string;
   text: string;
   toolCalls: ToolCallDisplay[];
+  reviews: ReviewState[];
   usage: { prompt_tokens?: number | null; completion_tokens?: number | null; thinking_tokens?: number | null; total_tokens?: number | null } | null;
   loopCount: number;
 }
@@ -155,6 +168,7 @@ export default function WorkspacePage({
     thinking: '',
     text: '',
     toolCalls: [],
+    reviews: [],
     usage: null,
     loopCount: 0,
   });
@@ -165,6 +179,7 @@ export default function WorkspacePage({
   const [hitl, setHitl] = useState<HitlState | null>(null);
   const [isResuming, setIsResuming] = useState(false);
   const [hitlEnabled, setHitlEnabled] = useState(false);
+  const [reviewEnabled, setReviewEnabled] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -289,7 +304,7 @@ export default function WorkspacePage({
     const userContent = inputValue.trim();
     setInputValue('');
     setIsStreaming(true);
-    setStreaming({ thinking: '', text: '', toolCalls: [], usage: null, loopCount: 0 });
+    setStreaming({ thinking: '', text: '', toolCalls: [], reviews: [], usage: null, loopCount: 0 });
 
     // Optimistic user message
     const tempUserMsg: AgentMessageResponse = {
@@ -309,7 +324,7 @@ export default function WorkspacePage({
         projectIdNum,
         selectedWsId,
         userContent,
-        { model, temperature, hitlAutoTools: hitlEnabled ? [] : undefined },
+        { model, temperature, hitlAutoTools: hitlEnabled ? [] : undefined, enableReview: reviewEnabled },
       );
 
       if (!response.ok) throw new Error(`Chat request failed: ${response.status}`);
@@ -368,6 +383,20 @@ export default function WorkspacePage({
                 : tc
             ),
           };
+            case 'review_start':
+              return {
+                ...prev,
+                reviews: [...prev.reviews, { round: event.review_round, status: 'evaluating' }],
+              };
+            case 'review_end':
+              return {
+                ...prev,
+                reviews: prev.reviews.map((r) =>
+                  r.round === event.review_round
+                    ? { ...r, status: 'done', score: event.score, passed: event.passed, feedback: event.feedback, suggestions: event.suggestions }
+                    : r
+                ),
+              };
             case 'done':
               if (event.usage) setLastUsage(event.usage);
               return {
@@ -401,16 +430,16 @@ export default function WorkspacePage({
       ]);
     } finally {
       setIsStreaming(false);
-      setStreaming({ thinking: '', text: '', toolCalls: [], usage: null, loopCount: 0 });
+      setStreaming({ thinking: '', text: '', toolCalls: [], reviews: [], usage: null, loopCount: 0 });
     }
-  }, [inputValue, isStreaming, selectedWsId, projectIdNum, messages.length, reloadWs, model, temperature, hitlEnabled]);
+  }, [inputValue, isStreaming, selectedWsId, projectIdNum, messages.length, reloadWs, model, temperature, hitlEnabled, reviewEnabled]);
 
   const handleResume = useCallback(async (action: 'approve' | 'reject') => {
     if (!selectedWsId || isResuming) return;
     setIsResuming(true);
     setHitl(null);
     setIsStreaming(true);
-    setStreaming({ thinking: '', text: '', toolCalls: [], usage: null, loopCount: 0 });
+    setStreaming({ thinking: '', text: '', toolCalls: [], reviews: [], usage: null, loopCount: 0 });
 
     try {
       const response = await workspacesApi.resume(projectIdNum, selectedWsId, action);
@@ -453,7 +482,7 @@ export default function WorkspacePage({
     } finally {
       setIsResuming(false);
       setIsStreaming(false);
-      setStreaming({ thinking: '', text: '', toolCalls: [], usage: null, loopCount: 0 });
+      setStreaming({ thinking: '', text: '', toolCalls: [], reviews: [], usage: null, loopCount: 0 });
     }
   }, [selectedWsId, projectIdNum, isResuming, reloadWs]);
 
@@ -816,6 +845,31 @@ export default function WorkspacePage({
                   )}
                 </div>
 
+                {/* Reviewer */}
+                <div className="space-y-2">
+                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">评审 Agent</p>
+                  <label className="flex items-center justify-between cursor-pointer">
+                    <span className="text-xs text-muted-foreground">启用 Review Agent</span>
+                    <button
+                      role="switch"
+                      aria-checked={reviewEnabled}
+                      onClick={() => setReviewEnabled((v) => !v)}
+                      className={cn(
+                        'relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors',
+                        reviewEnabled ? 'bg-primary' : 'bg-secondary'
+                      )}
+                    >
+                      <span className={cn(
+                        'pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform',
+                        reviewEnabled ? 'translate-x-4' : 'translate-x-0'
+                      )} />
+                    </button>
+                  </label>
+                  {reviewEnabled && (
+                    <p className="text-[10px] text-primary">每轮输出将被自动评审，不通过则触发修订</p>
+                  )}
+                </div>
+
                 {/* Model Settings */}
                 <div className="space-y-2">
                   <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">模型设置</p>
@@ -1010,6 +1064,19 @@ function MessageGroup({
     );
   }
 
+  if (group.type === 'review' && group.review) {
+    return (
+      <div className="flex gap-4">
+        <div className="h-8 w-8 shrink-0 rounded-full bg-primary/5 flex items-center justify-center">
+          <ClipboardCheck className="h-4 w-4 text-primary/60" />
+        </div>
+        <div className="flex-1 max-w-[80%]">
+          <ReviewCard review={{ ...group.review, status: 'done' }} />
+        </div>
+      </div>
+    );
+  }
+
   if (group.type === 'tool_calls') {
     return (
       <div className="flex gap-4">
@@ -1123,6 +1190,63 @@ function ToolCallDisclosure({
 // Streaming Message Component
 // ---------------------------------------------------------------------------
 
+function ReviewCard({ review }: { review: ReviewState | (ReviewDisplay & { status?: 'done' }) }) {
+  const isEvaluating = (review as ReviewState).status === 'evaluating';
+  const passed = review.passed;
+
+  return (
+    <div className={cn(
+      'rounded-xl px-4 py-3 border text-xs space-y-2',
+      isEvaluating
+        ? 'bg-muted/30 border-border'
+        : passed
+          ? 'bg-green-500/5 border-green-500/20'
+          : 'bg-yellow-500/5 border-yellow-500/20'
+    )}>
+      <div className="flex items-center gap-2">
+        {isEvaluating ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground shrink-0" />
+        ) : (
+          <ClipboardCheck className={cn('h-3.5 w-3.5 shrink-0', passed ? 'text-green-500' : 'text-yellow-500')} />
+        )}
+        <span className="font-medium text-foreground">
+          {isEvaluating ? `第 ${review.round} 轮评审中...` : `第 ${review.round} 轮评审结果`}
+        </span>
+        {!isEvaluating && review.score !== undefined && (
+          <span className={cn(
+            'ml-auto flex items-center gap-1 font-semibold',
+            passed ? 'text-green-600' : 'text-yellow-600'
+          )}>
+            <Star className="h-3 w-3" />
+            {review.score.toFixed(1)} / 10
+          </span>
+        )}
+        {!isEvaluating && (
+          <span className={cn(
+            'rounded-full px-2 py-0.5 text-[10px] font-medium',
+            passed ? 'bg-green-500/10 text-green-600' : 'bg-yellow-500/10 text-yellow-600'
+          )}>
+            {passed ? '通过' : '修订中'}
+          </span>
+        )}
+      </div>
+      {!isEvaluating && review.feedback && (
+        <p className="text-muted-foreground leading-relaxed pl-5">{review.feedback}</p>
+      )}
+      {!isEvaluating && review.suggestions && review.suggestions.length > 0 && (
+        <ul className="pl-5 space-y-1">
+          {review.suggestions.map((s, i) => (
+            <li key={i} className="text-muted-foreground flex gap-1.5">
+              <span className="text-primary shrink-0">·</span>
+              {s}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function StreamingMessageGroup({
   streaming,
   userFallback,
@@ -1170,6 +1294,20 @@ function StreamingMessageGroup({
           <div className="max-w-[80%] space-y-1.5">
             {streaming.toolCalls.map((tc) => (
               <ToolCallDisclosure key={tc.id} toolCall={tc} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Review Cards */}
+      {streaming.reviews.length > 0 && (
+        <div className="flex gap-4">
+          <div className="h-8 w-8 shrink-0 rounded-full bg-primary/5 flex items-center justify-center">
+            <ClipboardCheck className="h-4 w-4 text-primary/60" />
+          </div>
+          <div className="flex-1 max-w-[80%] space-y-2">
+            {streaming.reviews.map((r) => (
+              <ReviewCard key={r.round} review={r} />
             ))}
           </div>
         </div>

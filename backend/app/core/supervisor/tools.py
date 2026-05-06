@@ -14,6 +14,8 @@ from app.core.agent.base import (
     ThinkingEvent,
     TextEvent,
     DoneEvent,
+    ReviewStartEvent as AgentReviewStartEvent,
+    ReviewEndEvent as AgentReviewEndEvent,
 )
 from app.core.supervisor.context import SupervisorContext
 from app.core.supervisor.concurrency import SubAgentConcurrencyLimiter
@@ -25,6 +27,8 @@ from app.core.supervisor.events import (
     SupervisorThinkingEvent,
     SupervisorToolEndEvent,
     SupervisorToolStartEvent,
+    ReviewStartEvent,
+    ReviewEndEvent,
 )
 from app.core.supervisor.registry import SupervisorAgentRegistry, build_default_registry
 from app.core.supervisor.workflow import apply_node_update
@@ -182,6 +186,22 @@ async def call_sub_agent(
                         is_error=event.is_error,
                         source=sub_agent_name,
                         session_id=sub_session_id,
+                    )
+                elif isinstance(event, AgentReviewStartEvent):
+                    criteria = registered.reviewer.criteria if registered.reviewer else []
+                    yield ReviewStartEvent(
+                        sub_agent_name=sub_agent_name,
+                        criteria=criteria,
+                        source=sub_agent_name,
+                    )
+                elif isinstance(event, AgentReviewEndEvent):
+                    yield ReviewEndEvent(
+                        sub_agent_name=sub_agent_name,
+                        score=event.review.score,
+                        passed=event.review.passed,
+                        feedback=event.review.feedback,
+                        suggestions=event.review.suggestions,
+                        source=sub_agent_name,
                     )
                 elif isinstance(event, DoneEvent):
                     accumulated_result = {

@@ -938,6 +938,11 @@ class AgentLoop:
                     # 内层已 yield 终态事件（max_loop / fallback / HITL / 异常路径）
                     return
 
+                # 先把候选内容推给前端，让用户看到正在被评审的内容，
+                # 再启动 reviewer，避免 review 结果先于正文出现。
+                if buffer_text_until_review and candidate.content:
+                    yield TextEvent(content=candidate.content)
+
                 decision = await self._decide_review_action(
                     candidate_output=candidate.content,
                     result=result,
@@ -967,9 +972,6 @@ class AgentLoop:
                 self._finalize_terminal(result, raw_output=candidate.content)
                 if self.on_loop_end is not None:
                     await self.on_loop_end(result.messages)
-
-                if buffer_text_until_review and candidate.content:
-                    yield TextEvent(content=candidate.content)
                 yield DoneEvent(result=result)
                 return
 

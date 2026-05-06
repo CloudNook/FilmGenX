@@ -22,12 +22,22 @@ export interface ToolCallDisplay {
   status: 'pending_review' | 'running' | 'completed' | 'interrupted' | 'error';
 }
 
+export interface ReviewDisplay {
+  round: number;
+  score: number;
+  passed: boolean;
+  feedback: string;
+  suggestions: string[];
+  candidateSeq?: number;
+}
+
 export interface DisplayGroup {
   id: string;
-  type: 'user' | 'assistant' | 'thinking' | 'tool_calls';
+  type: 'user' | 'assistant' | 'thinking' | 'tool_calls' | 'review';
   content: string;
   thinking?: string;
   toolCalls?: ToolCallDisplay[];
+  review?: ReviewDisplay;
   seq: number;
   createdAt?: string | null;
 }
@@ -147,6 +157,30 @@ export function groupWorkspaceMessages(
 
     if (message.role === 'assistant') {
       const metadata = message.extra_metadata || {};
+
+      // Reviewer 写入的评审记录：role=assistant + tool_name="reviewer" + metadata.kind="review"
+      if (message.tool_name === 'reviewer' && metadata.kind === 'review') {
+        groups.push({
+          id: `review-${message.seq}`,
+          type: 'review',
+          content: '',
+          review: {
+            round: Number(metadata.review_round ?? 1),
+            score: Number(metadata.score ?? 0),
+            passed: Boolean(metadata.passed),
+            feedback: String(metadata.feedback ?? message.content ?? ''),
+            suggestions: Array.isArray(metadata.suggestions)
+              ? (metadata.suggestions as string[])
+              : [],
+            candidateSeq: typeof metadata.candidate_seq === 'number' ? (metadata.candidate_seq as number) : undefined,
+          },
+          seq: message.seq,
+          createdAt: message.created_at,
+        });
+        i += 1;
+        continue;
+      }
+
       const thinking = metadata.thinking;
       const toolCallsMeta = Array.isArray(metadata.tool_calls)
         ? (metadata.tool_calls as PersistedToolCall[])

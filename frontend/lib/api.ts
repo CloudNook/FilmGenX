@@ -1425,7 +1425,9 @@ export type AgentSSEEvent =
   | { type: 'tool_end'; tool_call_id: string; tool_name: string; result: unknown; is_error: boolean }
   | { type: 'done'; usage: { prompt_tokens?: number | null; completion_tokens?: number | null; thinking_tokens?: number | null; total_tokens?: number | null } | null; loop_count: number; finished: boolean }
   | { type: 'error'; error: string }
-  | { type: 'interrupt'; session_id: string; tool_name: string; tool_call_id: string; arguments: Record<string, unknown>; available_actions: string[]; context: Record<string, unknown> };
+  | { type: 'interrupt'; session_id: string; tool_name: string; tool_call_id: string; arguments: Record<string, unknown>; available_actions: string[]; context: Record<string, unknown> }
+  | { type: 'review_start'; review_round: number; candidate_preview: string }
+  | { type: 'review_end'; review_round: number; score: number; passed: boolean; feedback: string; suggestions: string[] };
 
 export const workspacesApi = {
   list(projectId: number, page = 1, pageSize = 20) {
@@ -1464,7 +1466,7 @@ export const workspacesApi = {
   },
 
   /** 流式聊天，返回 Response 对象供前端读取 SSE */
-  chat(projectId: number, workspaceId: number, content: string, options?: { model?: string; temperature?: number; hitlAutoTools?: string[] }) {
+  chat(projectId: number, workspaceId: number, content: string, options?: { model?: string; temperature?: number; hitlAutoTools?: string[]; enableReview?: boolean }) {
     const token = getToken();
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -1481,6 +1483,7 @@ export const workspacesApi = {
           model: options?.model,
           temperature: options?.temperature,
           hitl_auto_tools: options?.hitlAutoTools,
+          enable_review: options?.enableReview ?? false,
         }),
       },
     );

@@ -27,7 +27,10 @@ from app.core.agent import (
     DoneEvent,
     ErrorEvent,
     InterruptEvent,
+    ReviewStartEvent,
+    ReviewEndEvent,
 )
+from app.core.agent.reviewer import create_reviewer_agent
 from app.core.agent.persist.db_strategy import DBPersistStrategy
 from app.core.agent.tool import ToolExecutor
 from app.core.tools import ToolRegistry
@@ -136,6 +139,21 @@ def _serialize_agent_event(event) -> dict:
             "arguments": event.arguments,
             "available_actions": event.available_actions,
             "context": event.context,
+        }
+    elif isinstance(event, ReviewStartEvent):
+        return {
+            "type": "review_start",
+            "review_round": event.review_round,
+            "candidate_preview": event.candidate_preview,
+        }
+    elif isinstance(event, ReviewEndEvent):
+        return {
+            "type": "review_end",
+            "review_round": event.review_round,
+            "score": event.review.score,
+            "passed": event.review.passed,
+            "feedback": event.review.feedback,
+            "suggestions": event.review.suggestions,
         }
     return {"type": "unknown"}
 
@@ -343,6 +361,17 @@ async def chat_workspace(
     if body.hitl_auto_tools is not None:
         middlewares.append(HumanInTheLoopMiddleware(auto_tool_list=body.hitl_auto_tools))
 
+    reviewer = (
+        create_reviewer_agent(
+            criteria=["内容质量", "创意表达", "专业性", "可执行性"],
+            min_score=7.0,
+            max_revision_rounds=1,
+            on_exhausted="accept_last",
+        )
+        if body.enable_review
+        else None
+    )
+
     agent = create_agent(
         agent_name=ws.agent_name,
         session_id=ws.session_id,
@@ -353,6 +382,7 @@ async def chat_workspace(
         skill_names=ws.skill_names if hasattr(ws, "skill_names") else [],
         persist=persist,
         middlewares=middlewares,
+        reviewer=reviewer,
     )
     agent._tool_executor = tool_executor
 

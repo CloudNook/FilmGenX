@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
+from app.core.agent.reviewer import create_reviewer_agent
 from app.core.supervisor.workflow import WorkflowNodeDefinition
 
 
@@ -69,18 +70,36 @@ def build_default_registry() -> SupervisorAgentRegistry:
                 label="Outline Agent",
                 description="Creates a high-level narrative outline",
                 node_keys=["outline"],
+                reviewer=create_reviewer_agent(
+                    criteria=["叙事结构清晰", "故事钩子有力", "人物关系明确", "情节节拍合理"],
+                    min_score=7.5,
+                    max_revision_rounds=2,
+                    on_exhausted="accept_last",
+                ),
             ),
             RegisteredAgent(
                 name="script_agent",
                 label="Script Agent",
                 description="Creates or revises the screenplay",
                 node_keys=["script"],
+                reviewer=create_reviewer_agent(
+                    criteria=["对白自然流畅", "场景描写具体", "情绪推进清晰", "剧情逻辑自洽"],
+                    min_score=7.5,
+                    max_revision_rounds=2,
+                    on_exhausted="accept_last",
+                ),
             ),
             RegisteredAgent(
                 name="storyboard_agent",
                 label="Storyboard Agent",
                 description="Creates shot-group and storyboard plans",
                 node_keys=["storyboard"],
+                reviewer=create_reviewer_agent(
+                    criteria=["镜头构图合理", "节奏分配清晰", "画面感强", "与剧本对应准确"],
+                    min_score=7.5,
+                    max_revision_rounds=2,
+                    on_exhausted="accept_last",
+                ),
             ),
         ]
     )

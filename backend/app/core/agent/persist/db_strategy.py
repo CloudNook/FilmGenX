@@ -172,6 +172,57 @@ class DBPersistStrategy(PersistStrategy):
                 loop_count=intr.get("loop_count", 0),
             )
 
+    async def append_review_record(
+        self,
+        session_id: str,
+        request_id: str,
+        agent_name: str,
+        review_round: int,
+        loop_count: int,
+        candidate_seq: int,
+        review: Dict[str, Any],
+    ) -> None:
+        """把一次评审结果落到 ``agent_messages``。
+
+        - role=assistant + tool_name="reviewer" 作为查询/前端识别的标记
+        - content 为 feedback 文本（人类可读）
+        - 完整结构化结果（score / passed / suggestions / target_seq）放在 extra_metadata
+        - seq 取当前 session 最大 seq + 1，保证按时间顺序排在被评审消息之后
+        """
+        async with self._session_scope() as db:
+            max_seq_stmt = (
+                select(AgentMessageRecord.seq)
+                .where(AgentMessageRecord.session_id == session_id)
+                .order_by(AgentMessageRecord.seq.desc())
+                .limit(1)
+            )
+            rows = await db.execute(max_seq_stmt)
+            max_seq = rows.scalar()
+            new_seq = (max_seq if max_seq is not None else -1) + 1
+
+            record = AgentMessageRecord(
+                session_id=session_id,
+                request_id=request_id,
+                agent_name=agent_name,
+                role="assistant",
+                content=str(review.get("feedback") or ""),
+                seq=new_seq,
+                loop_count=loop_count,
+                tool_name="reviewer",
+                extra_metadata={
+                    "kind": "review",
+                    "review_round": review_round,
+                    "candidate_seq": candidate_seq,
+                    "score": review.get("score"),
+                    "passed": review.get("passed"),
+                    "feedback": review.get("feedback") or "",
+                    "suggestions": list(review.get("suggestions") or []),
+                },
+                supervisor_session_id=self.default_supervisor_session_id,
+            )
+            db.add(record)
+            await db.commit()
+
     async def clear_interrupt_state(self, session_id: str) -> None:
         async with self._session_scope() as db:
             stmt = (

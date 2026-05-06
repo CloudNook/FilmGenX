@@ -132,6 +132,15 @@
 }
 
 @layer components {
+  .prose-custom {
+    --tw-prose-bullets: var(--foreground);
+    --tw-prose-counters: var(--foreground);
+  }
+  .prose-custom ul > li::marker,
+  .prose-custom ol > li::marker,
+  .prose-custom li::marker {
+    color: var(--foreground) !important;
+  }
   .prose-custom,
   .prose-custom p,
   .prose-custom h1,
@@ -143,13 +152,36 @@
   .prose-custom span,
   .prose-custom li,
   .prose-custom strong,
+  .prose-custom b,
+  .prose-custom em,
+  .prose-custom i,
+  .prose-custom del,
+  .prose-custom s,
+  .prose-custom mark,
+  .prose-custom sub,
+  .prose-custom sup,
+  .prose-custom code,
+  .prose-custom pre,
+  .prose-custom kbd,
   .prose-custom ul,
   .prose-custom ol,
   .prose-custom blockquote,
   .prose-custom table,
+  .prose-custom thead,
+  .prose-custom tbody,
+  .prose-custom tr,
   .prose-custom th,
-  .prose-custom td {
+  .prose-custom td,
+  .prose-custom figcaption {
     color: var(--foreground) !important;
+  }
+  .prose-custom code,
+  .prose-custom pre {
+    background-color: var(--muted) !important;
+  }
+  .prose-custom code::before,
+  .prose-custom code::after {
+    content: "" !important;
   }
   .prose-custom a {
     color: var(--primary) !important;
