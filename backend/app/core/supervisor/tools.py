@@ -1,8 +1,7 @@
 """
-Supervisor 工具：call_sub_agent / call_reviewer / get_workflow_state。
+Supervisor 工具：call_sub_agent / get_workflow_state。
 """
 
-import json
 import logging
 from typing import Any, AsyncGenerator, Dict, List, Optional
 from uuid import uuid4
@@ -28,7 +27,6 @@ from app.core.supervisor.events import (
     SupervisorToolStartEvent,
 )
 from app.core.supervisor.registry import SupervisorAgentRegistry, build_default_registry
-from app.core.supervisor.reviewer import build_reviewer_prompt
 from app.core.supervisor.workflow import apply_node_update
 from app.core.tools.registry import register_tool
 from app.db.session import AsyncSessionFactory
@@ -128,6 +126,7 @@ async def call_sub_agent(
         skill_names=registered.skill_names,
         max_loop=20,
         persist=persist_strategy,
+        reviewer=registered.reviewer,
     )
 
     accumulated_result = {}
@@ -224,114 +223,6 @@ async def call_sub_agent(
     )
 
 
-def _build_call_reviewer_schema() -> Dict[str, Any]:
-    return {
-        "name": "call_reviewer",
-        "description": (
-            "调用 Reviewer Agent 评估内容质量。\n"
-            "Args:\n"
-            "  content: 需要评估的内容（文本或 JSON）\n"
-            "  review_criteria: 评估维度列表，如：情感张力 | 结构完整性 | 分镜合理性\n"
-            "Returns: {score: 0-10, passed: bool, feedback: str, suggestions: []}\n"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "content": {"type": "string", "description": "待评估内容"},
-                "review_criteria": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "评估维度列表",
-                },
-            },
-            "required": ["content", "review_criteria"],
-        },
-    }
-
-
-@register_tool(
-    name="call_reviewer",
-    description=(
-        "调用 Reviewer Agent 评估内容质量。\n"
-        "Args:\n"
-        "  content: 需要评估的内容（文本或 JSON）\n"
-        "  review_criteria: 评估维度列表，如：情感张力 | 结构完整性 | 分镜合理性\n"
-        "Returns: {score: 0-10, passed: bool, feedback: str, suggestions: []}\n"
-    ),
-)
-async def call_reviewer(
-    content: str,
-    review_criteria: List[str],
-    supervisor_context: SupervisorContext,
-) -> Dict[str, Any]:
-    """
-    调用 Reviewer Agent 评估内容质量。
-
-    Reviewer 是一个标准 Agent，封装在此函数中。
-    返回 {score, passed, feedback, suggestions}。
-    """
-    reviewer_session_id = f"reviewer-{str(uuid4())[:8]}"
-    reviewer_prompt = build_reviewer_prompt(content, review_criteria)
-    reviewer_agent = create_agent(
-        agent_name="reviewer",
-        session_id=reviewer_session_id,
-        prompt=reviewer_prompt,
-        model="gemini-3-flash-preview",
-        max_loop=10,
-        persist=DBPersistStrategy(
-            session_factory=AsyncSessionFactory,
-            supervisor_session_id=supervisor_context.supervisor_session_id,
-        ),
-    )
-
-    try:
-        result = await reviewer_agent.run(initial_input="请根据 system prompt 中的评审标准和内容，输出评审结果。")
-        raw = result.raw_output or ""
-
-        import re
-
-        json_match = re.search(r"\{[\s\S]+\}", raw)
-        if json_match:
-            review_data = json.loads(json_match.group())
-        else:
-            review_data = {
-                "score": 7.0,
-                "passed": True,
-                "feedback": raw,
-                "suggestions": [],
-            }
-
-        score = float(review_data.get("score", 7.0))
-        passed = review_data.get("passed", score >= 7.0)
-
-        from app.core.supervisor.context import ReviewEntry
-
-        supervisor_context.record_review(
-            ReviewEntry(
-                agent=review_data.get("agent", "unknown"),
-                score=score,
-                passed=passed,
-                feedback=review_data.get("feedback", ""),
-                suggestions=review_data.get("suggestions", []),
-            )
-        )
-
-        return {
-            "score": score,
-            "passed": passed,
-            "feedback": review_data.get("feedback", ""),
-            "suggestions": review_data.get("suggestions", []),
-        }
-    except Exception as e:
-        logger.exception(f"[call_reviewer] error: {e}")
-        return {
-            "score": 0.0,
-            "passed": False,
-            "feedback": f"Reviewer 执行失败：{str(e)}",
-            "suggestions": [],
-        }
-
-
 def _build_get_workflow_state_schema() -> Dict[str, Any]:
     return {
         "name": "get_workflow_state",
@@ -387,6 +278,5 @@ def get_supervisor_tool_schemas(agent_names: Optional[List[str]] = None) -> List
     """返回所有 Supervisor 工具的 schema 列表。"""
     return [
         _build_call_sub_agent_schema(agent_names),
-        _build_call_reviewer_schema(),
         _build_get_workflow_state_schema(),
     ]

@@ -51,7 +51,7 @@ def test_create_supervisor_builds_db_persist_and_hitl_in_core():
     assert len(supervisor._agent.middlewares) == 1
     middleware = supervisor._agent.middlewares[0]
     assert isinstance(middleware, HumanInTheLoopMiddleware)
-    assert middleware.auto_tool_list == {"get_workflow_state", "call_reviewer"}
+    assert middleware.auto_tool_list == {"get_workflow_state"}
     assert middleware.context == {"review_sub_agents": ["outline"]}
 
 

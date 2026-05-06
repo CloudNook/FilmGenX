@@ -59,7 +59,7 @@ def _resolve_middlewares(
     ):
         resolved.append(
             HumanInTheLoopMiddleware(
-                auto_tool_list=["get_workflow_state", "call_reviewer"],
+                auto_tool_list=["get_workflow_state"],
                 context={"review_sub_agents": review_nodes or []},
             )
         )

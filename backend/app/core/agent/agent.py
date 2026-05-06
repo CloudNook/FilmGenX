@@ -95,27 +95,20 @@ class Agent:
             agent_config=self.config,
         )
 
-    async def run(
+    async def _prepare_request(
         self,
         initial_input: str,
-        *,
-        request_id: str | None = None,
-        resume: Optional[ResumeDecision] = None,
-    ) -> AgentResult:
-        """
-        执行 Agent 循环（非流式）。
+        request_id: str | None,
+        resume: Optional[ResumeDecision],
+    ):
+        """run() / stream() 共享的请求级 setup。
 
-        Args:
-            initial_input: 用户初始输入
-            request_id:    可选的请求 ID，不传则自动生成
+        - 懒注入 skills、初始化 llm 与 tool_executor
+        - 生成 rid，按需 load interrupt checkpoint
+        - 构造 MiddlewareContext + AgentLoop（绑定 on_loop_start/end 闭包）
 
         Returns:
-            AgentResult 执行结果。
-
-            这里返回的是业务侧最终对象，适合：
-            - 读取 `schema_data`
-            - 保存数据库
-            - 作为下游流程输入
+            (rid, ctx, loop, checkpoint)
         """
         await self._inject_skills()
         self._init_llm()
@@ -123,104 +116,6 @@ class Agent:
 
         rid = request_id or str(uuid4())
 
-        # ── Resume 分支：从 persist 加载 checkpoint ───────────────────────────────
-        if resume is not None:
-            if self.persist is None:
-                raise ValueError("Cannot resume without a persist strategy")
-            checkpoint = await self.persist.load_interrupt_state(self.session_id)
-            if checkpoint is None:
-                raise ValueError(f"No interrupt state found for session {self.session_id}")
-
-        ctx = self._build_context(rid, initial_input)
-
-        async def _do_run() -> AgentResult:
-            prev_msg_count = 0
-
-            async def on_loop_start() -> None:
-                ctx.loop_count = loop.loop_count
-                await self._chain.on_loop_start(ctx)
-
-            async def on_loop_end(messages: list) -> None:
-                nonlocal prev_msg_count
-                ctx.loop_count = loop.loop_count
-                ctx.loop_messages = messages[prev_msg_count:]
-                prev_msg_count = len(messages)
-                await self._chain.on_loop_end(ctx)
-
-            loop = AgentLoop(
-                config=self.config,
-                llm=self._llm,
-                tool_executor=self._tool_executor,
-                persist=self.persist,
-                session_id=self.session_id,
-                request_id=rid,
-                chain=self._chain,
-                on_loop_start=on_loop_start,
-                on_loop_end=on_loop_end,
-                reviewer=self.reviewer,
-            )
-            ctx.llm = self._llm
-            ctx.loop = loop
-            # loop.run() 负责完整的 think/act/observe 主循环，
-            # 这里只做请求级封装和最终结果后处理。
-            try:
-                result = await loop.run(
-                    initial_input,
-                    ctx,
-                    checkpoint=checkpoint if resume is not None else None,
-                    resume=resume,
-                )
-            except AgentInterrupted:
-                result = AgentResult(
-                    agent_id=self.agent_id,
-                    agent_name=self.config.agent_name,
-                    request_id=rid,
-                    error="interrupted",
-                    finished=False,
-                )
-                ctx.result = result
-                return result
-            result.usage = merge_usage(ctx.metadata.get("usage"), result.usage)
-            # finalize_result 是“主循环结束后、返回给业务前”的最后加工阶段，
-            # 适合做最终结构化、usage 汇总等不应干扰主循环的逻辑。
-            result = await self._chain.finalize_result(ctx, result)
-            result.agent_id = self.agent_id
-            result.request_id = rid
-            # 在 chain.run() 的 after 钩子触发前写入 ctx，确保 middleware.after() 能读到结果
-            ctx.result = result
-            return result
-
-        return await self._chain.run(ctx, _do_run)
-
-    async def stream(
-        self,
-        initial_input: str,
-        *,
-        request_id: str | None = None,
-        resume: Optional[ResumeDecision] = None,
-    ):
-        """
-        执行 Agent 循环（流式），yield StreamEvent。
-
-        设计目标：
-        - 让前端实时看到 Agent 内部过程
-        - 同时在最后一个 DoneEvent 中携带完整 AgentResult，供业务层读取
-
-        事件顺序：
-            ThinkingEvent  — LLM 思考过程片段（如果模型支持）
-            TextEvent      — LLM 文本片段（逐字实时）
-            ToolStartEvent — 工具开始执行
-            ToolEndEvent   — 工具执行完毕
-            DoneEvent      — 循环结束（携带最终 AgentResult）
-            ErrorEvent     — 出错
-        """
-        await self._inject_skills()
-        self._init_llm()
-        self._init_tool_executor()
-
-        rid = request_id or str(uuid4())
-
-        # ── Resume：从 persist 加载 checkpoint ───────────────────────────────────
         checkpoint = None
         if resume is not None:
             if self.persist is None:
@@ -229,7 +124,7 @@ class Agent:
             if checkpoint is None:
                 raise ValueError(f"No interrupt state found for session {self.session_id}")
 
-        ctx = self._build_context(rid, initial_input or "")
+        ctx = self._build_context(rid, initial_input)
 
         prev_msg_count = 0
 
@@ -259,12 +154,68 @@ class Agent:
         ctx.llm = self._llm
         ctx.loop = loop
 
+        return rid, ctx, loop, checkpoint
+
+    async def run(
+        self,
+        initial_input: str,
+        *,
+        request_id: str | None = None,
+        resume: Optional[ResumeDecision] = None,
+    ) -> AgentResult:
+        """执行 Agent 循环（非流式），返回最终 AgentResult。"""
+        rid, ctx, loop, checkpoint = await self._prepare_request(
+            initial_input, request_id, resume,
+        )
+
+        async def _do_run() -> AgentResult:
+            try:
+                result = await loop.run(
+                    initial_input, ctx,
+                    checkpoint=checkpoint, resume=resume,
+                )
+            except AgentInterrupted:
+                result = AgentResult(
+                    agent_id=self.agent_id,
+                    agent_name=self.config.agent_name,
+                    request_id=rid,
+                    error="interrupted",
+                    finished=False,
+                )
+                ctx.result = result
+                return result
+            result.usage = merge_usage(ctx.metadata.get("usage"), result.usage)
+            # finalize_result 是"主循环结束后、返回给业务前"的最后加工阶段，
+            # 适合做最终结构化、usage 汇总等不应干扰主循环的逻辑。
+            result = await self._chain.finalize_result(ctx, result)
+            result.agent_id = self.agent_id
+            result.request_id = rid
+            # 在 chain.run() 的 after 钩子触发前写入 ctx，确保 middleware.after() 能读到结果
+            ctx.result = result
+            return result
+
+        return await self._chain.run(ctx, _do_run)
+
+    async def stream(
+        self,
+        initial_input: str,
+        *,
+        request_id: str | None = None,
+        resume: Optional[ResumeDecision] = None,
+    ):
+        """执行 Agent 循环（流式），yield StreamEvent。
+
+        事件顺序：ThinkingEvent → TextEvent → ToolStartEvent → ToolEndEvent →
+        DoneEvent（携带最终 AgentResult）。出错时 yield ErrorEvent。
+        """
+        rid, ctx, loop, checkpoint = await self._prepare_request(
+            initial_input or "", request_id, resume,
+        )
+
         async def _generate():
             async for event in loop.stream_run(
-                initial_input or "",
-                ctx,
-                checkpoint=checkpoint,
-                resume=resume,
+                initial_input or "", ctx,
+                checkpoint=checkpoint, resume=resume,
             ):
                 if isinstance(event, DoneEvent):
                     event.result.usage = merge_usage(ctx.metadata.get("usage"), event.result.usage)

@@ -7,7 +7,7 @@ Supervisor 专家 Agent 注册表。
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -22,6 +22,7 @@ class RegisteredAgent(BaseModel):
     tools: list[dict[str, Any]] = Field(default_factory=list)
     skill_names: list[str] = Field(default_factory=list)
     model: str = "gemini-3-flash-preview"
+    reviewer: Optional[Any] = None
 
 
 class SupervisorAgentRegistry(BaseModel):

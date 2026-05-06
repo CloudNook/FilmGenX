@@ -53,11 +53,9 @@ from app.core.supervisor.supervisor import SupervisorAgent
 from app.core.supervisor.factory import create_supervisor
 from app.core.supervisor.tools import (
     call_sub_agent,
-    call_reviewer,
     get_workflow_state,
     get_supervisor_tool_schemas,
 )
-from app.core.supervisor.reviewer import build_reviewer_prompt
 
 __all__ = [
     # Context
@@ -98,9 +96,6 @@ __all__ = [
     "create_supervisor",
     # Tools
     "call_sub_agent",
-    "call_reviewer",
     "get_workflow_state",
     "get_supervisor_tool_schemas",
-    # Reviewer
-    "build_reviewer_prompt",
 ]

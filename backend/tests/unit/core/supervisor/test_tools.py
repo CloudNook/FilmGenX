@@ -12,7 +12,7 @@ from app.core.agent.persist.db_strategy import DBPersistStrategy
 from app.core.supervisor.concurrency import SubAgentConcurrencyLimiter
 from app.core.supervisor.context import SupervisorContext
 from app.core.supervisor.registry import RegisteredAgent, SupervisorAgentRegistry
-from app.core.supervisor.tools import call_reviewer, call_sub_agent
+from app.core.supervisor.tools import call_sub_agent
 from app.core.supervisor.tools import get_workflow_state
 from app.core.supervisor.workflow import WorkflowNodeDefinition
 
@@ -370,38 +370,3 @@ async def test_call_sub_agent_binds_db_persist_to_supervisor_session(monkeypatch
     assert persist.default_supervisor_session_id == "sv-persist-001"
 
 
-@pytest.mark.asyncio
-async def test_call_reviewer_binds_db_persist_to_supervisor_session(monkeypatch):
-    captured = {}
-
-    class _ReviewerAgent:
-        async def run(self, initial_input: str):
-            return AgentResult(
-                agent_name="reviewer",
-                raw_output='{"score": 8.5, "passed": true, "feedback": "looks good", "suggestions": ["tighten pacing"]}',
-                finished=True,
-            )
-
-    def _fake_create_agent(**kwargs):
-        captured.update(kwargs)
-        return _ReviewerAgent()
-
-    monkeypatch.setattr("app.core.supervisor.tools.create_agent", _fake_create_agent)
-
-    ctx = SupervisorContext(
-        supervisor_session_id="sv-review-001",
-        user_request="start",
-        workflow_definitions=[],
-    )
-
-    review = await call_reviewer(
-        content="outline content",
-        review_criteria=["coherence"],
-        supervisor_context=ctx,
-    )
-
-    persist = captured["persist"]
-    assert isinstance(persist, DBPersistStrategy)
-    assert persist.default_supervisor_session_id == "sv-review-001"
-    assert review["passed"] is True
-    assert ctx.review_history and ctx.review_history[0].feedback == "looks good"
