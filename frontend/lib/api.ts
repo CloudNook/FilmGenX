@@ -157,18 +157,18 @@ export interface UserResponse {
 }
 
 export const authApi = {
-  register(email: string, username: string, password: string) {
+  register(email: string, username: string, password: string, inviteCode?: string) {
     return request<TokenResponse>('/auth/register', {
       method: 'POST',
-      body: { email, username, password },
+      body: { email, username, password, invite_code: inviteCode || undefined },
       noAuth: true,
     });
   },
 
-  login(email: string, password: string, inviteCode?: string) {
+  login(email: string, password: string) {
     return request<TokenResponse>('/auth/login', {
       method: 'POST',
-      body: { email, password, invite_code: inviteCode || undefined },
+      body: { email, password },
       noAuth: true,
     });
   },

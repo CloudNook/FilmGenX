@@ -1,37 +1,352 @@
 'use client';
 
+import { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
-import { Film, Lock } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { Film, Eye, EyeOff, Mail, Lock, User, KeyRound, ArrowRight } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { useAuth } from '@/lib/auth';
+import gsap from 'gsap';
 
 export default function RegisterPage() {
-  return (
-    <div className="flex min-h-screen items-center justify-center bg-background">
-      <div className="w-full max-w-sm space-y-6 text-center px-6">
-        <Link href="/" className="inline-flex items-center gap-3 justify-center">
-          <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-primary">
-            <Film className="h-7 w-7 text-primary-foreground" />
-          </div>
-          <span className="text-2xl font-bold text-foreground">FilmGenX</span>
-        </Link>
+  const router = useRouter();
+  const { register } = useAuth();
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [email, setEmail] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [inviteCode, setInviteCode] = useState('');
+  const [error, setError] = useState('');
 
-        <div className="rounded-xl border border-border bg-card p-8 space-y-4">
-          <div className="flex justify-center">
-            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted">
-              <Lock className="h-6 w-6 text-muted-foreground" />
+  const containerRef = useRef<HTMLDivElement>(null);
+  const leftPanelRef = useRef<HTMLDivElement>(null);
+  const rightPanelRef = useRef<HTMLDivElement>(null);
+  const logoRef = useRef<HTMLDivElement>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const subtitleRef = useRef<HTMLParagraphElement>(null);
+  const featuresRef = useRef<HTMLDivElement>(null);
+  const formRef = useRef<HTMLFormElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const inputsRef = useRef<HTMLDivElement[]>([]);
+  const footerRef = useRef<HTMLParagraphElement>(null);
+
+  useEffect(() => {
+    const ctx = gsap.context(() => {
+      const tl = gsap.timeline({ defaults: { ease: 'power3.out' } });
+
+      tl.from(leftPanelRef.current, { x: -100, opacity: 0, duration: 1 })
+        .from(logoRef.current, { y: -30, opacity: 0, duration: 0.8 }, '-=0.6')
+        .from(titleRef.current, { y: 30, opacity: 0, duration: 0.8 }, '-=0.5')
+        .from(subtitleRef.current, { y: 20, opacity: 0, duration: 0.6 }, '-=0.4')
+        .from(
+          featuresRef.current?.children || [],
+          { x: -40, opacity: 0, duration: 0.5, stagger: 0.15 },
+          '-=0.3'
+        )
+        .from(footerRef.current, { opacity: 0, duration: 0.5 }, '-=0.2');
+
+      tl.from(rightPanelRef.current, { x: 100, opacity: 0, duration: 1 }, '-=1')
+        .from(headingRef.current, { y: 20, opacity: 0, duration: 0.6 }, '-=0.8');
+
+      inputsRef.current.forEach((input, i) => {
+        if (input) {
+          gsap.from(input, {
+            x: 40, opacity: 0, duration: 0.5,
+            delay: 0.3 + i * 0.1, ease: 'power2.out',
+          });
+        }
+      });
+    }, containerRef);
+
+    return () => ctx.revert();
+  }, []);
+
+  useEffect(() => {
+    if (error && formRef.current) {
+      gsap.fromTo(formRef.current, { x: -10 }, { x: 0, duration: 0.5, ease: 'elastic.out(1, 0.3)' });
+    }
+  }, [error]);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+
+    if (password !== confirm) {
+      setError('两次输入的密码不一致');
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      await register(email, username, password, inviteCode || undefined);
+      gsap.to(containerRef.current, {
+        x: -100, opacity: 0, duration: 0.5, ease: 'power2.in',
+        onComplete: () => router.push('/home'),
+      });
+    } catch (err: any) {
+      setError(err.message || '注册失败，请重试');
+      setIsLoading(false);
+    }
+  };
+
+  const features = [
+    'AI 智能剧本创作与优化',
+    '自动化分镜生成与调整',
+    '角色一致性智能管理',
+    '多模态内容协同制作',
+  ];
+
+  return (
+    <div ref={containerRef} className="flex min-h-screen overflow-hidden">
+      <div className="fixed inset-0 -z-10">
+        <div className="absolute inset-0 bg-gradient-to-br from-background via-background to-secondary/30" />
+        <div
+          className="absolute w-96 h-96 rounded-full opacity-20 blur-3xl"
+          style={{
+            background: 'linear-gradient(135deg, oklch(0.646 0.222 41.116), oklch(0.6 0.118 184.704))',
+            top: '10%', left: '20%',
+            animation: 'float 8s ease-in-out infinite',
+          }}
+        />
+        <div
+          className="absolute w-80 h-80 rounded-full opacity-15 blur-3xl"
+          style={{
+            background: 'linear-gradient(135deg, oklch(0.398 0.07 227.392), oklch(0.769 0.188 70.08))',
+            bottom: '10%', right: '20%',
+            animation: 'float 10s ease-in-out infinite reverse',
+          }}
+        />
+      </div>
+
+      {/* Left Panel */}
+      <div
+        ref={leftPanelRef}
+        className="hidden lg:flex lg:w-1/2 flex-col justify-between bg-secondary/50 p-12 relative overflow-hidden"
+      >
+        <div className="absolute top-0 right-0 w-64 h-64 opacity-10">
+          <svg viewBox="0 0 200 200" className="w-full h-full">
+            <circle cx="100" cy="100" r="80" fill="none" stroke="currentColor" strokeWidth="0.5" className="text-foreground" />
+            <circle cx="100" cy="100" r="60" fill="none" stroke="currentColor" strokeWidth="0.5" className="text-foreground" />
+            <circle cx="100" cy="100" r="40" fill="none" stroke="currentColor" strokeWidth="0.5" className="text-foreground" />
+          </svg>
+        </div>
+
+        <div ref={logoRef}>
+          <Link href="/" className="flex items-center gap-3 group">
+            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-primary relative overflow-hidden">
+              <Film className="h-7 w-7 text-primary-foreground relative z-10" />
+              <div className="absolute inset-0 bg-gradient-to-r from-primary to-primary/80 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
             </div>
-          </div>
-          <h2 className="text-xl font-semibold text-foreground">注册暂不开放</h2>
-          <p className="text-sm text-muted-foreground">
-            当前仅限受邀用户使用，如需访问请联系管理员获取邀请码。
-          </p>
-          <Link
-            href="/login"
-            className="block w-full rounded-lg bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
-          >
-            返回登录
+            <span className="text-2xl font-bold text-foreground">FilmGenX</span>
           </Link>
         </div>
+
+        <div className="space-y-6 relative z-10">
+          <h1 ref={titleRef} className="text-4xl font-bold leading-tight text-foreground text-balance">
+            加入我们，开启
+            <br />
+            <span className="text-primary relative">
+              AI 创作之旅
+              <svg className="absolute -bottom-1 left-0 w-full h-2" viewBox="0 0 200 8" preserveAspectRatio="none">
+                <path d="M0 4 Q 50 0, 100 4 T 200 4" fill="none" stroke="oklch(0.646 0.222 41.116)" strokeWidth="2" />
+              </svg>
+            </span>
+          </h1>
+          <p ref={subtitleRef} className="text-lg text-muted-foreground max-w-md leading-relaxed">
+            受邀用户专享通道，凭邀请码注册，解锁完整的 AI 动画内容生产能力。
+          </p>
+
+          <div ref={featuresRef} className="space-y-4 pt-4">
+            {features.map((feature, index) => (
+              <div key={index} className="flex items-center gap-3 group cursor-pointer">
+                <div className="flex h-6 w-6 items-center justify-center rounded-full bg-primary relative overflow-hidden">
+                  <div className="h-2 w-2 rounded-full bg-primary-foreground relative z-10" />
+                  <div className="absolute inset-0 bg-gradient-to-r from-primary to-primary/70 scale-0 group-hover:scale-100 transition-transform duration-300 origin-left" />
+                </div>
+                <span className="text-foreground group-hover:text-primary transition-colors duration-300">{feature}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <p ref={footerRef} className="text-sm text-muted-foreground relative z-10">
+          FilmGenX 2024. 保留所有权利。
+        </p>
       </div>
+
+      {/* Right Panel - Register Form */}
+      <div ref={rightPanelRef} className="flex w-full lg:w-1/2 items-center justify-center p-8 relative">
+        <div className="w-full max-w-md space-y-8">
+          <div className="lg:hidden flex justify-center mb-8">
+            <Link href="/" className="flex items-center gap-3">
+              <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-primary">
+                <Film className="h-7 w-7 text-primary-foreground" />
+              </div>
+              <span className="text-2xl font-bold text-foreground">FilmGenX</span>
+            </Link>
+          </div>
+
+          <div ref={headingRef} className="space-y-2 text-center lg:text-left">
+            <h2 className="text-3xl font-bold text-foreground">创建账户</h2>
+            <p className="text-muted-foreground">填写信息完成注册</p>
+          </div>
+
+          {error && (
+            <div className="rounded-lg border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+              {error}
+            </div>
+          )}
+
+          <form ref={formRef} onSubmit={handleSubmit} className="space-y-5">
+            <div className="space-y-4">
+              <div ref={(el) => { if (el) inputsRef.current[0] = el; }} className="space-y-2">
+                <Label htmlFor="email" className="text-foreground">邮箱地址</Label>
+                <div className="relative group">
+                  <Mail className="absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-muted-foreground transition-colors group-focus-within:text-primary" />
+                  <Input
+                    id="email"
+                    type="email"
+                    placeholder="your@email.com"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    className="pl-10 h-12 bg-card border-border transition-all duration-300 group-focus-within:border-primary group-focus-within:shadow-lg group-focus-within:shadow-primary/10"
+                    required
+                    disabled={isLoading}
+                  />
+                </div>
+              </div>
+
+              <div ref={(el) => { if (el) inputsRef.current[1] = el; }} className="space-y-2">
+                <Label htmlFor="username" className="text-foreground">用户名</Label>
+                <div className="relative group">
+                  <User className="absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-muted-foreground transition-colors group-focus-within:text-primary" />
+                  <Input
+                    id="username"
+                    type="text"
+                    placeholder="2-50 个字符"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    className="pl-10 h-12 bg-card border-border transition-all duration-300 group-focus-within:border-primary group-focus-within:shadow-lg group-focus-within:shadow-primary/10"
+                    required
+                    minLength={2}
+                    maxLength={50}
+                    disabled={isLoading}
+                  />
+                </div>
+              </div>
+
+              <div ref={(el) => { if (el) inputsRef.current[2] = el; }} className="space-y-2">
+                <Label htmlFor="password" className="text-foreground">密码</Label>
+                <div className="relative group">
+                  <Lock className="absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-muted-foreground transition-colors group-focus-within:text-primary" />
+                  <Input
+                    id="password"
+                    type={showPassword ? 'text' : 'password'}
+                    placeholder="至少 6 位"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="pl-10 pr-10 h-12 bg-card border-border transition-all duration-300 group-focus-within:border-primary group-focus-within:shadow-lg group-focus-within:shadow-primary/10"
+                    required
+                    minLength={6}
+                    disabled={isLoading}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    {showPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+                  </button>
+                </div>
+              </div>
+
+              <div ref={(el) => { if (el) inputsRef.current[3] = el; }} className="space-y-2">
+                <Label htmlFor="confirm" className="text-foreground">确认密码</Label>
+                <div className="relative group">
+                  <Lock className="absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-muted-foreground transition-colors group-focus-within:text-primary" />
+                  <Input
+                    id="confirm"
+                    type={showConfirm ? 'text' : 'password'}
+                    placeholder="再次输入密码"
+                    value={confirm}
+                    onChange={(e) => setConfirm(e.target.value)}
+                    className="pl-10 pr-10 h-12 bg-card border-border transition-all duration-300 group-focus-within:border-primary group-focus-within:shadow-lg group-focus-within:shadow-primary/10"
+                    required
+                    disabled={isLoading}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowConfirm(!showConfirm)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    {showConfirm ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+                  </button>
+                </div>
+              </div>
+
+              <div ref={(el) => { if (el) inputsRef.current[4] = el; }} className="space-y-2">
+                <Label htmlFor="invite-code" className="text-foreground">
+                  邀请码
+                  <span className="ml-1 text-xs text-muted-foreground font-normal">（必填）</span>
+                </Label>
+                <div className="relative group">
+                  <KeyRound className="absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-muted-foreground transition-colors group-focus-within:text-primary" />
+                  <Input
+                    id="invite-code"
+                    type="text"
+                    placeholder="输入邀请码"
+                    value={inviteCode}
+                    onChange={(e) => setInviteCode(e.target.value)}
+                    className="pl-10 h-12 bg-card border-border transition-all duration-300 group-focus-within:border-primary group-focus-within:shadow-lg group-focus-within:shadow-primary/10"
+                    required
+                    disabled={isLoading}
+                  />
+                </div>
+              </div>
+            </div>
+
+            <Button
+              type="submit"
+              className="w-full h-12 bg-primary text-primary-foreground hover:bg-primary/90 font-medium relative overflow-hidden group"
+              disabled={isLoading}
+            >
+              <span className="relative z-10 flex items-center justify-center gap-2">
+                {isLoading ? (
+                  <>
+                    <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent" />
+                    <span>注册中...</span>
+                  </>
+                ) : (
+                  <>
+                    <span>创建账户</span>
+                    <ArrowRight className="h-4 w-4 transition-transform duration-300 group-hover:translate-x-1" />
+                  </>
+                )}
+              </span>
+              <div className="absolute inset-0 -translate-x-full group-hover:translate-x-full transition-transform duration-700 bg-gradient-to-r from-transparent via-white/20 to-transparent" />
+            </Button>
+          </form>
+
+          <p className="text-center text-sm text-muted-foreground">
+            已有账户？{' '}
+            <Link href="/login" className="text-primary hover:underline font-medium">
+              立即登录
+            </Link>
+          </p>
+        </div>
+      </div>
+
+      <style jsx global>{`
+        @keyframes float {
+          0%, 100% { transform: translate(0, 0) scale(1); }
+          50% { transform: translate(30px, -30px) scale(1.1); }
+        }
+      `}</style>
     </div>
   );
 }

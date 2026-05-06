@@ -36,6 +36,13 @@ async def register(
     """注册新用户，返回 JWT token。"""
     repo = UserRepository(db)
 
+    # 邀请码校验（配置了才校验）
+    if settings.INVITE_CODE and body.invite_code != settings.INVITE_CODE:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="邀请码错误",
+        )
+
     # 检查邮箱是否已注册
     if await repo.get_by_email(body.email):
         raise HTTPException(
@@ -70,13 +77,6 @@ async def login(
 ):
     """邮箱密码登录，返回 JWT token。"""
     repo = UserRepository(db)
-
-    # 邀请码校验（配置了才校验）
-    if settings.INVITE_CODE and body.invite_code != settings.INVITE_CODE:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="邀请码错误",
-        )
 
     user = await repo.get_by_email(body.email)
     if not user or not verify_password(body.password, user.hashed_password):
