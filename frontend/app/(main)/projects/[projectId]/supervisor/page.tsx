@@ -37,6 +37,7 @@ import {
   SheetTrigger,
 } from '@/components/ui/sheet';
 import { SubAgentResultCard } from '@/components/supervisor/sub-agent-result-card';
+import { ToolPayloadView } from '@/components/supervisor/tool-payload-view';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
@@ -1940,9 +1941,9 @@ function SupervisorEntryCard({
             </Badge>
           </div>
           {entry.toolArguments && Object.keys(entry.toolArguments).length > 0 && (
-            <pre className="text-xs text-muted-foreground bg-background/60 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">
-              {JSON.stringify(entry.toolArguments, null, 2)}
-            </pre>
+            <div className="rounded bg-background/60 px-3 py-2">
+              <ToolPayloadView value={entry.toolArguments} />
+            </div>
           )}
           {entry.kind === 'tool_end' && entry.result != null && (
             entry.toolName === 'call_sub_agent' && !entry.isError ? (
@@ -1954,16 +1955,14 @@ function SupervisorEntryCard({
                 result={entry.result}
               />
             ) : (
-              <pre
+              <div
                 className={cn(
-                  'text-xs bg-background/60 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all',
-                  entry.isError ? 'text-destructive' : 'text-muted-foreground'
+                  'rounded bg-background/60 px-3 py-2',
+                  entry.isError && 'text-destructive',
                 )}
               >
-                {typeof entry.result === 'string'
-                  ? entry.result
-                  : JSON.stringify(entry.result, null, 2)}
-              </pre>
+                <ToolPayloadView value={entry.result} />
+              </div>
             )
           )}
         </div>
@@ -2392,9 +2391,9 @@ function SupervisorTimelineEntryCard({
             summary="参数与结果已折叠"
           >
             {entry.toolArguments && Object.keys(entry.toolArguments).length > 0 && (
-              <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded bg-background/60 p-2 text-xs text-muted-foreground">
-                {JSON.stringify(entry.toolArguments, null, 2)}
-              </pre>
+              <div className="rounded bg-background/60 px-3 py-2">
+                <ToolPayloadView value={entry.toolArguments} />
+              </div>
             )}
             {entry.kind === 'tool_end' && entry.result != null && (
               entry.toolName === 'call_sub_agent' && !entry.isError ? (
@@ -2406,16 +2405,14 @@ function SupervisorTimelineEntryCard({
                   result={entry.result}
                 />
               ) : (
-                <pre
+                <div
                   className={cn(
-                    'overflow-x-auto whitespace-pre-wrap break-all rounded bg-background/60 p-2 text-xs',
-                    entry.isError ? 'text-destructive' : 'text-muted-foreground'
+                    'rounded bg-background/60 px-3 py-2',
+                    entry.isError && 'text-destructive',
                   )}
                 >
-                  {typeof entry.result === 'string'
-                    ? entry.result
-                    : JSON.stringify(entry.result, null, 2)}
-                </pre>
+                  <ToolPayloadView value={entry.result} />
+                </div>
               )
             )}
           </AutoCollapseDetails>
