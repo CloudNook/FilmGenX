@@ -9,7 +9,7 @@ from fastapi import APIRouter
 from app.api.v1.endpoints import (
     auth, projects, scenes, storyboards, shots, shot_groups, characters, character_images,
     assets, tasks, conversations, locations, location_images, dashboard, skills, workspaces,
-    supervisor,
+    supervisor, agent_schemas,
 )
 
 api_router = APIRouter()
@@ -43,3 +43,6 @@ api_router.include_router(skills.router, prefix="/admin/skills", tags=["Admin - 
 
 # Supervisor 路由
 api_router.include_router(supervisor.router, prefix="/supervisor", tags=["Supervisor 流水线"])
+
+# Agent 输出 schema（前端渲染器用 title / description 做字段标签和 hover 说明）
+api_router.include_router(agent_schemas.router, prefix="/agent-schemas", tags=["Agent Schemas"])

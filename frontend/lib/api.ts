@@ -1361,6 +1361,23 @@ export const skillsApi = {
 };
 
 // ---------------------------------------------------------------------------
+// Agent 输出 schema（前端 SubAgentResultCard 渲染时用 title / description 做标签）
+// ---------------------------------------------------------------------------
+
+export const agentSchemasApi = {
+  /**
+   * 获取所有 sub-agent 的输出 schema。
+   * 返回 ``{sub_agent_name: <JSON Schema>}`` 字典。
+   */
+  list() {
+    return request<Record<string, Record<string, unknown>>>(
+      '/agent-schemas',
+      { method: 'GET' },
+    );
+  },
+};
+
+// ---------------------------------------------------------------------------
 // SSE 辅助工具
 // ---------------------------------------------------------------------------
 

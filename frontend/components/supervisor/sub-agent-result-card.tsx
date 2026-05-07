@@ -23,6 +23,29 @@ import type { ReactNode } from 'react';
 import { AlertTriangle, Sparkles } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
+import {
+  getFieldTitle,
+  useAgentSchema,
+  type JsonSchema,
+} from '@/lib/agent-schemas';
+
+/**
+ * 字段标签：优先用 schema 的 title，缺失时退到 fallback；都没有就用 field key 原文。
+ * renderer 内部各处的 ``"目标："`` / ``"角色"`` 等中文 label 都走这条入口，schema
+ * 改动 title → UI 自动同步；schema 还没加载完成 → 显示 fallback / key 原文。
+ */
+function fieldLabel(
+  schema: JsonSchema | null,
+  path: string[],
+  fallback?: string,
+): string {
+  if (schema) {
+    const t = getFieldTitle(schema, path);
+    if (t) return t;
+  }
+  if (fallback) return fallback;
+  return path[path.length - 1] ?? '';
+}
 
 // ---------------------------------------------------------------------- //
 // schema TS interfaces（与 backend Pydantic 类对齐）
@@ -121,6 +144,10 @@ export function SubAgentResultCard({
   subAgentName = '',
   result: rawResult,
 }: SubAgentResultCardProps) {
+  // 永远先 call hook，遵守 React rules of hooks（不能在 if/return 之后）。
+  // 未知 sub-agent 名传空字符串，hook 内部找不到 schema 返回 null，不影响兜底分支。
+  const schema = useAgentSchema(subAgentName);
+
   if (rawResult == null) return null;
 
   // 兼容：从持久化历史回灌时，tool_end.result 可能是 JSON 字符串（``agent_messages.content``
@@ -170,17 +197,17 @@ export function SubAgentResultCard({
       switch (subAgentName) {
         case 'outline_agent':
           if (looksLikeOutline(parsed)) {
-            return <OutlineRenderer data={parsed as OutlineOutput} />;
+            return <OutlineRenderer data={parsed as OutlineOutput} schema={schema} />;
           }
           break;
         case 'script_agent':
           if (looksLikeScript(parsed)) {
-            return <ScriptRenderer data={parsed as ScriptOutput} />;
+            return <ScriptRenderer data={parsed as ScriptOutput} schema={schema} />;
           }
           break;
         case 'storyboard_agent':
           if (looksLikeStoryboard(parsed)) {
-            return <StoryboardRenderer data={parsed as StoryboardOutput} />;
+            return <StoryboardRenderer data={parsed as StoryboardOutput} schema={schema} />;
           }
           break;
       }
@@ -365,27 +392,36 @@ function ToolErrorCard({ payload }: { payload: ToolErrorPayload }) {
 // OutlineRenderer
 // ---------------------------------------------------------------------- //
 
-function OutlineRenderer({ data }: { data: OutlineOutput }) {
+function OutlineRenderer({
+  data,
+  schema,
+}: {
+  data: OutlineOutput;
+  schema: JsonSchema | null;
+}) {
+  const label = (path: string[], fallback?: string) =>
+    fieldLabel(schema, path, fallback);
+
   return (
     <div className="space-y-4">
       <StructuredShell
-        title={data.title || '剧情大纲'}
+        title={data.title || label([], '剧情大纲')}
         subtitle={`outline · ${data.acts?.length ?? 0} 幕`}
       >
         {data.logline && (
-          <Field label="logline">
+          <Field label={label(['logline'], 'logline')}>
             <p className="italic">"{data.logline}"</p>
           </Field>
         )}
         {data.synopsis && (
-          <Field label="synopsis">
+          <Field label={label(['synopsis'], 'synopsis')}>
             <p className="text-sm leading-6 whitespace-pre-wrap break-words">
               {data.synopsis}
             </p>
           </Field>
         )}
         {data.themes && data.themes.length > 0 && (
-          <Field label="themes">
+          <Field label={label(['themes'], 'themes')}>
             <div className="flex flex-wrap gap-1.5">
               {data.themes.map((t, i) => (
                 <Badge key={i} variant="secondary" className="text-xs">
@@ -399,7 +435,7 @@ function OutlineRenderer({ data }: { data: OutlineOutput }) {
 
       {data.characters && data.characters.length > 0 && (
         <div className="space-y-2">
-          <SectionHeading>角色弧线</SectionHeading>
+          <SectionHeading>{label(['characters'], '角色')}</SectionHeading>
           <div className="grid gap-2 md:grid-cols-2">
             {data.characters.map((c, i) => (
               <div
@@ -417,19 +453,25 @@ function OutlineRenderer({ data }: { data: OutlineOutput }) {
                 <div className="mt-1.5 space-y-1 text-xs text-muted-foreground">
                   {c.want && (
                     <p>
-                      <span className="text-foreground">想要：</span>
+                      <span className="text-foreground">
+                        {label(['characters', 'want'], 'want')}：
+                      </span>
                       {c.want}
                     </p>
                   )}
                   {c.need && (
                     <p>
-                      <span className="text-foreground">需要：</span>
+                      <span className="text-foreground">
+                        {label(['characters', 'need'], 'need')}：
+                      </span>
                       {c.need}
                     </p>
                   )}
                   {c.arc_summary && (
                     <p>
-                      <span className="text-foreground">弧线：</span>
+                      <span className="text-foreground">
+                        {label(['characters', 'arc_summary'], 'arc')}：
+                      </span>
                       {c.arc_summary}
                     </p>
                   )}
@@ -442,7 +484,7 @@ function OutlineRenderer({ data }: { data: OutlineOutput }) {
 
       {data.acts && data.acts.length > 0 && (
         <div className="space-y-2">
-          <SectionHeading>三幕结构</SectionHeading>
+          <SectionHeading>{label(['acts'], '三幕')}</SectionHeading>
           <div className="space-y-2">
             {data.acts.map((act) => (
               <div
@@ -451,13 +493,15 @@ function OutlineRenderer({ data }: { data: OutlineOutput }) {
               >
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge variant="outline" className="text-[10px]">
-                    Act {act.act_number}
+                    {label(['acts', 'act_number'], 'Act')} {act.act_number}
                   </Badge>
                   <span className="text-sm font-semibold">{act.title}</span>
                 </div>
                 {act.goal && (
                   <p className="mt-1.5 text-xs text-muted-foreground">
-                    <span className="text-foreground">目标：</span>
+                    <span className="text-foreground">
+                      {label(['acts', 'goal'], 'goal')}：
+                    </span>
                     {act.goal}
                   </p>
                 )}
@@ -470,7 +514,9 @@ function OutlineRenderer({ data }: { data: OutlineOutput }) {
                 )}
                 {act.turning_point && (
                   <p className="mt-1.5 text-xs text-muted-foreground">
-                    <span className="text-foreground">转折点：</span>
+                    <span className="text-foreground">
+                      {label(['acts', 'turning_point'], 'turning_point')}：
+                    </span>
                     {act.turning_point}
                   </p>
                 )}
@@ -482,7 +528,7 @@ function OutlineRenderer({ data }: { data: OutlineOutput }) {
 
       {data.beats && data.beats.length > 0 && (
         <div className="space-y-2">
-          <SectionHeading>关键节拍</SectionHeading>
+          <SectionHeading>{label(['beats'], '节拍')}</SectionHeading>
           <div className="space-y-1.5">
             {data.beats.map((b, i) => (
               <div
@@ -491,7 +537,7 @@ function OutlineRenderer({ data }: { data: OutlineOutput }) {
               >
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge variant="outline" className="text-[10px]">
-                    Act {b.act_ref}
+                    {label(['beats', 'act_ref'], 'Act')} {b.act_ref}
                   </Badge>
                   <span className="font-semibold">{b.beat_name}</span>
                 </div>
@@ -513,15 +559,24 @@ function OutlineRenderer({ data }: { data: OutlineOutput }) {
 // ScriptRenderer
 // ---------------------------------------------------------------------- //
 
-function ScriptRenderer({ data }: { data: ScriptOutput }) {
+function ScriptRenderer({
+  data,
+  schema,
+}: {
+  data: ScriptOutput;
+  schema: JsonSchema | null;
+}) {
+  const label = (path: string[], fallback?: string) =>
+    fieldLabel(schema, path, fallback);
+
   return (
     <div className="space-y-4">
       <StructuredShell
-        title={data.title || '剧本'}
+        title={data.title || label([], '剧本')}
         subtitle={`script · ${data.scenes?.length ?? 0} 场`}
       >
         {data.based_on_outline && (
-          <Field label="based on">
+          <Field label={label(['based_on_outline'], 'based_on_outline')}>
             <p className="text-xs">{data.based_on_outline}</p>
           </Field>
         )}
@@ -529,10 +584,14 @@ function ScriptRenderer({ data }: { data: ScriptOutput }) {
 
       {data.scenes && data.scenes.length > 0 && (
         <div className="space-y-2">
-          <SectionHeading>场景序列</SectionHeading>
+          <SectionHeading>{label(['scenes'], '场景序列')}</SectionHeading>
           <div className="space-y-3">
             {data.scenes.map((scene, idx) => (
-              <SceneCard key={`${scene.scene_number}-${idx}`} scene={scene} />
+              <SceneCard
+                key={`${scene.scene_number}-${idx}`}
+                scene={scene}
+                schema={schema}
+              />
             ))}
           </div>
         </div>
@@ -541,7 +600,16 @@ function ScriptRenderer({ data }: { data: ScriptOutput }) {
   );
 }
 
-function SceneCard({ scene }: { scene: Scene }) {
+function SceneCard({
+  scene,
+  schema,
+}: {
+  scene: Scene;
+  schema: JsonSchema | null;
+}) {
+  const label = (path: string[], fallback?: string) =>
+    fieldLabel(schema, path, fallback);
+
   return (
     <div className="rounded-md border border-border/60 bg-background/80 px-3 py-2.5">
       <div className="flex flex-wrap items-center gap-2">
@@ -559,13 +627,17 @@ function SceneCard({ scene }: { scene: Scene }) {
       </div>
       {scene.summary && (
         <p className="mt-1.5 text-xs text-muted-foreground">
-          <span className="text-foreground">本场目的：</span>
+          <span className="text-foreground">
+            {label(['scenes', 'summary'], '本场目的')}：
+          </span>
           {scene.summary}
         </p>
       )}
       {scene.emotional_beat && (
         <p className="mt-0.5 text-xs text-muted-foreground">
-          <span className="text-foreground">情绪节拍：</span>
+          <span className="text-foreground">
+            {label(['scenes', 'emotional_beat'], '情绪节拍')}：
+          </span>
           {scene.emotional_beat}
         </p>
       )}
@@ -605,15 +677,24 @@ function SceneCard({ scene }: { scene: Scene }) {
 // StoryboardRenderer
 // ---------------------------------------------------------------------- //
 
-function StoryboardRenderer({ data }: { data: StoryboardOutput }) {
+function StoryboardRenderer({
+  data,
+  schema,
+}: {
+  data: StoryboardOutput;
+  schema: JsonSchema | null;
+}) {
+  const label = (path: string[], fallback?: string) =>
+    fieldLabel(schema, path, fallback);
+
   return (
     <div className="space-y-4">
       <StructuredShell
-        title={data.title || '分镜'}
+        title={data.title || label([], '分镜')}
         subtitle={`storyboard · ${data.shots?.length ?? 0} 镜`}
       >
         {data.based_on_script && (
-          <Field label="based on">
+          <Field label={label(['based_on_script'], 'based_on_script')}>
             <p className="text-xs">{data.based_on_script}</p>
           </Field>
         )}
@@ -621,10 +702,14 @@ function StoryboardRenderer({ data }: { data: StoryboardOutput }) {
 
       {data.shots && data.shots.length > 0 && (
         <div className="space-y-2">
-          <SectionHeading>镜头序列</SectionHeading>
+          <SectionHeading>{label(['shots'], '镜头序列')}</SectionHeading>
           <div className="space-y-2">
             {data.shots.map((shot, i) => (
-              <ShotCard key={`${shot.shot_number}-${i}`} shot={shot} />
+              <ShotCard
+                key={`${shot.shot_number}-${i}`}
+                shot={shot}
+                schema={schema}
+              />
             ))}
           </div>
         </div>
@@ -633,15 +718,24 @@ function StoryboardRenderer({ data }: { data: StoryboardOutput }) {
   );
 }
 
-function ShotCard({ shot }: { shot: Shot }) {
+function ShotCard({
+  shot,
+  schema,
+}: {
+  shot: Shot;
+  schema: JsonSchema | null;
+}) {
+  const label = (path: string[], fallback?: string) =>
+    fieldLabel(schema, path, fallback);
+
   return (
     <div className="rounded-md border border-border/60 bg-background/80 px-3 py-2.5">
       <div className="flex flex-wrap items-center gap-2">
         <Badge variant="outline" className="font-mono text-[10px]">
-          Shot {shot.shot_number}
+          {label(['shots', 'shot_number'], 'Shot')} {shot.shot_number}
         </Badge>
         <Badge variant="secondary" className="font-mono text-[10px]">
-          Scene {shot.scene_number}
+          {label(['shots', 'scene_number'], 'Scene')} {shot.scene_number}
         </Badge>
         <Badge variant="outline" className="text-[10px]">
           {shot.shot_size}
@@ -658,7 +752,9 @@ function ShotCard({ shot }: { shot: Shot }) {
       </div>
       {shot.composition_notes && (
         <p className="mt-1.5 text-xs text-muted-foreground">
-          <span className="text-foreground">构图：</span>
+          <span className="text-foreground">
+            {label(['shots', 'composition_notes'], 'composition')}：
+          </span>
           {shot.composition_notes}
         </p>
       )}
@@ -671,13 +767,17 @@ function ShotCard({ shot }: { shot: Shot }) {
         <div className="mt-1.5 flex flex-wrap gap-3 text-[11px] text-muted-foreground">
           {shot.audio_notes && (
             <span>
-              <span className="text-foreground">音：</span>
+              <span className="text-foreground">
+                {label(['shots', 'audio_notes'], 'audio')}：
+              </span>
               {shot.audio_notes}
             </span>
           )}
           {shot.transition_to_next && (
             <span>
-              <span className="text-foreground">转场：</span>
+              <span className="text-foreground">
+                {label(['shots', 'transition_to_next'], 'transition')}：
+              </span>
               {shot.transition_to_next}
             </span>
           )}
