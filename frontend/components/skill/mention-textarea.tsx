@@ -10,7 +10,6 @@ import {
   useState,
   type KeyboardEvent,
 } from 'react';
-import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
 import {
   skillsApi,
@@ -331,8 +330,14 @@ export const MentionTextarea = forwardRef<MentionTextareaHandle, MentionTextarea
     };
 
     return (
-      <div className="relative">
-        <Textarea
+      <div className="relative h-full">
+        {/*
+          直接用原生 <textarea> 而不是 shadcn 的 Textarea；shadcn 版本带
+          field-sizing-content，textarea 会随内容无限增高把外层布局顶飞，
+          且失去内部滚动条。这里显式 resize-none + overflow-auto 让长文本
+          走 textarea 自己的滚动条。
+        */}
+        <textarea
           ref={textareaRef}
           value={value}
           onChange={handleChange}
@@ -345,7 +350,10 @@ export const MentionTextarea = forwardRef<MentionTextareaHandle, MentionTextarea
           }}
           placeholder={placeholder}
           rows={rows}
-          className={cn('font-mono text-sm', className)}
+          className={cn(
+            'block w-full resize-none overflow-auto rounded-md border border-input bg-background px-3 py-2 font-mono text-sm leading-6 text-foreground shadow-xs transition-colors focus:border-primary/50 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50',
+            className,
+          )}
         />
         {mention && candidates.length > 0 && (
           <div className="absolute z-50 mt-1 left-0 right-0 max-h-72 overflow-auto rounded-lg border border-border/70 bg-popover shadow-lg">
