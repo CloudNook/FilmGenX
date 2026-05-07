@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { AppLayout } from '@/components/layout';
 import { Button } from '@/components/ui/button';
@@ -52,9 +52,11 @@ import remarkGfm from 'remark-gfm';
 import {
   skillsApi,
   type SkillCreate,
+  type SkillMetaResponse,
   type SkillResponse,
   type SkillUploadResponse,
 } from '@/lib/api';
+import { MentionTextarea } from '@/components/skill/mention-textarea';
 import { SKILL_SAMPLES } from '@/lib/skill-samples';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
@@ -392,11 +394,42 @@ function SkillSourceDialog({
   const [preview, setPreview] = useState<SkillUploadResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  // 跨 skill 引用补全用：dialog 打开后异步拉一次 active skill 元信息
+  const [allSkillMeta, setAllSkillMeta] = useState<SkillMetaResponse[]>([]);
 
   // open 状态变化时重置 mode 到 defaultMode（每次打开都从指定入口开始）
   useEffect(() => {
-    if (open) setMode(defaultMode);
+    if (open) {
+      setMode(defaultMode);
+      // 顺手把所有 active skill 元信息拉到本地，供 @ skill 补全用
+      skillsApi
+        .meta()
+        .then((rows) => setAllSkillMeta(rows))
+        .catch(() => setAllSkillMeta([]));
+    }
   }, [open, defaultMode]);
+
+  // 实时从 draft 解析出 ## reference: <key> 列表，喂给 MentionTextarea 做 @ref 补全
+  const draftSelfReferences = useMemo(() => {
+    const re = /^##\s+reference\s*:\s*([^\n]+?)\s*$/gim;
+    const out: { key: string; title: string; body: string }[] = [];
+    const seen = new Set<string>();
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(draft)) !== null) {
+      const key = m[1].trim().toLowerCase();
+      if (!/^[a-z0-9][a-z0-9_-]*$/.test(key)) continue;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ key, title: '', body: '' });
+    }
+    return out;
+  }, [draft]);
+
+  // 直接编写时尝试从 frontmatter 中抠出 name，仅用于 cross-skill 排除自己
+  const draftSkillName = useMemo(() => {
+    const m = draft.match(/^---[\s\S]*?\nname:\s*([a-z0-9][a-z0-9_-]*)/i);
+    return m ? m[1].trim().toLowerCase() : undefined;
+  }, [draft]);
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -594,15 +627,21 @@ function SkillSourceDialog({
                   选中后会覆盖当前编辑内容
                 </span>
               </div>
-              <textarea
-                className="min-h-[28rem] flex-1 resize-none rounded-2xl border border-border/70 bg-background px-5 py-4 font-mono text-xs leading-6 text-foreground focus:border-primary/50 focus:outline-none"
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                placeholder={`---\nname: my-skill\ndescription: Use when ... to ...\ntarget_agents: [outline_agent]\ntags: []\n---\n\n# 标题\n\n主体内容...\n\n## reference: example-key\n\nreference 子文档内容\n`}
-              />
+              <div className="flex-1 min-h-[28rem]">
+                <MentionTextarea
+                  value={draft}
+                  onChange={setDraft}
+                  rows={20}
+                  placeholder={`---\nname: my-skill\ndescription: Use when ... to ...\ntarget_agents: [outline_agent]\ntags: []\n---\n\n# 标题\n\n主体内容（输入 @ 唤起引用补全）...\n\n## reference: example-key\n\nreference 子文档内容\n`}
+                  selfReferences={draftSelfReferences}
+                  allSkills={allSkillMeta}
+                  currentSkillName={draftSkillName}
+                  className="min-h-[28rem] h-full"
+                />
+              </div>
               <div className="shrink-0 flex items-center justify-between gap-3">
                 <span className="text-xs text-muted-foreground">
-                  {draft.length} 字 · 保存前会按 SKILL.md 规则解析
+                  {draft.length} 字 · 输入 @ 唤起引用补全 · 保存前会按 SKILL.md 规则解析
                 </span>
                 <Button onClick={handleWriteParse} disabled={!draft.trim()}>
                   <Brain className="mr-2 h-4 w-4" />

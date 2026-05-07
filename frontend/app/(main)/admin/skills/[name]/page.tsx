@@ -6,6 +6,10 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
+import {
+  MentionTextarea,
+  type MentionTextareaHandle,
+} from '@/components/skill/mention-textarea';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import {
@@ -263,39 +267,13 @@ function TextareaWithRefPicker({
   currentSkillName: string;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
-  const ref = useRef<HTMLTextAreaElement>(null);
-
-  const insertAtCursor = useCallback(
-    (token: string) => {
-      const el = ref.current;
-      if (!el) {
-        onChange(`${value}${value && !value.endsWith(' ') ? ' ' : ''}${token}`);
-        return;
-      }
-      const start = el.selectionStart;
-      const end = el.selectionEnd;
-      const before = value.slice(0, start);
-      const after = value.slice(end);
-      const insert = (start > 0 && before[before.length - 1] !== ' ' && before[before.length - 1] !== '\n')
-        ? ` ${token}`
-        : token;
-      const next = `${before}${insert}${after}`;
-      onChange(next);
-      // 把光标放在插入内容之后
-      requestAnimationFrame(() => {
-        const pos = before.length + insert.length;
-        el.focus();
-        el.setSelectionRange(pos, pos);
-      });
-    },
-    [onChange, value],
-  );
+  const mentionRef = useRef<MentionTextareaHandle>(null);
 
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
         <span className="text-xs text-muted-foreground">
-          支持 @ref:&lt;key&gt; / @skill:&lt;name&gt; / @skill:&lt;name&gt;#&lt;key&gt; 引用
+          输入 @ 触发自动补全；或点右侧按钮浏览全部引用
         </span>
         <Button
           type="button"
@@ -304,16 +282,18 @@ function TextareaWithRefPicker({
           onClick={() => setPickerOpen(true)}
         >
           <AtSign className="mr-1.5 h-3.5 w-3.5" />
-          插入引用
+          浏览全部
         </Button>
       </div>
-      <Textarea
-        ref={ref}
+      <MentionTextarea
+        ref={mentionRef}
         value={value}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={onChange}
         rows={rows}
         placeholder={placeholder}
-        className="font-mono text-sm"
+        selfReferences={selfReferences}
+        allSkills={allSkills}
+        currentSkillName={currentSkillName}
       />
       <ReferencePickerDialog
         open={pickerOpen}
@@ -321,7 +301,7 @@ function TextareaWithRefPicker({
         selfReferences={selfReferences}
         allSkills={allSkills}
         currentSkillName={currentSkillName}
-        onPick={insertAtCursor}
+        onPick={(token) => mentionRef.current?.insertToken(token)}
       />
     </div>
   );
