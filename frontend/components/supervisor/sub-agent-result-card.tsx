@@ -119,9 +119,24 @@ interface SubAgentResultCardProps {
 
 export function SubAgentResultCard({
   subAgentName = '',
-  result,
+  result: rawResult,
 }: SubAgentResultCardProps) {
-  if (result == null) return null;
+  if (rawResult == null) return null;
+
+  // 兼容：从持久化历史回灌时，tool_end.result 可能是 JSON 字符串（``agent_messages.content``
+  // 是 string，``_record_to_history_events`` 直接传给 result）。先尝试 parse 一次让后续
+  // 分支走在结构化对象上。
+  let result: unknown = rawResult;
+  if (typeof rawResult === 'string') {
+    try {
+      const parsed = JSON.parse(rawResult);
+      if (parsed && typeof parsed === 'object') {
+        result = parsed;
+      }
+    } catch {
+      // 保持原 string，下面分支会按字符串兜底处理
+    }
+  }
 
   // 1) 结构化 ToolError
   if (

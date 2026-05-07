@@ -115,11 +115,25 @@ def _record_to_history_events(
         return events
 
     if record.role == "tool":
+        # ``agent_messages.content`` 是 str；工具返回结构化值时这里存的就是 JSON 字符串。
+        # 重建 tool_end event 时尝试反序列化一次，让前端拿到的 result 已经是 dict / list /
+        # 标量，避免 ``"{\"output\": ...}"`` 这种被当成字符串渲染的双重转义。
+        result_value: Any = record.content
+        if isinstance(result_value, str):
+            stripped = result_value.strip()
+            if (stripped.startswith("{") and stripped.endswith("}")) or (
+                stripped.startswith("[") and stripped.endswith("]")
+            ):
+                try:
+                    result_value = json.loads(stripped)
+                except json.JSONDecodeError:
+                    pass
+
         event = {
             "type": "tool_end",
             "tool_call_id": record.tool_call_id or "",
             "tool_name": record.tool_name or "",
-            "result": record.content,
+            "result": result_value,
             "is_error": False,
             "source": source,
         }
