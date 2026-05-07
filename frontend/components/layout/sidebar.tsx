@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useAuth } from '@/lib/auth';
 import { cn } from '@/lib/utils';
 import {
   Film,
@@ -35,6 +36,8 @@ interface NavItem {
 export function Sidebar({ projectId }: SidebarProps) {
   const [collapsed, setCollapsed] = useState(false);
   const pathname = usePathname();
+  const { user } = useAuth();
+  const isSuperuser = !!user?.is_superuser;
 
   const mainNavItems: NavItem[] = [
     { title: '首页', href: '/home', icon: Home },
@@ -53,9 +56,12 @@ export function Sidebar({ projectId }: SidebarProps) {
       ]
     : [];
 
+  // Admin-only 菜单项放在 superuser 可见的子集里，普通用户看不到
   const bottomNavItems: NavItem[] = [
     { title: '全局设置', href: '/settings', icon: Settings },
-    { title: 'AI 技能库', href: '/admin/skills', icon: Brain },
+    ...(isSuperuser
+      ? [{ title: 'AI 技能库', href: '/admin/skills', icon: Brain }]
+      : []),
   ];
 
   const renderNavItem = (item: NavItem) => {
