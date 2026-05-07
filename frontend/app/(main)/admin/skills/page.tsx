@@ -627,18 +627,16 @@ function SkillSourceDialog({
                   选中后会覆盖当前编辑内容
                 </span>
               </div>
-              <div className="flex-1 min-h-[28rem]">
-                <MentionTextarea
-                  value={draft}
-                  onChange={setDraft}
-                  rows={20}
-                  placeholder={`---\nname: my-skill\ndescription: Use when ... to ...\ntarget_agents: [outline_agent]\ntags: []\n---\n\n# 标题\n\n主体内容（输入 @ 唤起引用补全）...\n\n## reference: example-key\n\nreference 子文档内容\n`}
-                  selfReferences={draftSelfReferences}
-                  allSkills={allSkillMeta}
-                  currentSkillName={draftSkillName}
-                  className="min-h-[28rem] h-full"
-                />
-              </div>
+              <MentionTextarea
+                value={draft}
+                onChange={setDraft}
+                rows={20}
+                placeholder={`---\nname: my-skill\ndescription: Use when ... to ...\ntarget_agents: [outline_agent]\ntags: []\n---\n\n# 标题\n\n主体内容（输入 @ 唤起引用补全）...\n\n## reference: example-key\n\nreference 子文档内容\n`}
+                selfReferences={draftSelfReferences}
+                allSkills={allSkillMeta}
+                currentSkillName={draftSkillName}
+                className="flex-1 min-h-0"
+              />
               <div className="shrink-0 flex items-center justify-between gap-3">
                 <span className="text-xs text-muted-foreground">
                   {draft.length} 字 · 输入 @ 唤起引用补全 · 保存前会按 SKILL.md 规则解析
