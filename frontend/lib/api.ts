@@ -1200,37 +1200,46 @@ export interface SkillParseResult {
   raw_markdown: string;
 }
 
+// Skill 模型遵循 Claude SKILL.md 三层渐进披露：
+// - L1：name + description + target_agents + tags（启动注入 prompt）
+// - L2：body（agent 调 load_skill 时获取）
+// - L3：references[{key, title, body}]（agent 调 load_skill_reference 时获取）
+export interface SkillReferenceItem {
+  key: string;
+  title: string;
+  body: string;
+}
+
 export interface SkillResponse {
   id: number;
   created_at: string;
   updated_at: string;
   name: string;
-  title: string | null;
   description: string;
-  content: string | null;
-  parameters: Record<string, unknown>;
-  examples: string[];
-  constraints: string[];
-  category: string | null;
-  difficulty: string | null;
+  target_agents: string[];
+  body: string | null;
+  references: SkillReferenceItem[];
   tags: string[];
   author: string | null;
   raw_markdown: string | null;
   is_active: boolean;
   version: number;
-  metadata: Record<string, unknown>;
+  skill_metadata: Record<string, unknown>;
+}
+
+export interface SkillMetaResponse {
+  name: string;
+  description: string;
+  target_agents: string[];
+  tags: string[];
 }
 
 export interface SkillCreate {
   name: string;
-  title?: string;
   description: string;
-  content?: string;
-  parameters?: Record<string, unknown>;
-  examples?: string[];
-  constraints?: string[];
-  category?: string;
-  difficulty?: string;
+  target_agents?: string[];
+  body?: string;
+  references?: SkillReferenceItem[];
   tags?: string[];
   author?: string;
   raw_markdown?: string;
@@ -1239,25 +1248,34 @@ export interface SkillCreate {
 }
 
 export interface SkillUpdate {
-  title?: string;
   description?: string;
-  content?: string;
-  parameters?: Record<string, unknown>;
-  examples?: string[];
-  constraints?: string[];
-  category?: string;
-  difficulty?: string;
+  target_agents?: string[];
+  body?: string;
+  references?: SkillReferenceItem[];
   tags?: string[];
   author?: string;
   raw_markdown?: string;
   is_active?: boolean;
-  metadata?: Record<string, unknown>;
+  skill_metadata?: Record<string, unknown>;
 }
 
 export interface SkillUploadResponse {
   skill: SkillParseResult;
   existing: SkillResponse | null;
   is_update: boolean;
+}
+
+export interface LintIssue {
+  level: 'error' | 'warning';
+  code: string;
+  message: string;
+  field: string;
+  token: string | null;
+}
+
+export interface SkillLintResponse {
+  skill_name: string;
+  issues: LintIssue[];
 }
 
 export const skillsApi = {
@@ -1277,12 +1295,11 @@ export const skillsApi = {
     });
   },
 
-  list(page = 1, pageSize = 20, category?: string, isActive?: boolean) {
+  list(page = 1, pageSize = 20, isActive?: boolean) {
     const params = new URLSearchParams({
       page: String(page),
       page_size: String(pageSize),
     });
-    if (category) params.set('category', category);
     if (isActive !== undefined) params.set('is_active', String(isActive));
     return request<PageResponse<SkillResponse>>(
       `/admin/skills?${params}`,
@@ -1290,8 +1307,34 @@ export const skillsApi = {
     );
   },
 
+  /** L1 元信息列表，可按 target_agent 反查 */
+  meta(targetAgent?: string) {
+    const params = new URLSearchParams();
+    if (targetAgent) params.set('target_agent', targetAgent);
+    const qs = params.toString();
+    return request<SkillMetaResponse[]>(
+      `/admin/skills/meta${qs ? `?${qs}` : ''}`,
+      { method: 'GET' },
+    );
+  },
+
   get(name: string) {
     return request<SkillResponse>(`/admin/skills/${name}`, { method: 'GET' });
+  },
+
+  /** L3：单个 reference 子文档 */
+  getReference(name: string, refKey: string) {
+    return request<SkillReferenceItem & { skill_name: string }>(
+      `/admin/skills/${name}/reference/${refKey}`,
+      { method: 'GET' },
+    );
+  },
+
+  /** 引用 lint 检查 */
+  lint(name: string) {
+    return request<SkillLintResponse>(`/admin/skills/${name}/lint`, {
+      method: 'GET',
+    });
   },
 
   create(data: SkillCreate) {
