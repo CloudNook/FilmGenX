@@ -51,6 +51,21 @@ function ScalarBadge({ children }: { children: ReactNode }) {
   );
 }
 
+/** 判断是否为"叶子"值：非对象 / 非数组 / 不是被嵌套包裹的 JSON 字符串。
+ *  叶子可以和 key 并排 inline 展示；非叶子要换行 + 缩进，避免横向空间被嵌套吃光。 */
+function isLeafValue(v: unknown): boolean {
+  if (v === null || v === undefined) return true;
+  if (typeof v !== 'object') {
+    // string 内嵌 JSON 也算非叶子（会被自动 unwrap 成对象）
+    if (typeof v === 'string') {
+      return tryUnwrapJsonString(v) === null;
+    }
+    return true;
+  }
+  if (Array.isArray(v)) return v.length === 0;
+  return Object.keys(v as object).length === 0;
+}
+
 export function ToolPayloadView({
   value,
   className,
@@ -123,16 +138,31 @@ export function ToolPayloadView({
     }
     return (
       <div className={cn('space-y-1', className)}>
-        {value.map((item, i) => (
-          <div key={i} className="flex gap-2">
-            <span className="shrink-0 pt-0.5 font-mono text-[10px] text-muted-foreground">
-              [{i}]
-            </span>
-            <div className="min-w-0 flex-1">
-              <ToolPayloadView value={item} depth={depth + 1} />
+        {value.map((item, i) => {
+          const leaf = isLeafValue(item);
+          if (leaf) {
+            return (
+              <div key={i} className="flex items-baseline gap-2">
+                <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+                  [{i}]
+                </span>
+                <div className="min-w-0 flex-1">
+                  <ToolPayloadView value={item} depth={depth + 1} />
+                </div>
+              </div>
+            );
+          }
+          return (
+            <div key={i} className="space-y-0.5">
+              <span className="font-mono text-[10px] text-muted-foreground">
+                [{i}]
+              </span>
+              <div className="ml-3 border-l border-border/50 pl-3">
+                <ToolPayloadView value={item} depth={depth + 1} />
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     );
   }
@@ -147,20 +177,36 @@ export function ToolPayloadView({
       );
     }
     return (
-      <div className={cn('space-y-1.5', className)}>
-        {entries.map(([k, v]) => (
-          <div
-            key={k}
-            className="flex flex-col gap-0.5 sm:flex-row sm:items-start sm:gap-3"
-          >
-            <span className="shrink-0 pt-1 font-mono text-[11px] text-muted-foreground sm:w-32 sm:text-right">
-              {k}
-            </span>
-            <div className="min-w-0 flex-1">
-              <ToolPayloadView value={v} depth={depth + 1} />
+      <div className={cn('space-y-1', className)}>
+        {entries.map(([k, v]) => {
+          const leaf = isLeafValue(v);
+          if (leaf) {
+            // 叶子值 inline 展示：``key: value``
+            return (
+              <div key={k} className="flex items-baseline gap-2">
+                <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
+                  {k}:
+                </span>
+                <div className="min-w-0 flex-1">
+                  <ToolPayloadView value={v} depth={depth + 1} />
+                </div>
+              </div>
+            );
+          }
+          // 非叶子值（嵌套对象 / 数组 / 内嵌 JSON 字符串）→ key 独占一行，
+          // value 缩进到下一行；左侧加细竖线 visual indent，深嵌套也不会
+          // 把 value 列挤到 1 字符宽。
+          return (
+            <div key={k} className="space-y-0.5">
+              <span className="font-mono text-[11px] text-muted-foreground">
+                {k}:
+              </span>
+              <div className="ml-3 border-l border-border/50 pl-3">
+                <ToolPayloadView value={v} depth={depth + 1} />
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     );
   }
