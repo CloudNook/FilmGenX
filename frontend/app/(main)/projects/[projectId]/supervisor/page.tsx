@@ -52,6 +52,7 @@ import {
 } from '@/lib/supervisor-display';
 import {
   Activity,
+  AlertTriangle,
   Bot,
   Brain,
   CheckCircle2,
@@ -1384,9 +1385,62 @@ function isStructuredSubAgent(source: string | null | undefined): boolean {
 }
 
 /**
- * 结构化 sub-agent 的 text 事件渲染：
- * - content 是完整 JSON → 走 SubAgentResultCard 渲染对应 schema 的卡片
- * - content 不完整（流式中）→ 显示"正在生成结构化输出"占位，避免半段 JSON 字符流出
+ * 从可能包含杂质（前后空白、markdown 围栏、流式时多出半截字符等）的文本里
+ * 抠出可解析的 JSON。返回 ``null`` 表示拿不到完整 JSON。
+ *
+ * 策略（按可信度顺序）：
+ * 1. trim 后正好是 ``{...}`` → 直接 parse
+ * 2. ```json ... ``` markdown 围栏内 → 取 inner
+ * 3. 第一个 ``{`` 到最后一个 ``}`` 之间的子串 → fallback；解决 LLM 在
+ *    JSON 之外加了一句话前缀 / 后缀的情况，也能从历史里救回末尾带 trailing
+ *    newline 的存档
+ */
+function extractStructuredJson(text: string): { value: unknown; raw: string } | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+
+  const tryParse = (candidate: string): unknown | null => {
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      return null;
+    }
+  };
+
+  // 1. 直接 parse
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    const v = tryParse(trimmed);
+    if (v !== null && typeof v === 'object') return { value: v, raw: trimmed };
+  }
+
+  // 2. markdown 围栏
+  const fenceMatch = trimmed.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/i);
+  if (fenceMatch) {
+    const inner = fenceMatch[1].trim();
+    const v = tryParse(inner);
+    if (v !== null && typeof v === 'object') return { value: v, raw: inner };
+  }
+
+  // 3. 切第一个 { 到最后一个 }
+  const firstBrace = trimmed.indexOf('{');
+  const lastBrace = trimmed.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    const slice = trimmed.slice(firstBrace, lastBrace + 1);
+    const v = tryParse(slice);
+    if (v !== null && typeof v === 'object') return { value: v, raw: slice };
+  }
+
+  return null;
+}
+
+/**
+ * 结构化 sub-agent 的 text 事件渲染。
+ *
+ * 三段路：
+ * - 内容能拼出有效 JSON → 渲染 schema 卡片
+ * - 内容看起来像还在流（没有任何 ``}`` 或者短）→ "正在生成"占位
+ * - 内容看起来已经停下但 JSON 不合法（被截断 / LLM 输出了非 JSON 杂质）→
+ *   "解析失败" + 折叠原文，方便定位问题
  */
 function StructuredSubAgentTextEntry({
   source,
@@ -1396,15 +1450,11 @@ function StructuredSubAgentTextEntry({
   content: string;
 }) {
   const trimmed = content.trim();
-  let parsedComplete = false;
-  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-    try {
-      JSON.parse(trimmed);
-      parsedComplete = true;
-    } catch {
-      parsedComplete = false;
-    }
-  }
+  const extracted = trimmed ? extractStructuredJson(trimmed) : null;
+  // 启发式：内容超过 200 字符 + 有过 ``}``，视为"应已收尾"。还在流的内容通常
+  // 字符不多 + 不含闭括号；这条阈值仅决定占位文案，不影响实际渲染。
+  const looksFinishedButInvalid =
+    !extracted && trimmed.length > 200 && trimmed.includes('}');
 
   return (
     <div className="flex gap-4">
@@ -1418,18 +1468,33 @@ function StructuredSubAgentTextEntry({
           <Badge variant="outline" className="text-[10px] border-primary/20 text-primary">
             {source}
           </Badge>
-          {!parsedComplete && trimmed && (
+          {!extracted && trimmed && !looksFinishedButInvalid && (
             <span className="flex items-center gap-1 text-[11px] italic text-muted-foreground">
               <Loader2 className="h-3 w-3 animate-spin" />
               正在生成结构化输出 ({trimmed.length} 字符)
             </span>
           )}
+          {looksFinishedButInvalid && (
+            <span className="flex items-center gap-1 text-[11px] text-amber-700">
+              <AlertTriangle className="h-3 w-3" />
+              结构化输出解析失败 ({trimmed.length} 字符)
+            </span>
+          )}
         </div>
-        {parsedComplete ? (
+        {extracted ? (
           <SubAgentResultCard
             subAgentName={source}
-            result={{ output: trimmed }}
+            result={{ output: extracted.raw }}
           />
+        ) : looksFinishedButInvalid ? (
+          <details className="rounded-2xl border border-amber-300/50 bg-amber-50/40 px-4 py-3">
+            <summary className="cursor-pointer text-xs text-amber-800">
+              查看原始输出 (可能被截断或包含非 JSON 杂质)
+            </summary>
+            <pre className="mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words text-xs text-foreground">
+              {trimmed}
+            </pre>
+          </details>
         ) : (
           <div className="rounded-2xl border border-dashed border-border bg-card/50 px-4 py-3 text-xs text-muted-foreground">
             {trimmed

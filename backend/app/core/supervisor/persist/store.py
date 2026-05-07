@@ -64,6 +64,16 @@ def _record_to_history_events(
     session_id = record.session_id if record.session_id.startswith("sub-") else None
     events: List[Dict[str, Any]] = []
 
+    # Reviewer 的 feedback 也以 role=assistant / tool_name=reviewer 写在 sub-agent
+    # session 里（DBPersistStrategy.append_review_record，便于按 session replay 看
+    # 评审上下文）。但 review_start / review_end 已经走 supervisor_events 表单独
+    # 持久化；如果这里再合成 text 事件，前端 reducer 会按 (source, session_id)
+    # 把 reviewer feedback 拼到 sub-agent 的 JSON 输出末尾，导致 JSON.parse 失败。
+    if record.role == "assistant" and (
+        record.tool_name == "reviewer" or metadata.get("kind") == "review"
+    ):
+        return []
+
     if record.role == "assistant":
         thinking = metadata.get("thinking")
         if isinstance(thinking, str) and thinking:
