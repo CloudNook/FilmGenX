@@ -81,6 +81,9 @@ class Agent:
         from app.core.agent.factory import _build_system_prompt_with_skills
         from app.db.session import AsyncSessionFactory
 
+        agent_name = self.config.agent_name
+        route = "explicit_names" if self.skill_names else "target_agents_lookup"
+
         async with AsyncSessionFactory() as db:
             if self.skill_names:
                 # 显式 skill_names：先取全部 active meta，再按名子集
@@ -88,12 +91,17 @@ class Agent:
                 name_set = set(self.skill_names)
                 meta_list = [m for m in all_meta if m["name"] in name_set]
             else:
-                meta_list = await list_meta(
-                    db=db, target_agent=self.config.agent_name
-                )
+                meta_list = await list_meta(db=db, target_agent=agent_name)
 
         if not meta_list:
             self._skills_injected = True
+            logger.info(
+                "[Agent:%s] _inject_skills(route=%s): no matching skills "
+                "(skill_names=%r); skipping injection",
+                agent_name,
+                route,
+                self.skill_names,
+            )
             return
 
         self.config.prompt = _build_system_prompt_with_skills(
@@ -101,8 +109,12 @@ class Agent:
         )
         self._skills_injected = True
         logger.info(
-            f"[Agent:{self.config.agent_name}] injected {len(meta_list)} skills: "
-            f"{[m['name'] for m in meta_list]}"
+            "[Agent:%s] _inject_skills(route=%s): injected %d skill(s) into "
+            "system prompt: %s",
+            agent_name,
+            route,
+            len(meta_list),
+            [m["name"] for m in meta_list],
         )
 
     def _build_context(

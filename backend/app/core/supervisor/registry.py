@@ -10,6 +10,7 @@ Supervisor 专家 Agent 注册表。
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated, Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, SkipValidation
@@ -23,6 +24,36 @@ from app.agents import (
 from app.core.agent.base import Reviewer
 from app.core.agent.reviewer import create_reviewer_agent
 from app.core.supervisor.workflow import WorkflowNodeDefinition
+
+# 触发 builtin tools (load_skill / load_skill_reference) 的 @register_tool 注册，
+# 否则 ToolRegistry 里这两个名字查不到 schema。
+from app.core.tools import builtin as _builtin_tools  # noqa: F401
+from app.core.tools.registry import ToolRegistry
+
+logger = logging.getLogger(__name__)
+
+
+# 默认给所有 sub-agent 装载的工具：skill 渐进式披露的两个入口。
+# 没有这两个工具，sub-agent prompt 里写的 "调 load_skill 加载主体" 完全是死的。
+DEFAULT_SUB_AGENT_TOOL_NAMES: list[str] = [
+    "load_skill",
+    "load_skill_reference",
+]
+
+
+def _default_sub_agent_tool_schemas() -> list[dict[str, Any]]:
+    """从 ToolRegistry 取出默认 sub-agent 工具的 schema 列表。"""
+    schemas: list[dict[str, Any]] = []
+    for tool_name in DEFAULT_SUB_AGENT_TOOL_NAMES:
+        tool = ToolRegistry.get(tool_name)
+        if tool is None:
+            logger.warning(
+                "[registry] default sub-agent tool %r not registered; sub-agent will lack this capability",
+                tool_name,
+            )
+            continue
+        schemas.append(tool.get_schema())
+    return schemas
 
 
 class RegisteredAgent(BaseModel):
@@ -95,6 +126,8 @@ def _build_registered_agent(
         node_keys=node_keys,
         prompt=SUB_AGENT_PROMPT[name],
         response_schema=SUB_AGENT_RESPONSE_SCHEMA[name],
+        # 默认装载 load_skill / load_skill_reference，让 sub-agent 真的能消费 L2/L3
+        tools=_default_sub_agent_tool_schemas(),
         reviewer=create_reviewer_agent(
             prompt=REVIEWER_PROMPT[name],
             criteria=REVIEWER_CRITERIA[name],
