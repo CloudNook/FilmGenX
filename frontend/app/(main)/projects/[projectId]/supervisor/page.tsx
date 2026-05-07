@@ -2084,29 +2084,52 @@ function SupervisorEntryCard({
           </AvatarFallback>
         </Avatar>
         <div className="max-w-[80%] w-full rounded-lg border border-yellow-500/20 bg-yellow-500/5 px-4 py-3 space-y-2">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="text-sm font-medium text-foreground">
               Reviewer · {entry.subAgentName}
             </span>
             {entry.kind === 'review_end' && (
-              <Badge
-                variant="outline"
-                className={cn('text-[10px]', getStatusBadgeClass(entry.passed ? 'completed' : 'error'))}
-              >
-                {entry.passed ? '通过' : '未通过'}
-              </Badge>
+              <>
+                <Badge
+                  variant="outline"
+                  className={cn('text-[10px]', getStatusBadgeClass(entry.passed ? 'completed' : 'error'))}
+                >
+                  {entry.passed ? '通过' : '未通过'}
+                </Badge>
+                {typeof entry.score === 'number' && (
+                  <Badge variant="outline" className="text-[10px] font-mono">
+                    {entry.score.toFixed(1)} / 10
+                  </Badge>
+                )}
+              </>
             )}
           </div>
-          {entry.criteria && (
+          {entry.criteria && entry.criteria.length > 0 && (
             <p className="text-xs text-muted-foreground">
-              Criteria: {entry.criteria.join(' / ')}
+              <span className="text-foreground">Criteria：</span>
+              {entry.criteria.join(' / ')}
             </p>
           )}
           {entry.feedback && (
             <p className="text-xs text-muted-foreground whitespace-pre-wrap break-words">
+              <span className="text-foreground">反馈：</span>
               {entry.feedback}
             </p>
           )}
+          {entry.kind === 'review_end' &&
+            entry.suggestions &&
+            entry.suggestions.length > 0 && (
+              <div className="text-xs text-muted-foreground">
+                <p className="text-foreground mb-1">建议：</p>
+                <ul className="list-disc space-y-0.5 pl-4">
+                  {entry.suggestions.map((s, i) => (
+                    <li key={i} className="whitespace-pre-wrap break-words">
+                      {s}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
         </div>
       </div>
     );
