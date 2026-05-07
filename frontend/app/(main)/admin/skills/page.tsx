@@ -40,10 +40,12 @@ import {
   EyeOff,
   Brain,
   FileText,
+  FileEdit,
   Loader2,
   AlertTriangle,
   CheckCircle,
   Save,
+  Sparkles,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -53,6 +55,7 @@ import {
   type SkillResponse,
   type SkillUploadResponse,
 } from '@/lib/api';
+import { SKILL_SAMPLES } from '@/lib/skill-samples';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 
@@ -359,15 +362,41 @@ function ViewMarkdownContent({ content }: { content: string }) {
 }
 
 // ===========================================================================
-// 上传对话框
+// 创建 / 上传对话框
+// 同时支持"上传 .md 文件"与"直接在浏览器写 markdown"两种入口；
+// 解析、预览、保存逻辑两路共用。
 // ===========================================================================
-function UploadDialog({ onUploaded }: { onUploaded: () => void }) {
+
+type SourceMode = 'upload' | 'write';
+
+interface SkillSourceDialogProps {
+  defaultMode: SourceMode;
+  triggerLabel: string;
+  triggerIcon: 'upload' | 'edit';
+  triggerVariant?: 'default' | 'outline';
+  onSaved: () => void;
+}
+
+function SkillSourceDialog({
+  defaultMode,
+  triggerLabel,
+  triggerIcon,
+  triggerVariant = 'default',
+  onSaved,
+}: SkillSourceDialogProps) {
   const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState<SourceMode>(defaultMode);
   const [markdown, setMarkdown] = useState('');
+  const [draft, setDraft] = useState('');
   const [fileName, setFileName] = useState('');
   const [preview, setPreview] = useState<SkillUploadResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  // open 状态变化时重置 mode 到 defaultMode（每次打开都从指定入口开始）
+  useEffect(() => {
+    if (open) setMode(defaultMode);
+  }, [open, defaultMode]);
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -376,6 +405,20 @@ function UploadDialog({ onUploaded }: { onUploaded: () => void }) {
     const text = await file.text();
     setMarkdown(text);
     await doParse(text);
+  };
+
+  const handleWriteParse = async () => {
+    if (!draft.trim()) {
+      toast.error('请先编写或选择模板内容');
+      return;
+    }
+    setMarkdown(draft);
+    setFileName('（直接编写）');
+    await doParse(draft);
+  };
+
+  const handleApplySample = (sampleMarkdown: string) => {
+    setDraft(sampleMarkdown);
   };
 
   const doParse = async (text: string) => {
@@ -436,7 +479,7 @@ function UploadDialog({ onUploaded }: { onUploaded: () => void }) {
         toast.success('Skill 已创建');
       }
       handleClose();
-      onUploaded();
+      onSaved();
     } catch (e) {
       toast.error(`保存失败: ${(e as Error).message}`);
     } finally {
@@ -447,6 +490,7 @@ function UploadDialog({ onUploaded }: { onUploaded: () => void }) {
   const handleClose = () => {
     setOpen(false);
     setMarkdown('');
+    setDraft('');
     setFileName('');
     setPreview(null);
   };
@@ -454,23 +498,55 @@ function UploadDialog({ onUploaded }: { onUploaded: () => void }) {
   const skillName = preview?.skill.fields.name as string | undefined;
   const hasMissing = (preview?.skill.missing_fields.length ?? 0) > 0;
 
+  const TriggerIcon = triggerIcon === 'upload' ? Upload : FileEdit;
+  const dialogTitle = mode === 'upload' ? '上传 SKILL.md' : '直接编写 SKILL';
+  const dialogDescription =
+    mode === 'upload'
+      ? '上传 .md 文件，系统会按 Claude SKILL.md 风格解析 frontmatter / body / references，并在保存前展示完整预览。'
+      : '直接在编辑器里写 SKILL.md 或从内置示例模板开始；点 "解析并预览" 后进入字段预览，再保存。';
+
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <Button onClick={() => setOpen(true)}>
-        <Upload className="mr-2 h-4 w-4" />
-        上传 SKILL.md
+      <Button variant={triggerVariant} onClick={() => setOpen(true)}>
+        <TriggerIcon className="mr-2 h-4 w-4" />
+        {triggerLabel}
       </Button>
 
       <DialogContent className={cn(LARGE_DIALOG_CLASSNAME, 'flex flex-col')}>
         <DialogHeader className="shrink-0 border-b border-border/70 px-6 py-5 text-left sm:px-8">
-          <DialogTitle>上传 SKILL.md</DialogTitle>
-          <DialogDescription>
-            上传 .md 文件，系统会按 Claude SKILL.md 风格解析 frontmatter / body / references，并在保存前展示完整预览。
-          </DialogDescription>
+          <DialogTitle>{dialogTitle}</DialogTitle>
+          <DialogDescription>{dialogDescription}</DialogDescription>
         </DialogHeader>
 
+        {!preview && !loading && (
+          <div className="shrink-0 flex gap-1 border-b border-border/70 px-6 sm:px-8">
+            <button
+              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                mode === 'upload'
+                  ? 'border-primary text-primary'
+                  : 'border-transparent text-muted-foreground hover:text-foreground'
+              }`}
+              onClick={() => setMode('upload')}
+            >
+              <Upload className="mr-2 inline h-3.5 w-3.5" />
+              上传文件
+            </button>
+            <button
+              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                mode === 'write'
+                  ? 'border-primary text-primary'
+                  : 'border-transparent text-muted-foreground hover:text-foreground'
+              }`}
+              onClick={() => setMode('write')}
+            >
+              <FileEdit className="mr-2 inline h-3.5 w-3.5" />
+              直接编写
+            </button>
+          </div>
+        )}
+
         <div className="flex-1 min-h-0 overflow-hidden px-6 py-6 sm:px-8">
-          {!preview && !loading && (
+          {!preview && !loading && mode === 'upload' && (
             <label className="flex h-full min-h-[26rem] cursor-pointer flex-col items-center justify-center rounded-[28px] border-2 border-dashed border-border/70 bg-muted/20 px-8 py-12 text-center transition-colors hover:border-primary/45 hover:bg-muted/35">
               <div className="rounded-full border border-border/70 bg-background p-4 shadow-sm">
                 <Upload className="h-10 w-10 text-primary" />
@@ -491,6 +567,49 @@ function UploadDialog({ onUploaded }: { onUploaded: () => void }) {
                 onChange={handleFileSelect}
               />
             </label>
+          )}
+
+          {!preview && !loading && mode === 'write' && (
+            <div className="flex h-full min-h-0 flex-col gap-4">
+              <div className="shrink-0 flex flex-wrap items-center gap-2 rounded-2xl border border-border/70 bg-muted/20 px-4 py-3">
+                <Sparkles className="h-4 w-4 text-primary" />
+                <span className="text-sm font-medium">从模板开始：</span>
+                {SKILL_SAMPLES.map((sample) => (
+                  <Button
+                    key={sample.label}
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleApplySample(sample.markdown)}
+                  >
+                    {sample.label}
+                    {sample.targetAgent !== '通用' && (
+                      <span className="ml-1.5 text-[10px] text-muted-foreground">
+                        → {sample.targetAgent}
+                      </span>
+                    )}
+                  </Button>
+                ))}
+                <span className="ml-auto text-xs text-muted-foreground">
+                  选中后会覆盖当前编辑内容
+                </span>
+              </div>
+              <textarea
+                className="min-h-[28rem] flex-1 resize-none rounded-2xl border border-border/70 bg-background px-5 py-4 font-mono text-xs leading-6 text-foreground focus:border-primary/50 focus:outline-none"
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                placeholder={`---\nname: my-skill\ndescription: Use when ... to ...\ntarget_agents: [outline_agent]\ntags: []\n---\n\n# 标题\n\n主体内容...\n\n## reference: example-key\n\nreference 子文档内容\n`}
+              />
+              <div className="shrink-0 flex items-center justify-between gap-3">
+                <span className="text-xs text-muted-foreground">
+                  {draft.length} 字 · 保存前会按 SKILL.md 规则解析
+                </span>
+                <Button onClick={handleWriteParse} disabled={!draft.trim()}>
+                  <Brain className="mr-2 h-4 w-4" />
+                  解析并预览
+                </Button>
+              </div>
+            </div>
           )}
 
           {loading && (
@@ -1044,7 +1163,19 @@ export default function AdminSkillsPage() {
           </div>
           <div className="flex items-center gap-2">
             <span className="text-sm text-muted-foreground">共 {total} 个 Skill</span>
-            <UploadDialog onUploaded={fetchSkills} />
+            <SkillSourceDialog
+              defaultMode="write"
+              triggerLabel="新建 Skill"
+              triggerIcon="edit"
+              triggerVariant="outline"
+              onSaved={fetchSkills}
+            />
+            <SkillSourceDialog
+              defaultMode="upload"
+              triggerLabel="上传 SKILL.md"
+              triggerIcon="upload"
+              onSaved={fetchSkills}
+            />
           </div>
         </div>
 
