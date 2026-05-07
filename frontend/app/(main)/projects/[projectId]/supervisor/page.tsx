@@ -1371,6 +1371,77 @@ function ToggleRow({
 
 type SubSessionBlock = Extract<TimelineBlock, { kind: 'sub_session' }>;
 
+// 这些 sub-agent 走 response_schema 产出 JSON；在 timeline 里它们 text 事件的
+// content 是流式 JSON 字符，需要走结构化卡片而不是 ReactMarkdown。
+const STRUCTURED_SUB_AGENTS = new Set([
+  'outline_agent',
+  'script_agent',
+  'storyboard_agent',
+]);
+
+function isStructuredSubAgent(source: string | null | undefined): boolean {
+  return !!source && STRUCTURED_SUB_AGENTS.has(source);
+}
+
+/**
+ * 结构化 sub-agent 的 text 事件渲染：
+ * - content 是完整 JSON → 走 SubAgentResultCard 渲染对应 schema 的卡片
+ * - content 不完整（流式中）→ 显示"正在生成结构化输出"占位，避免半段 JSON 字符流出
+ */
+function StructuredSubAgentTextEntry({
+  source,
+  content,
+}: {
+  source: string;
+  content: string;
+}) {
+  const trimmed = content.trim();
+  let parsedComplete = false;
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try {
+      JSON.parse(trimmed);
+      parsedComplete = true;
+    } catch {
+      parsedComplete = false;
+    }
+  }
+
+  return (
+    <div className="flex gap-4">
+      <Avatar className="h-8 w-8 shrink-0">
+        <AvatarFallback className="bg-primary/10 text-primary">
+          <Brain className="h-4 w-4" />
+        </AvatarFallback>
+      </Avatar>
+      <div className="w-full max-w-[80%]">
+        <div className="mb-1 flex items-center gap-2">
+          <Badge variant="outline" className="text-[10px] border-primary/20 text-primary">
+            {source}
+          </Badge>
+          {!parsedComplete && trimmed && (
+            <span className="flex items-center gap-1 text-[11px] italic text-muted-foreground">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              正在生成结构化输出 ({trimmed.length} 字符)
+            </span>
+          )}
+        </div>
+        {parsedComplete ? (
+          <SubAgentResultCard
+            subAgentName={source}
+            result={{ output: trimmed }}
+          />
+        ) : (
+          <div className="rounded-2xl border border-dashed border-border bg-card/50 px-4 py-3 text-xs text-muted-foreground">
+            {trimmed
+              ? '响应仍在流式产出中，完成后会渲染结构化卡片。'
+              : '等待响应...'}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /**
  * 浮在输入区上方的 sub-agent 活动指示条 + 抽屉。
  *
@@ -1725,6 +1796,14 @@ function SupervisorEntryCard({
   }
 
   if (entry.kind === 'text') {
+    if (isStructuredSubAgent(entry.source)) {
+      return (
+        <StructuredSubAgentTextEntry
+          source={entry.source!}
+          content={entry.content ?? ''}
+        />
+      );
+    }
     return (
       <div className="flex gap-4">
         <Avatar className="h-8 w-8 shrink-0">
@@ -2145,6 +2224,14 @@ function SupervisorTimelineEntryCard({
   }
 
   if (entry.kind === 'text') {
+    if (isStructuredSubAgent(entry.source)) {
+      return (
+        <StructuredSubAgentTextEntry
+          source={entry.source!}
+          content={entry.content ?? ''}
+        />
+      );
+    }
     return (
       <div className="flex gap-4">
         <Avatar className="h-8 w-8 shrink-0">
