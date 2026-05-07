@@ -3,6 +3,9 @@ Supervisor 专家 Agent 注册表。
 
 当前先提供最小可插拔结构，让 Supervisor 依赖声明式 registry，
 而不是把专家列表写死在 prompt 或工具实现里。
+
+业务装配（prompt / response_schema / reviewer prompt 等领域文本）来自
+``app.agents``，本模块只负责框架结构。
 """
 
 from __future__ import annotations
@@ -11,6 +14,12 @@ from typing import Annotated, Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, SkipValidation
 
+from app.agents import (
+    REVIEWER_CRITERIA,
+    REVIEWER_PROMPT,
+    SUB_AGENT_PROMPT,
+    SUB_AGENT_RESPONSE_SCHEMA,
+)
 from app.core.agent.base import Reviewer
 from app.core.agent.reviewer import create_reviewer_agent
 from app.core.supervisor.workflow import WorkflowNodeDefinition
@@ -24,6 +33,8 @@ class RegisteredAgent(BaseModel):
     label: str
     description: str
     node_keys: list[str]
+    prompt: str = ""
+    response_schema: Optional[dict[str, Any]] = None
     tools: list[dict[str, Any]] = Field(default_factory=list)
     skill_names: list[str] = Field(default_factory=list)
     model: str = "gemini-3-flash-preview"
@@ -69,44 +80,51 @@ def build_default_workflow_definitions() -> list[WorkflowNodeDefinition]:
     ]
 
 
+def _build_registered_agent(
+    *,
+    name: str,
+    label: str,
+    description: str,
+    node_keys: list[str],
+) -> RegisteredAgent:
+    """从 app.agents 装配 prompt / schema / reviewer，构造一个 RegisteredAgent。"""
+    return RegisteredAgent(
+        name=name,
+        label=label,
+        description=description,
+        node_keys=node_keys,
+        prompt=SUB_AGENT_PROMPT[name],
+        response_schema=SUB_AGENT_RESPONSE_SCHEMA[name],
+        reviewer=create_reviewer_agent(
+            prompt=REVIEWER_PROMPT[name],
+            criteria=REVIEWER_CRITERIA[name],
+            min_score=7.5,
+            max_revision_rounds=2,
+            on_exhausted="accept_last",
+        ),
+    )
+
+
 def build_default_registry() -> SupervisorAgentRegistry:
     return SupervisorAgentRegistry(
         agents=[
-            RegisteredAgent(
+            _build_registered_agent(
                 name="outline_agent",
                 label="Outline Agent",
                 description="Creates a high-level narrative outline",
                 node_keys=["outline"],
-                reviewer=create_reviewer_agent(
-                    criteria=["叙事结构清晰", "故事钩子有力", "人物关系明确", "情节节拍合理"],
-                    min_score=7.5,
-                    max_revision_rounds=2,
-                    on_exhausted="accept_last",
-                ),
             ),
-            RegisteredAgent(
+            _build_registered_agent(
                 name="script_agent",
                 label="Script Agent",
                 description="Creates or revises the screenplay",
                 node_keys=["script"],
-                reviewer=create_reviewer_agent(
-                    criteria=["对白自然流畅", "场景描写具体", "情绪推进清晰", "剧情逻辑自洽"],
-                    min_score=7.5,
-                    max_revision_rounds=2,
-                    on_exhausted="accept_last",
-                ),
             ),
-            RegisteredAgent(
+            _build_registered_agent(
                 name="storyboard_agent",
                 label="Storyboard Agent",
                 description="Creates shot-group and storyboard plans",
                 node_keys=["storyboard"],
-                reviewer=create_reviewer_agent(
-                    criteria=["镜头构图合理", "节奏分配清晰", "画面感强", "与剧本对应准确"],
-                    min_score=7.5,
-                    max_revision_rounds=2,
-                    on_exhausted="accept_last",
-                ),
             ),
         ]
     )

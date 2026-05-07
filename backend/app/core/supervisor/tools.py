@@ -124,13 +124,14 @@ async def call_sub_agent(
     sub_agent = create_agent(
         agent_name=sub_agent_name,
         session_id=sub_session_id,
-        prompt="",
+        prompt=registered.prompt,
         model=registered.model,
         tools=registered.tools,
         skill_names=registered.skill_names,
         max_loop=20,
         persist=persist_strategy,
         reviewer=registered.reviewer,
+        response_schema=registered.response_schema,
     )
 
     accumulated_result = {}
