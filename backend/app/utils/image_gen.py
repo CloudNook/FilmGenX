@@ -1,18 +1,20 @@
 """
 Google Gemini 图像生成客户端。
 
-使用 Gemini 3 Pro Image (gemini-3-pro-image-preview) 模型生成图像。
+支持的模型：
+- ``gemini-3-pro-image-preview``（PRO_MODEL，默认）：高质量首帧 / 关键画面，慢但好
+- ``gemini-3.1-flash-image-preview``（FLASH_MODEL）：批量草图 / 快速预览，速度快
 
 使用方式：
-    from app.utils.image_gen import image_gen_client
+    from app.utils.image_gen import image_gen_client, PRO_MODEL, FLASH_MODEL
 
     result = await image_gen_client.generate(
         prompt="一个穿着白袍的少年站在悬崖边",
         negative_prompt="模糊,低质量",
         aspect_ratio="16:9",
+        model=PRO_MODEL,            # 或 FLASH_MODEL
     )
     if result.image_data:
-        # 保存图片
         with open("output.png", "wb") as f:
             f.write(result.image_data)
 """
@@ -50,8 +52,11 @@ ASPECT_RATIOS = {
 # 图像分辨率选项（直接使用，不做映射）
 RESOLUTIONS = ["512", "1K", "2K", "4K"]
 
-# 默认模型
-DEFAULT_MODEL = "gemini-3-pro-image-preview"
+# 模型常量
+PRO_MODEL = "gemini-3-pro-image-preview"      # 高质量首帧 / 慢
+FLASH_MODEL = "gemini-3.1-flash-image-preview"  # 快速草图 / 快
+# 默认模型（向后兼容已有调用方）
+DEFAULT_MODEL = PRO_MODEL
 
 
 @dataclass
