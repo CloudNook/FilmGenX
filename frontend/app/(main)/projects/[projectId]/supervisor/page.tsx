@@ -28,6 +28,14 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from '@/components/ui/collapsible';
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+  SheetTrigger,
+} from '@/components/ui/sheet';
 import { SubAgentResultCard } from '@/components/supervisor/sub-agent-result-card';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Textarea } from '@/components/ui/textarea';
@@ -306,6 +314,22 @@ export default function SupervisorPage({
 
     return blocks;
   }, [visibleEntries]);
+
+  // 主对话只展示 supervisor 自己的 entry；sub-agent 的内部活动（thinking / text /
+  // review_*）走右侧抽屉。用户点 supervisor 的 call_sub_agent tool_end 也能看到
+  // 结构化输出（Phase 1），抽屉里则是它的 play-by-play 完整过程。
+  const mainBlocks = useMemo(
+    () => timelineBlocks.filter((b) => b.kind !== 'sub_session'),
+    [timelineBlocks],
+  );
+  const subSessionBlocks = useMemo(
+    () =>
+      timelineBlocks.filter(
+        (b): b is Extract<TimelineBlock, { kind: 'sub_session' }> =>
+          b.kind === 'sub_session',
+      ),
+    [timelineBlocks],
+  );
   const hasAssistantEntries = useMemo(
     () => visibleEntries.some((entry) => entry.kind !== 'user'),
     [visibleEntries],
@@ -1011,7 +1035,7 @@ export default function SupervisorPage({
                   </div>
                 )}
 
-                {timelineBlocks.map((block) => {
+                {mainBlocks.map((block) => {
                   if (block.kind === 'entry') {
                     return (
                       <SupervisorTimelineEntryCard
@@ -1021,16 +1045,7 @@ export default function SupervisorPage({
                       />
                     );
                   }
-                  return (
-                    <SubAgentSessionCard
-                      key={block.id}
-                      title={block.title}
-                      source={block.source}
-                      sessionId={block.sessionId}
-                      entries={block.entries}
-                      userFallback={userFallback}
-                    />
-                  );
+                  return null;
                 })}
 
                 {!visibleEntries.some((entry) => entry.kind === 'text') &&
@@ -1124,6 +1139,12 @@ export default function SupervisorPage({
 
             <div className="shrink-0 border-t border-border p-4 bg-card">
               <div className="max-w-3xl mx-auto space-y-3">
+                {subSessionBlocks.length > 0 && (
+                  <SubAgentDrawerTrigger
+                    sessions={subSessionBlocks}
+                    userFallback={userFallback}
+                  />
+                )}
                 <div className="rounded-2xl border border-border bg-secondary/50 p-3">
                   <Textarea
                     value={inputValue}
@@ -1345,6 +1366,111 @@ function ToggleRow({
         />
       </button>
     </label>
+  );
+}
+
+type SubSessionBlock = Extract<TimelineBlock, { kind: 'sub_session' }>;
+
+/**
+ * 浮在输入区上方的 sub-agent 活动指示条 + 抽屉。
+ *
+ * 主对话只展示 supervisor 自己的 entry，sub-agent 的 thinking / text / review
+ * 全在右侧抽屉里。指示条显示总数和"运行中"状态，点击展开抽屉看完整 play-by-play。
+ */
+function SubAgentDrawerTrigger({
+  sessions,
+  userFallback,
+}: {
+  sessions: SubSessionBlock[];
+  userFallback: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const runningCount = useMemo(
+    () =>
+      sessions.filter(
+        (s) => !s.entries.some((e) => e.kind === 'sub_agent_end'),
+      ).length,
+    [sessions],
+  );
+  const completedCount = sessions.length - runningCount;
+
+  return (
+    <Sheet open={open} onOpenChange={setOpen}>
+      <SheetTrigger asChild>
+        <button
+          type="button"
+          className={cn(
+            'flex w-full items-center gap-2 rounded-2xl border bg-secondary/30 px-3 py-2 text-left text-sm transition-colors',
+            'hover:bg-secondary/60',
+            runningCount > 0
+              ? 'border-primary/40'
+              : 'border-border',
+          )}
+        >
+          <Sparkles
+            className={cn(
+              'h-4 w-4 shrink-0',
+              runningCount > 0 ? 'text-primary' : 'text-muted-foreground',
+            )}
+          />
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-foreground">
+                {sessions.length} 个 Sub-Agent 活动
+              </span>
+              {runningCount > 0 && (
+                <span className="inline-flex items-center gap-1 text-[11px] text-primary">
+                  <span className="relative flex h-1.5 w-1.5">
+                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary/60" />
+                    <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-primary" />
+                  </span>
+                  {runningCount} 运行中
+                </span>
+              )}
+              {completedCount > 0 && runningCount === 0 && (
+                <span className="text-[11px] text-muted-foreground">
+                  全部完成
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-muted-foreground line-clamp-1">
+              {sessions
+                .map((s) => s.title || s.source || s.sessionId)
+                .join(' · ')}
+            </p>
+          </div>
+          <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+        </button>
+      </SheetTrigger>
+      <SheetContent
+        side="right"
+        className="w-[min(640px,90vw)] sm:max-w-none flex flex-col gap-0 p-0"
+      >
+        <SheetHeader className="shrink-0 border-b border-border px-5 py-4">
+          <SheetTitle>Sub-Agent 活动</SheetTitle>
+          <SheetDescription>
+            {sessions.length} 个会话 ·{' '}
+            {runningCount > 0
+              ? `${runningCount} 运行中 · ${completedCount} 完成`
+              : '全部完成'}
+          </SheetDescription>
+        </SheetHeader>
+        <ScrollArea className="flex-1 min-h-0">
+          <div className="space-y-4 p-5">
+            {sessions.map((s) => (
+              <SubAgentSessionCard
+                key={s.id}
+                title={s.title}
+                source={s.source}
+                sessionId={s.sessionId}
+                entries={s.entries}
+                userFallback={userFallback}
+              />
+            ))}
+          </div>
+        </ScrollArea>
+      </SheetContent>
+    </Sheet>
   );
 }
 
@@ -1675,16 +1801,26 @@ function SupervisorEntryCard({
             </pre>
           )}
           {entry.kind === 'tool_end' && entry.result != null && (
-            <pre
-              className={cn(
-                'text-xs bg-background/60 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all',
-                entry.isError ? 'text-destructive' : 'text-muted-foreground'
-              )}
-            >
-              {typeof entry.result === 'string'
-                ? entry.result
-                : JSON.stringify(entry.result, null, 2)}
-            </pre>
+            entry.toolName === 'call_sub_agent' && !entry.isError ? (
+              <SubAgentResultCard
+                subAgentName={
+                  (entry.toolArguments?.sub_agent_name as string | undefined) ??
+                  ''
+                }
+                result={entry.result}
+              />
+            ) : (
+              <pre
+                className={cn(
+                  'text-xs bg-background/60 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all',
+                  entry.isError ? 'text-destructive' : 'text-muted-foreground'
+                )}
+              >
+                {typeof entry.result === 'string'
+                  ? entry.result
+                  : JSON.stringify(entry.result, null, 2)}
+              </pre>
+            )
           )}
         </div>
       </div>
@@ -2086,16 +2222,26 @@ function SupervisorTimelineEntryCard({
               </pre>
             )}
             {entry.kind === 'tool_end' && entry.result != null && (
-              <pre
-                className={cn(
-                  'overflow-x-auto whitespace-pre-wrap break-all rounded bg-background/60 p-2 text-xs',
-                  entry.isError ? 'text-destructive' : 'text-muted-foreground'
-                )}
-              >
-                {typeof entry.result === 'string'
-                  ? entry.result
-                  : JSON.stringify(entry.result, null, 2)}
-              </pre>
+              entry.toolName === 'call_sub_agent' && !entry.isError ? (
+                <SubAgentResultCard
+                  subAgentName={
+                    (entry.toolArguments?.sub_agent_name as string | undefined) ??
+                    ''
+                  }
+                  result={entry.result}
+                />
+              ) : (
+                <pre
+                  className={cn(
+                    'overflow-x-auto whitespace-pre-wrap break-all rounded bg-background/60 p-2 text-xs',
+                    entry.isError ? 'text-destructive' : 'text-muted-foreground'
+                  )}
+                >
+                  {typeof entry.result === 'string'
+                    ? entry.result
+                    : JSON.stringify(entry.result, null, 2)}
+                </pre>
+              )
             )}
           </AutoCollapseDetails>
         </div>
