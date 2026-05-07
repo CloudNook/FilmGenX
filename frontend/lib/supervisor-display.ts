@@ -340,6 +340,32 @@ export function appendSupervisorDisplayEvent(
 
   if (event.type === 'review_end') {
     const nextEntries = completeLatestThinking(entries, event.source);
+    // 找到尚未合并的最近一条 review_start（同一个 sub-agent）就地升级为
+    // review_end，保留 review_start 已有的 criteria；这样一轮 review 在 UI
+    // 上就是一张卡片，而不是两张分别的"开始 / 结束"卡片。
+    // 多轮修订（max_revision_rounds>1）每轮各自有 review_start / review_end，
+    // findLast 仍然只升级最新那条未合并的，多轮卡片照样独立。
+    const startIndex = nextEntries.findLastIndex(
+      (entry) =>
+        entry.kind === 'review_start' &&
+        entry.subAgentName === event.sub_agent_name,
+    );
+    if (startIndex !== -1) {
+      const startEntry = nextEntries[startIndex];
+      return [
+        ...nextEntries.slice(0, startIndex),
+        {
+          ...startEntry,
+          kind: 'review_end',
+          score: event.score,
+          passed: event.passed,
+          feedback: event.feedback,
+          suggestions: event.suggestions,
+        },
+        ...nextEntries.slice(startIndex + 1),
+      ];
+    }
+    // 兜底：缺 review_start（理论上不该发生）→ 单独生成一张 review_end
     return [
       ...nextEntries,
       {
