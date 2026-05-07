@@ -1,36 +1,46 @@
 """
-Skill Admin API 端点。
+Skill Admin API 端点（Claude SKILL.md 风格）。
 
 路由前缀：/api/v1/admin/skills
 权限：仅 is_superuser 可访问
+
+L1（meta）/ L2（body）/ L3（reference）三层暴露：
+- ``GET /admin/skills/meta?target_agent=outline_agent`` 仅元信息（启动注入用）
+- ``GET /admin/skills/{name}`` 完整字段（admin 编辑视图）
+- ``GET /admin/skills/{name}/reference/{ref_key}`` 单个 reference
+- ``GET /admin/skills/{name}/lint`` 引用 lint 检查
 """
 
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_admin, get_db
-from app.services.skill_parser import parse_skill_markdown
-from app.services.skill_service import SkillService
 from app.models.user import User
 from app.schemas.base import PageResponse
 from app.schemas.skill import (
+    LintIssueResponse,
     SkillCreate,
+    SkillLintResponse,
+    SkillMarkdownBody,
+    SkillMetaResponse,
     SkillParseResult,
     SkillResponse,
     SkillUpdate,
     SkillUploadResponse,
-    SkillMarkdownBody,
 )
+from app.services.skill_parser import parse_skill_markdown
+from app.services.skill_service import SkillService
 
 router = APIRouter()
 
 
 # ===========================================================================
-# 上传解析
+# 上传 / 预览
 # ===========================================================================
+
 
 @router.post(
     "/upload",
@@ -43,24 +53,14 @@ async def upload_skill_markdown(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(get_current_admin),
 ):
-    """
-    上传 Markdown 文件内容 → 解析 → 返回结构化结果。
-
-    如果同名 Skill 已存在于 DB，返回现有数据供前端对比。
-    """
     service = SkillService(db)
     parse_result, existing, is_update = await service.upload_and_parse(body.content)
-
     return SkillUploadResponse(
         skill=SkillParseResult(**parse_result.to_dict()),
         existing=SkillResponse.model_validate(existing) if existing else None,
         is_update=is_update,
     )
 
-
-# ===========================================================================
-# 预览解析（不保存，仅解析）
-# ===========================================================================
 
 @router.post(
     "/preview",
@@ -72,17 +72,15 @@ async def preview_skill_markdown(
     body: SkillMarkdownBody,
     admin: User = Depends(get_current_admin),
 ):
-    """
-    仅解析 Markdown，不保存，不查 DB。
-    用于 Admin 在编辑器中实时预览解析结果。
-    """
+    """仅解析 Markdown，不保存，不查 DB。"""
     result = parse_skill_markdown(body.content)
     return SkillParseResult(**result.to_dict())
 
 
 # ===========================================================================
-# 列表
+# 列表（admin 全字段）
 # ===========================================================================
+
 
 @router.get(
     "",
@@ -92,25 +90,51 @@ async def preview_skill_markdown(
 async def list_skills(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    category: Optional[str] = Query(None, description="按领域分类过滤"),
     is_active: Optional[bool] = Query(None, description="按启用状态过滤"),
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(get_current_admin),
 ):
-    """分页获取 Skill 列表，支持按 category / is_active 过滤。"""
     service = SkillService(db)
     items, total = await service.list_skills(
         page=page,
         page_size=page_size,
-        category=category,
         is_active=is_active,
     )
     return PageResponse(items=items, total=total, page=page, page_size=page_size)
 
 
 # ===========================================================================
-# 详情
+# 元信息列表（L1）
 # ===========================================================================
+
+
+@router.get(
+    "/meta",
+    response_model=List[SkillMetaResponse],
+    summary="获取 Skill 元信息列表（L1）",
+)
+async def list_skill_meta(
+    target_agent: Optional[str] = Query(
+        None,
+        description="按 target_agents 反查；不传则返回所有 active skill 的 meta",
+    ),
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """返回 active skill 的元信息（不含 body / references）。
+
+    - 给前端 admin picker 用：``target_agent=None`` 列全集
+    - 给 agent 启动注入用：``target_agent=outline_agent`` 反查
+    """
+    service = SkillService(db)
+    rows = await service.list_active_meta(target_agent=target_agent)
+    return [SkillMetaResponse(**row) for row in rows]
+
+
+# ===========================================================================
+# 详情（admin 全字段）/ Reference / Lint / Markdown 下载
+# ===========================================================================
+
 
 @router.get(
     "/{name}",
@@ -122,7 +146,6 @@ async def get_skill(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(get_current_admin),
 ):
-    """按 name 获取 Skill 完整信息。"""
     service = SkillService(db)
     skill = await service.get_skill(name)
     if not skill:
@@ -133,106 +156,57 @@ async def get_skill(
     return skill
 
 
-# ===========================================================================
-# 创建
-# ===========================================================================
-
-@router.post(
-    "",
-    response_model=SkillResponse,
-    summary="创建 Skill",
-    status_code=status.HTTP_201_CREATED,
+@router.get(
+    "/{name}/reference/{ref_key}",
+    summary="获取单个 reference 子文档（L3）",
 )
-async def create_skill(
-    body: SkillCreate,
-    db: AsyncSession = Depends(get_db),
-    admin: User = Depends(get_current_admin),
-):
-    """
-    创建新 Skill。
-
-    - name 唯一约束：重复则报错 409
-    - 建议先调用 /upload 接口解析 Markdown，再用返回结果补全后提交
-    """
-    service = SkillService(db)
-
-    existing = await service.get_skill(body.name)
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Skill '{body.name}' 已存在，请使用 PUT 更新",
-        )
-
-    skill = await service.save_skill(
-        create_data=body,
-        raw_markdown=body.raw_markdown,
-    )
-    return skill
-
-
-# ===========================================================================
-# 更新
-# ===========================================================================
-
-@router.put(
-    "/{name}",
-    response_model=SkillResponse,
-    summary="更新 Skill",
-)
-async def update_skill(
+async def get_skill_reference(
     name: str,
-    body: SkillUpdate,
+    ref_key: str,
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(get_current_admin),
 ):
-    """
-    部分更新 Skill。
-
-    - 只更新传入的非空字段
-    - 自动递增 version
-    - 如 raw_markdown 传入，则覆盖存储的原文
-    """
     service = SkillService(db)
-    skill = await service.update_skill(
-        name=name,
-        update_data=body,
-        raw_markdown=body.raw_markdown if body.raw_markdown is not None else None,
-    )
-    if not skill:
+    payload = await service.get_reference(name, ref_key)
+    if payload is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Skill '{name}' 不存在",
+            detail=f"Skill '{name}' 或 reference '{ref_key}' 不存在",
         )
-    return skill
+    return payload
 
 
-# ===========================================================================
-# 删除（软删除）
-# ===========================================================================
-
-@router.delete(
-    "/{name}",
-    status_code=status.HTTP_204_NO_CONTENT,
-    summary="删除 Skill（软删除）",
+@router.get(
+    "/{name}/lint",
+    response_model=SkillLintResponse,
+    summary="对 Skill 跑引用 lint",
 )
-async def delete_skill(
+async def lint_skill_endpoint(
     name: str,
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(get_current_admin),
 ):
-    """软删除 Skill，设置 is_deleted=True。"""
     service = SkillService(db)
-    deleted = await service.delete_skill(name)
-    if not deleted:
+    issues = await service.lint(name)
+    if issues is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Skill '{name}' 不存在",
         )
+    return SkillLintResponse(
+        skill_name=name,
+        issues=[
+            LintIssueResponse(
+                level=issue.level,
+                code=issue.code,
+                message=issue.message,
+                field=issue.field,
+                token=issue.token,
+            )
+            for issue in issues
+        ],
+    )
 
-
-# ===========================================================================
-# 下载原始 Markdown
-# ===========================================================================
 
 @router.get(
     "/{name}/markdown",
@@ -244,7 +218,6 @@ async def download_skill_markdown(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(get_current_admin),
 ):
-    """返回 Skill 存储的 raw_markdown（如果有）。"""
     service = SkillService(db)
     skill = await service.get_skill(name)
     if not skill:
@@ -258,3 +231,71 @@ async def download_skill_markdown(
             detail=f"Skill '{name}' 无原始 Markdown",
         )
     return skill.raw_markdown
+
+
+# ===========================================================================
+# 创建 / 更新 / 删除
+# ===========================================================================
+
+
+@router.post(
+    "",
+    response_model=SkillResponse,
+    summary="创建 Skill",
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_skill(
+    body: SkillCreate,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    service = SkillService(db)
+    if await service.get_skill(body.name):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Skill '{body.name}' 已存在，请使用 PUT 更新",
+        )
+    return await service.save_skill(create_data=body, raw_markdown=body.raw_markdown)
+
+
+@router.put(
+    "/{name}",
+    response_model=SkillResponse,
+    summary="更新 Skill",
+)
+async def update_skill(
+    name: str,
+    body: SkillUpdate,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    service = SkillService(db)
+    skill = await service.update_skill(
+        name=name,
+        update_data=body,
+        raw_markdown=body.raw_markdown,
+    )
+    if not skill:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Skill '{name}' 不存在",
+        )
+    return skill
+
+
+@router.delete(
+    "/{name}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="删除 Skill（软删除）",
+)
+async def delete_skill(
+    name: str,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    service = SkillService(db)
+    if not await service.delete_skill(name):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Skill '{name}' 不存在",
+        )

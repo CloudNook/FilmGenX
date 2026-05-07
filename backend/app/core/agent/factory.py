@@ -22,21 +22,29 @@ logger = logging.getLogger(__name__)
 PersistArg = Union[Literal["redis"], PersistStrategy, None]
 
 # Skill 注入系统提示词的默认前缀模板
+# Claude SKILL.md 风格三层渐进披露：
+# - L1（本段）：只放 name / description / target_agents / tags，永远在 context
+# - L2：``load_skill(skill_name)`` 拉 body
+# - L3：``load_skill_reference(skill_name, ref_key)`` 拉 reference 子文档
 DEFAULT_SKILL_INJECT_TEMPLATE = """
 
-## 专业知识 (Skills)
+## 可用 Skills（L1 元信息）
 
-当你需要专业领域知识时，调用 load_skill 工具加载对应 Skill。
-以下是当前会话可用的 Skills：
+下列是当前可用的领域 Skill 摘要。description 通常以 "Use when ... to ..." 句式写出激活条件，请据此判断是否进入下一层。
 
-{skill_lite_json}
+{skill_meta_json}
 
-## Skill 使用规则
+## Skill 渐进式披露规则
 
-- 在开始涉及剧本、灯光、运镜、调色等专业领域的任务前，先调用 load_skill 获取对应知识
-- 调用示例：load_skill(skill_name="screenwriting", fields=["content", "constraints"])
-- 如需了解 Skill 的完整参数，可调用 load_skill(skill_name="xxx", fields=["parameters"])
-"""
+1. 默认你只看得到上面的 L1 元信息。判断当前任务确实需要某个 Skill 时，再加载它。
+2. 加载 Skill 主体（L2）：调用 ``load_skill(skill_name="<name>")``，返回 body markdown。
+3. body 内可能出现以下 @ 引用标记，对应不同的工具调用：
+   - ``@ref:<key>``           → 当前 skill 的某个 reference；调用 ``load_skill_reference(skill_name="<current>", ref_key="<key>")``
+   - ``@skill:<name>``        → 跨 skill 整体；判断需要时调用 ``load_skill(skill_name="<name>")``
+   - ``@skill:<name>#<key>``  → 跨 skill 子节；判断需要时调用 ``load_skill_reference(skill_name="<name>", ref_key="<key>")``
+4. 不要预先把所有引用都加载完——按需加载，避免上下文膨胀。
+
+注意：上面的 Skills 列表只展示与你这个 agent 强相关的 skill；任何 ``@skill:`` 跨域引用你都可以照常 load，框架不会拦截。"""
 
 
 def _resolve_persist(persist: PersistArg) -> Optional[PersistStrategy]:
@@ -51,14 +59,18 @@ def _resolve_persist(persist: PersistArg) -> Optional[PersistStrategy]:
 
 def _build_system_prompt_with_skills(
     base_prompt: str,
-    skill_lite_list: List[Dict[str, Any]],
+    skill_meta_list: List[Dict[str, Any]],
 ) -> str:
-    """将 Skill 摘要注入到系统提示词中。"""
-    if not skill_lite_list:
+    """将 L1 skill 元信息注入到系统提示词中。
+
+    ``skill_meta_list`` 每项形如 ``{name, description, target_agents, tags}``，
+    与 ``SkillService.list_active_meta()`` 的返回一致。
+    """
+    if not skill_meta_list:
         return base_prompt
 
-    skill_json = json.dumps(skill_lite_list, ensure_ascii=False, indent=2)
-    skill_section = DEFAULT_SKILL_INJECT_TEMPLATE.format(skill_lite_json=skill_json)
+    skill_json = json.dumps(skill_meta_list, ensure_ascii=False, indent=2)
+    skill_section = DEFAULT_SKILL_INJECT_TEMPLATE.format(skill_meta_json=skill_json)
     return (base_prompt or "").rstrip() + skill_section
 
 

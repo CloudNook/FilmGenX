@@ -65,20 +65,44 @@ class Agent:
         self._tool_executor = ToolExecutor()
 
     async def _inject_skills(self) -> None:
-        """根据 skill_names 从 DB 加载 Skill 摘要并注入 system prompt（只执行一次）。"""
-        if self._skills_injected or not self.skill_names:
+        """加载 L1 skill 元信息并注入 system prompt（启动时一次）。
+
+        路由口径：
+        - ``self.skill_names`` 显式给出 → 按名取（admin / 测试覆盖通道）
+        - 缺省 → 按 ``target_agents @> [agent_name]`` 反查（业务主流程）
+
+        注：L2 / L3 由 LLM 通过 ``load_skill`` / ``load_skill_reference`` 工具按需加载，
+        本步骤只把 L1 元信息（name + description + target_agents + tags）固定到 system prompt。
+        """
+        if self._skills_injected:
             return
-        from app.core.skill.loader import load_skill_lite
+
+        from app.core.skill.loader import list_meta
         from app.core.agent.factory import _build_system_prompt_with_skills
         from app.db.session import AsyncSessionFactory
+
         async with AsyncSessionFactory() as db:
-            all_lite = await load_skill_lite(db=db)
-        name_set = set(self.skill_names)
-        skill_lite_list = [s for s in all_lite if s["name"] in name_set]
-        self.config.prompt = _build_system_prompt_with_skills(self.config.prompt, skill_lite_list)
+            if self.skill_names:
+                # 显式 skill_names：先取全部 active meta，再按名子集
+                all_meta = await list_meta(db=db)
+                name_set = set(self.skill_names)
+                meta_list = [m for m in all_meta if m["name"] in name_set]
+            else:
+                meta_list = await list_meta(
+                    db=db, target_agent=self.config.agent_name
+                )
+
+        if not meta_list:
+            self._skills_injected = True
+            return
+
+        self.config.prompt = _build_system_prompt_with_skills(
+            self.config.prompt, meta_list
+        )
         self._skills_injected = True
         logger.info(
-            f"[Agent:{self.config.agent_name}] injected {len(skill_lite_list)} skills: {self.skill_names}"
+            f"[Agent:{self.config.agent_name}] injected {len(meta_list)} skills: "
+            f"{[m['name'] for m in meta_list]}"
         )
 
     def _build_context(

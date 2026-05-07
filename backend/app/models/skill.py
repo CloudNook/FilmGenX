@@ -1,13 +1,22 @@
 """
-Skill 模型。
+Skill 模型（Claude SKILL.md 风格）。
 
-对齐 Anthropic SKILL.md 标准 + 视频领域扩展。
-支持 Markdown 上传 → 解析 → 补全 → 保存的全流程。
+设计原则与 Anthropic Agent Skills 一致，按渐进式披露三层组织：
+- L1 元信息：name + description + target_agents + tags（启动时注入 system prompt）
+- L2 主体：body（agent 调 ``load_skill(name)`` 时按需加载）
+- L3 引用：references（agent 调 ``load_skill_reference(name, key)`` 时按需加载）
+
+@ 引用语法（在 body / reference body 内书写）：
+- @ref:<key>             指向当前 skill 的某个 reference 章节
+- @skill:<name>          指向另一个 skill 整体（LLM 决策是否 load_skill）
+- @skill:<name>#<key>    指向另一个 skill 的某个 reference（LLM 决策）
+
+跨 skill 引用是 hint，框架不自动 fetch；所有 load 由 LLM 通过工具调用完成。
 """
 
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
 
-from sqlalchemy import String, Text
+from sqlalchemy import Boolean, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -18,87 +27,34 @@ if TYPE_CHECKING:
 
 
 class Skill(Base):
-    """
-    Skill 存储模型。
-
-    与 Anthropic SKILL.md 标准对齐：
-    - name: 唯一标识（小写/数字/连字符）
-    - title: 人类可读标题
-    - description: 激活描述（Agent据此判断何时调用）
-    - content: 核心指令（Agent 实际执行的内容）
-    - parameters: JSON Schema 参数定义
-    - examples: 使用示例列表
-    - constraints: 约束条件列表
-
-    扩展字段：
-    - category: 领域分类（如：灯光、运镜、剧本）
-    - difficulty: 难度级别
-    - tags: 标签列表
-    - author: 作者
-    - raw_markdown: 原始 Markdown 全文（每次上传更新）
-    - is_active: 是否启用
-    - version: 版本号（每次保存递增）
-    - metadata: 扩展元数据
-    """
+    """Skill 存储模型（Claude SKILL.md 风格 + target_agents 扩展）。"""
 
     __tablename__ = "skills"
 
-    # === Anthropic SKILL.md 标准字段 ===
+    # === L1 frontmatter 字段 ===
     name: Mapped[str] = mapped_column(
         String(64),
-        unique=True,
         nullable=False,
         index=True,
-        comment="唯一标识，小写字母/数字/连字符",
-    )
-    title: Mapped[Optional[str]] = mapped_column(
-        String(128),
-        nullable=True,
-        comment="人类可读标题，用于界面展示",
+        comment="唯一标识，小写字母/数字/连字符；agent 通过此名调用 load_skill",
     )
     description: Mapped[str] = mapped_column(
         Text,
         nullable=False,
         default="",
-        comment="一句话描述，用于 Agent 判断何时激活",
+        comment="激活条件描述，建议用 'Use when... to...' 句式；agent 据此判断是否 load",
     )
-    content: Mapped[Optional[str]] = mapped_column(
-        Text,
-        nullable=True,
-        comment="核心指令，Agent 实际执行的逻辑",
-    )
-    parameters: Mapped[dict] = mapped_column(
-        JSONB,
-        default=dict,
-        comment="JSON Schema 参数定义",
-    )
-    examples: Mapped[List[str]] = mapped_column(
+    target_agents: Mapped[List[str]] = mapped_column(
         JSONB,
         default=list,
-        comment="使用示例列表",
-    )
-    constraints: Mapped[List[str]] = mapped_column(
-        JSONB,
-        default=list,
-        comment="约束条件列表",
-    )
-
-    # === 扩展元数据字段 ===
-    category: Mapped[Optional[str]] = mapped_column(
-        String(64),
-        nullable=True,
-        index=True,
-        comment="领域分类：剧本、灯光、运镜、调色等",
-    )
-    difficulty: Mapped[Optional[str]] = mapped_column(
-        String(32),
-        nullable=True,
-        comment="难度：beginner / intermediate / advanced",
+        nullable=False,
+        comment="此 skill 适用的 sub-agent 列表；L1 注入时按 agent 名反查",
     )
     tags: Mapped[List[str]] = mapped_column(
         JSONB,
         default=list,
-        comment="标签列表",
+        nullable=False,
+        comment="标签列表，用于 admin 端筛选",
     )
     author: Mapped[Optional[str]] = mapped_column(
         String(64),
@@ -106,18 +62,37 @@ class Skill(Base):
         comment="作者",
     )
 
-    # === 原始内容 + 系统字段 ===
+    # === L2 主体 ===
+    body: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        comment="SKILL.md body markdown；agent 调 load_skill(name) 时返回",
+    )
+
+    # === L3 引用文件 ===
+    # 结构：[{"key": "...", "title": "...", "body": "..."}, ...]
+    # body 中通过 @ref:<key> 引用；agent 调 load_skill_reference(name, key) 时返回
+    references: Mapped[List[dict]] = mapped_column(
+        JSONB,
+        default=list,
+        nullable=False,
+        comment="引用文件列表，每项 {key, title, body}；body 内用 @ref:<key> 显式引用",
+    )
+
+    # === 系统字段 ===
     raw_markdown: Mapped[Optional[str]] = mapped_column(
         Text,
         nullable=True,
         comment="原始 Markdown 全文（每次上传覆盖）",
     )
     is_active: Mapped[bool] = mapped_column(
+        Boolean,
         default=True,
         nullable=False,
-        comment="是否启用，未启用则 Agent 不会加载",
+        comment="是否启用，未启用则 agent 不会加载",
     )
     version: Mapped[int] = mapped_column(
+        Integer,
         default=1,
         nullable=False,
         comment="版本号，每次保存递增",
@@ -125,5 +100,6 @@ class Skill(Base):
     skill_metadata: Mapped[dict] = mapped_column(
         JSONB,
         default=dict,
-        comment="扩展元数据（token_cost、related_skills 等）",
+        nullable=False,
+        comment="扩展元数据（est_tokens / 变更日志等，半结构化）",
     )

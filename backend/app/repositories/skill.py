@@ -1,12 +1,15 @@
 """
 Skill Repository。
 
-提供 Skill 的异步 CRUD 操作。
+提供 Skill 的异步 CRUD 操作。新模型按 Claude SKILL.md 风格组织：
+- L1: name + description + target_agents + tags（list_meta）
+- L2: body
+- L3: references
 """
 
 from typing import List, Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.skill import Skill
@@ -39,74 +42,66 @@ class SkillRepository(BaseRepository[Skill]):
         )
         return list(result.scalars().all())
 
-    async def list_by_category(
+    async def list_active_meta(
         self,
-        category: str,
         *,
-        page: int = 1,
-        page_size: int = 20,
-    ) -> tuple[List[Skill], int]:
-        """按领域分类查询。"""
-        return await self.list(
-            filters=[Skill.category == category],
-            order_by=Skill.name.asc(),
-            page=page,
-            page_size=page_size,
-        )
+        target_agent: Optional[str] = None,
+    ) -> List[dict]:
+        """
+        返回所有 active skill 的 L1 元信息（不含 body / references）。
 
-    async def list_lite(self) -> List[Skill]:
+        - ``target_agent=None``：列出所有 active skill 的 meta（admin picker 用）
+        - ``target_agent="outline_agent"``：仅返回 ``target_agents`` 包含该 agent
+          的 skill（agent 启动注入 system prompt 用）
+
+        过滤逻辑使用 Postgres ``@>`` jsonb contains 操作符，需要 GIN 索引支持
+        （在迁移里已建 ``ix_skills_target_agents``）。
         """
-        查询所有活跃 Skill 的摘要字段（不含 content）。
-        用于 Agent 启动时注入到 system prompt。
-        """
-        result = await self.session.execute(
-            select(
-                Skill.name,
-                Skill.title,
-                Skill.description,
-                Skill.parameters,
-            )
-            .where(
-                Skill.is_active.is_(True),
-                Skill.is_deleted.is_(False),
-            )
-            .order_by(Skill.name.asc())
+        stmt = select(
+            Skill.name,
+            Skill.description,
+            Skill.target_agents,
+            Skill.tags,
+        ).where(
+            Skill.is_active.is_(True),
+            Skill.is_deleted.is_(False),
         )
-        rows = result.all()
-        # 转为 dict 列表（避免 SQLAlchemy 列映射问题）
+        if target_agent is not None:
+            stmt = stmt.where(Skill.target_agents.contains([target_agent]))
+        stmt = stmt.order_by(Skill.name.asc())
+
+        rows = await self.session.execute(stmt)
         return [
             {
-                "name": r[0],
-                "title": r[1],
-                "description": r[2],
-                "parameters": r[3],
+                "name": row[0],
+                "description": row[1],
+                "target_agents": row[2] or [],
+                "tags": row[3] or [],
             }
-            for r in rows
+            for row in rows.all()
         ]
 
     async def upsert(self, name: str, data: dict) -> Skill:
-        """
-        插入或更新 Skill。
+        """插入或更新 Skill。
 
-        - 如果 name 已存在：更新字段，version + 1
-        - 如果 name 不存在：创建新记录
+        - name 已存在：更新字段，version + 1
+        - name 不存在：创建新记录
         """
         existing = await self.get_by_name(name)
         if existing:
-            # 更新字段（排除 id / created_at / name / version 由 service 层处理）
-            update_data = {k: v for k, v in data.items()
-                           if k not in ("id", "created_at", "name")}
+            update_data = {
+                k: v for k, v in data.items() if k not in ("id", "created_at", "name")
+            }
             for key, value in update_data.items():
                 setattr(existing, key, value)
             existing.version = existing.version + 1
             await self.session.flush()
             await self.session.refresh(existing)
             return existing
-        else:
-            # 新建
-            create_data = {**data, "name": name, "version": 1}
-            obj = Skill(**create_data)
-            self.session.add(obj)
-            await self.session.flush()
-            await self.session.refresh(obj)
-            return obj
+
+        create_data = {**data, "name": name, "version": 1}
+        obj = Skill(**create_data)
+        self.session.add(obj)
+        await self.session.flush()
+        await self.session.refresh(obj)
+        return obj
