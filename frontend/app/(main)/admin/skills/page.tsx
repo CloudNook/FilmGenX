@@ -204,6 +204,105 @@ function renderFieldStateBadge(
   );
 }
 
+function MarkdownBlock({
+  text,
+  maxHeight = 'max-h-[28rem]',
+}: {
+  text: string;
+  maxHeight?: string;
+}) {
+  // 默认渲染 markdown，提供"源码"切换给 admin 校验内容是否被正确解析
+  const [view, setView] = useState<'render' | 'source'>('render');
+  return (
+    <div
+      className={cn(
+        'flex flex-col rounded-xl border border-border/60 bg-white text-black',
+        maxHeight,
+      )}
+    >
+      <div className="flex shrink-0 items-center justify-end gap-1 border-b border-border/60 bg-muted/40 px-2 py-1">
+        <button
+          type="button"
+          className={cn(
+            'rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors',
+            view === 'render'
+              ? 'bg-background shadow-sm text-foreground'
+              : 'text-muted-foreground hover:text-foreground',
+          )}
+          onClick={() => setView('render')}
+        >
+          渲染
+        </button>
+        <button
+          type="button"
+          className={cn(
+            'rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors',
+            view === 'source'
+              ? 'bg-background shadow-sm text-foreground'
+              : 'text-muted-foreground hover:text-foreground',
+          )}
+          onClick={() => setView('source')}
+        >
+          源码
+        </button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
+        {view === 'render' ? (
+          <div className="prose prose-sm max-w-none [&_h1]:text-black [&_h2]:text-black [&_h3]:text-black [&_h4]:text-black [&_h5]:text-black [&_h6]:text-black [&_p]:text-black [&_li]:text-black [&_strong]:text-black [&_a]:text-blue-600 [&_blockquote]:text-gray-700 [&_pre]:bg-gray-100 [&_pre>_code]:bg-gray-100 [&_code]:bg-gray-100 [&_code]:text-black">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+          </div>
+        ) : (
+          <pre className="whitespace-pre-wrap text-xs leading-6 text-foreground">
+            {text}
+          </pre>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ReferencesPreview({
+  refs,
+  className,
+}: {
+  refs: Array<{ key?: unknown; title?: unknown; body?: unknown }>;
+  className?: string;
+}) {
+  if (refs.length === 0) {
+    return (
+      <div className="rounded-xl border border-dashed border-muted-foreground/25 bg-muted/20 px-4 py-3 text-sm text-muted-foreground">
+        无 reference 子文档
+      </div>
+    );
+  }
+  return (
+    <div className={cn('space-y-3', className)}>
+      {refs.map((ref, idx) => {
+        const k = typeof ref.key === 'string' ? ref.key : `ref-${idx}`;
+        const title = typeof ref.title === 'string' ? ref.title : '';
+        const body = typeof ref.body === 'string' ? ref.body : '';
+        return (
+          <div key={k} className="rounded-xl border border-border/60 bg-white">
+            <div className="flex flex-wrap items-center gap-2 border-b border-border/60 bg-muted/30 px-3 py-2">
+              <Badge variant="outline" className="font-mono text-xs">
+                @ref:{k}
+              </Badge>
+              {title && (
+                <span className="text-xs text-muted-foreground">{title}</span>
+              )}
+            </div>
+            <div className="px-4 py-3">
+              <div className="prose prose-sm max-w-none [&_h1]:text-black [&_h2]:text-black [&_h3]:text-black [&_h4]:text-black [&_p]:text-black [&_li]:text-black [&_strong]:text-black [&_a]:text-blue-600 [&_pre]:bg-gray-100 [&_code]:bg-gray-100 [&_code]:text-black">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function FieldValuePreview({
   fieldKey,
   value,
@@ -219,6 +318,16 @@ function FieldValuePreview({
         暂无内容
       </div>
     );
+  }
+
+  // body 字段是 markdown 主体，默认渲染 + 提供源码切换
+  if (fieldKey === 'body' && typeof value === 'string') {
+    return <MarkdownBlock text={value} />;
+  }
+
+  // references 字段是 [{key, title, body}]，body 部分逐个渲染为 markdown
+  if (fieldKey === 'references' && Array.isArray(value)) {
+    return <ReferencesPreview refs={value as Array<Record<string, unknown>>} className={className} />;
   }
 
   if (typeof value === 'string') {
@@ -775,7 +884,13 @@ function SkillSourceDialog({
           )}
         </div>
 
-        <DialogFooter className="shrink-0 border-t border-border/70 px-6 py-4 sm:px-8">
+        <DialogFooter className="shrink-0 items-center border-t border-border/70 px-6 py-4 sm:px-8">
+          {preview && hasMissing && (
+            <span className="mr-auto text-xs text-yellow-700">
+              <AlertTriangle className="mr-1 inline h-3.5 w-3.5" />
+              必填字段缺失，先在编辑器里补全 frontmatter 再保存
+            </span>
+          )}
           <Button variant="outline" onClick={handleClose}>
             取消
           </Button>
