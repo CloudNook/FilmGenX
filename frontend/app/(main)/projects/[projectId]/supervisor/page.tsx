@@ -28,6 +28,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from '@/components/ui/collapsible';
+import { SubAgentResultCard } from '@/components/supervisor/sub-agent-result-card';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
@@ -1783,11 +1784,10 @@ function SupervisorEntryCard({
             </p>
           )}
           {entry.kind === 'sub_agent_end' && entry.result != null && (
-            <pre className="text-xs text-muted-foreground bg-background/60 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">
-              {typeof entry.result === 'string'
-                ? entry.result
-                : JSON.stringify(entry.result, null, 2)}
-            </pre>
+            <SubAgentResultCard
+              subAgentName={entry.subAgentName}
+              result={entry.result}
+            />
           )}
         </div>
       </div>
@@ -2141,11 +2141,10 @@ function SupervisorTimelineEntryCard({
               </p>
             )}
             {entry.kind === 'sub_agent_end' && entry.result != null && (
-              <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded bg-background/60 p-2 text-xs text-muted-foreground">
-                {typeof entry.result === 'string'
-                  ? entry.result
-                  : JSON.stringify(entry.result, null, 2)}
-              </pre>
+              <SubAgentResultCard
+                subAgentName={entry.subAgentName}
+                result={entry.result}
+              />
             )}
           </AutoCollapseDetails>
         </div>
