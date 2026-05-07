@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from app.core.agent.factory import create_agent
 from app.core.agent.persist.db_strategy import DBPersistStrategy
+from app.core.agent.tool_errors import tool_error
 from app.core.agent.base import (
     ToolStartEvent,
     ToolEndEvent,
@@ -30,12 +31,79 @@ from app.core.supervisor.events import (
     ReviewStartEvent,
     ReviewEndEvent,
 )
-from app.core.supervisor.registry import SupervisorAgentRegistry, build_default_registry
-from app.core.supervisor.workflow import apply_node_update
+from app.core.supervisor.registry import (
+    RegisteredAgent,
+    SupervisorAgentRegistry,
+    build_default_registry,
+)
+from app.core.supervisor.workflow import WorkflowSnapshot, apply_node_update
 from app.core.tools.registry import register_tool
 from app.db.session import AsyncSessionFactory
 
 logger = logging.getLogger(__name__)
+
+
+# 上游依赖只有处于这两个状态时，下游才允许 run。
+# - fresh：节点 artifact 是最新的，未被上游变更冲掉
+# - completed：节点曾运行成功（兼容历史数据）
+_OK_DEPENDENCY_STATUSES = frozenset({"fresh", "completed"})
+
+
+def _check_dependency_guard(
+    workflow: Optional[WorkflowSnapshot],
+    registered: RegisteredAgent,
+) -> Optional[Dict[str, Any]]:
+    """
+    检查 sub-agent 的 node_keys 上游依赖是否就绪。
+
+    Returns:
+        None: 依赖满足或无 workflow 上下文，可以继续执行。
+        dict: 依赖未满足，返回结构化 ToolError，调用方直接放进 SubAgentEndEvent.result。
+
+    设计：
+    - 不抛异常。LLM 看不到异常细节就只能盲目重试或放弃；结构化错误能让 LLM
+      读到"哪些 node 没就绪、应该先做什么"并自我纠正。
+    - 没有 workflow（一些直跑场景）时跳过 guard，保持向下兼容。
+    """
+    if workflow is None:
+        return None
+
+    blocking: List[Dict[str, str]] = []
+    for node_key in registered.node_keys:
+        deps = workflow.dependency_map.get(node_key, [])
+        for dep in deps:
+            dep_node = workflow.nodes.get(dep)
+            dep_status = dep_node.status if dep_node is not None else "missing"
+            if dep_status not in _OK_DEPENDENCY_STATUSES:
+                blocking.append(
+                    {
+                        "node_key": dep,
+                        "status": dep_status,
+                        "blocks_node": node_key,
+                    }
+                )
+
+    if not blocking:
+        return None
+
+    blocked_node_names = sorted({b["node_key"] for b in blocking})
+    return tool_error(
+        error_code="DEPENDENCY_NOT_SATISFIED",
+        message=(
+            f"Cannot run {registered.name}: upstream node(s) "
+            f"{', '.join(blocked_node_names)} not fresh."
+        ),
+        hint=(
+            "Run the upstream sub-agent(s) first to bring the workflow node(s) to 'fresh' status, "
+            "or confirm the existing node artifact if it is acceptable."
+        ),
+        context={
+            "sub_agent_name": registered.name,
+            "node_keys": list(registered.node_keys),
+            "blocking": blocking,
+        },
+    )
+
 
 def _build_call_sub_agent_schema(agent_names: Optional[List[str]] = None) -> Dict[str, Any]:
     available_names = agent_names or build_default_registry().agent_names()
@@ -103,7 +171,32 @@ async def call_sub_agent(
         yield SubAgentEndEvent(
             sub_agent_name=sub_agent_name,
             session_id="",
-            result={"error": f"Unknown sub_agent_name: {sub_agent_name}"},
+            result=tool_error(
+                error_code="UNKNOWN_SUB_AGENT",
+                message=f"Unknown sub_agent_name: {sub_agent_name}",
+                hint=(
+                    "Check the available sub_agent_name values returned by the call_sub_agent "
+                    "schema (or call get_workflow_state to see registered agents)."
+                ),
+                context={
+                    "sub_agent_name": sub_agent_name,
+                    "available": active_registry.agent_names(),
+                },
+            ),
+        )
+        return
+
+    if supervisor_context is None:
+        raise RuntimeError("call_sub_agent requires supervisor_context")
+
+    # Workflow 依赖 guard：上游 node 未 fresh 时拒绝运行。
+    # 结构化错误返回，supervisor LLM 据此选择先调上游 sub-agent 或 confirm 现有产物。
+    guard_error = _check_dependency_guard(supervisor_context.workflow, registered)
+    if guard_error is not None:
+        yield SubAgentEndEvent(
+            sub_agent_name=sub_agent_name,
+            session_id="",
+            result=guard_error,
         )
         return
 
@@ -114,8 +207,6 @@ async def call_sub_agent(
         sub_prompt = f"{task_description}\n\n## 参考上下文\n{context_snapshot}"
 
     limiter = SubAgentConcurrencyLimiter.get_instance()
-    if supervisor_context is None:
-        raise RuntimeError("call_sub_agent requires supervisor_context")
     persist_strategy = DBPersistStrategy(
         session_factory=AsyncSessionFactory,
         supervisor_session_id=supervisor_context.supervisor_session_id,
