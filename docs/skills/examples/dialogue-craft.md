@@ -17,9 +17,6 @@ author: filmgenx
 - **潜台词 (Subtext)**：角色说 A 但意思是 B。冲突 / 欲望 / 恐惧通过潜台词传达，而不是直白宣告。
 - **冲突驱动 (Conflict)**：每一段对白都要有目标对立。无目的的"闲聊"应当删除或合并。
 
-潜台词写作技巧见 @ref:subtext-techniques。
-场景头与对白格式规范见 @ref:scene-format-spec。
-
 ## 反例（写完一定回头检查）
 
 - **互相讲对方已知的事**："你知道我父亲三年前死了吗？" "嗯，我们一起参加的葬礼。" — 信息倾倒
@@ -37,6 +34,13 @@ author: filmgenx
 3. 这句话能换给另一个角色说吗？如果能，说明角色化不够。
 4. 信息是通过冲突自然传达的，还是被生硬解释的？
 5. parenthetical（表演提示）有没有在写台词已经表达的情绪？克制使用。
+
+## 何时加载附加资料
+
+按以下规则**按需**触发工具调用，不要预先全部加载：
+
+- 当你要写"角色不直说"、需要靠对白让观众读出隐藏冲突或情绪时 → 加载 @ref:subtext-techniques，拿到四种常用潜台词手法（偏移 / 过度礼貌 / 沉默 / 第三方代言）的具体范例
+- 当你不确定场景头格式、时间段词、INT/EXT 写法、或者需要按页数估算成片时长时 → 加载 @ref:scene-format-spec
 
 ## reference: subtext-techniques
 
@@ -56,8 +60,6 @@ author: filmgenx
 沉默 (Silence)：
 
 没有回答 = 最强的回答。剧本里写 (beat) 或 (...) 让演员表演。
-> A: 你还爱他吗？
-> B: ...
 
 第三方代言：
 
@@ -67,13 +69,13 @@ author: filmgenx
 
 ## reference: scene-format-spec
 
-标准场景头格式：``INT./EXT. 地点 - 时间``
+标准场景头格式：\`INT./EXT. 地点 - 时间\`
 
 常见形式：
 
-- ``INT. 地铁站台 - 夜``
-- ``EXT. 海滩 - 黎明``
-- ``INT./EXT. 出租车 - 日 - 行驶中``
+- \`INT. 地铁站台 - 夜\`
+- \`EXT. 海滩 - 黎明\`
+- \`INT./EXT. 出租车 - 日 - 行驶中\`
 
 时间词：DAY / NIGHT / DAWN / DUSK / CONTINUOUS / LATER
 

@@ -34,10 +34,9 @@ author: filmgenx
 - **第二幕（对抗）**：占 50-55%。主角追求外在目标，遇到障碍升级，在中点发生重大反转，跌入低谷，第二转折点带来内在转变。
 - **第三幕（解决）**：占 20-25%。最终对抗、高潮、落幕。主角的内在改变与外在胜利同时发生。
 
-详细的分幕脚手架见 @ref:act-templates。
-角色弧线类型与挑选见 @ref:character-arc-frameworks。
-
 ## 关键节拍清单
+
+写大纲时逐项检查以下节拍是否成立：
 
 - 激励事件 (inciting incident)：在前 10-15% 出现
 - 第一转折点 (plot point 1)：第一幕末尾，主角主动承诺
@@ -53,6 +52,13 @@ author: filmgenx
 - 中点没有反转，只是"剧情继续推进"
 - 高潮靠外部力量解决，不是主角弧线驱动
 - 主题靠台词宣讲，不是通过情节自然展开
+
+## 何时加载附加资料
+
+按以下规则**按需**触发工具调用，不要预先全部加载：
+
+- 当你要落具体到每一幕的开场画面、节拍顺序、转折点位置时 → 加载 @ref:act-templates，拿到三幕的标准节拍模板（共 17 个步骤）
+- 当你设计主角变化曲线、选择故事是"成长 / 立场坚守 / 走向毁灭"哪种走向时 → 加载 @ref:character-arc-frameworks，看正向 / 平面 / 负向三种弧线的适用场景
 
 ## reference: act-templates
 
@@ -122,9 +128,6 @@ author: filmgenx
 - **潜台词 (Subtext)**：角色说 A 但意思是 B。冲突 / 欲望 / 恐惧通过潜台词传达，而不是直白宣告。
 - **冲突驱动 (Conflict)**：每一段对白都要有目标对立。无目的的"闲聊"应当删除或合并。
 
-潜台词写作技巧见 @ref:subtext-techniques。
-场景头与对白格式规范见 @ref:scene-format-spec。
-
 ## 反例（写完一定回头检查）
 
 - **互相讲对方已知的事**："你知道我父亲三年前死了吗？" "嗯，我们一起参加的葬礼。" — 信息倾倒
@@ -142,6 +145,13 @@ author: filmgenx
 3. 这句话能换给另一个角色说吗？如果能，说明角色化不够。
 4. 信息是通过冲突自然传达的，还是被生硬解释的？
 5. parenthetical（表演提示）有没有在写台词已经表达的情绪？克制使用。
+
+## 何时加载附加资料
+
+按以下规则**按需**触发工具调用，不要预先全部加载：
+
+- 当你要写"角色不直说"、需要靠对白让观众读出隐藏冲突或情绪时 → 加载 @ref:subtext-techniques，拿到四种常用潜台词手法（偏移 / 过度礼貌 / 沉默 / 第三方代言）的具体范例
+- 当你不确定场景头格式、时间段词、INT/EXT 写法、或者需要按页数估算成片时长时 → 加载 @ref:scene-format-spec
 
 ## reference: subtext-techniques
 
@@ -207,9 +217,6 @@ author: filmgenx
 2. **构图**：主体位置、引导线、纵深、留白共同决定观众视线和心理感受。
 3. **运动**：静止 = 稳定；横移 = 跟随；推进 = 介入；摇晃 = 不安。
 
-景别速查见 @ref:shot-types-cheatsheet。
-机位运动选择见 @ref:camera-movement-guide。
-
 ## 构图原则
 
 - **三分法 (Rule of thirds)**：主体落在 1/3 线交点，画面活跃
@@ -232,6 +239,13 @@ author: filmgenx
 - 跨轴而无叙事理由（观众迷失方向）
 - 没有留白，画面塞满（视觉疲劳）
 - 镜头之间动作不接（剪辑生硬）
+
+## 何时加载附加资料
+
+按以下规则**按需**触发工具调用，不要预先全部加载：
+
+- 当你要给某个具体镜头选定景别、纠结 ECU 还是 CU 还是 MS 时 → 加载 @ref:shot-types-cheatsheet，拿到 10 种景别的中英对照表和适用场景
+- 当你要给镜头配机位运动、纠结 dolly 还是 zoom 还是 pan、或不确定手持是否合适时 → 加载 @ref:camera-movement-guide，看每种运动的情绪含义和禁忌
 
 ## reference: shot-types-cheatsheet
 
@@ -297,9 +311,13 @@ author: ""
 
 写在这里...
 
+## 何时加载附加资料
+
+- 当 ... 时 → 加载 @ref:example-key
+
 ## reference: example-key
 
-reference 子文档内容，body 内用 @ref:example-key 引用即可被 LLM 按需加载。
+reference 子文档内容，body 内通过 @ref:example-key 显式引用，LLM 才会按需调 load_skill_reference 加载它。
 `;
 
 export const SKILL_SAMPLES: SkillSample[] = [

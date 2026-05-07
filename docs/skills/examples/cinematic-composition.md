@@ -19,9 +19,6 @@ author: filmgenx
 2. **构图**：主体位置、引导线、纵深、留白共同决定观众视线和心理感受。
 3. **运动**：静止 = 稳定；横移 = 跟随；推进 = 介入；摇晃 = 不安。
 
-景别速查见 @ref:shot-types-cheatsheet。
-机位运动选择见 @ref:camera-movement-guide。
-
 ## 构图原则
 
 - **三分法 (Rule of thirds)**：主体落在 1/3 线交点，画面活跃
@@ -44,6 +41,13 @@ author: filmgenx
 - 跨轴而无叙事理由（观众迷失方向）
 - 没有留白，画面塞满（视觉疲劳）
 - 镜头之间动作不接（剪辑生硬）
+
+## 何时加载附加资料
+
+按以下规则**按需**触发工具调用，不要预先全部加载：
+
+- 当你要给某个具体镜头选定景别、纠结 ECU 还是 CU 还是 MS 时 → 加载 @ref:shot-types-cheatsheet，拿到 10 种景别的中英对照表和适用场景
+- 当你要给镜头配机位运动、纠结 dolly 还是 zoom 还是 pan、或不确定手持是否合适时 → 加载 @ref:camera-movement-guide，看每种运动的情绪含义和禁忌
 
 ## reference: shot-types-cheatsheet
 
