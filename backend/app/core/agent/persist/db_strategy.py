@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 
 from app.core.agent.persist.base import PersistStrategy
 from app.core.agent.persist.models import AgentMessageRecord
@@ -188,8 +188,16 @@ class DBPersistStrategy(PersistStrategy):
         - content 为 feedback 文本（人类可读）
         - 完整结构化结果（score / passed / suggestions / target_seq）放在 extra_metadata
         - seq 取当前 session 最大 seq + 1，保证按时间顺序排在被评审消息之后
+
+        并发兜底：``select max(seq) + 1`` 不是原子操作，并发场景下两个 reviewer
+        可能算出同一个 seq。这里在事务内拿一个按 session_id 哈希的 advisory lock，
+        把 "读 max + 写新行" 串行化；锁随事务提交自动释放，不影响其它 session。
         """
         async with self._session_scope() as db:
+            await db.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+                {"k": f"agent_messages_seq:{session_id}"},
+            )
             max_seq_stmt = (
                 select(AgentMessageRecord.seq)
                 .where(AgentMessageRecord.session_id == session_id)

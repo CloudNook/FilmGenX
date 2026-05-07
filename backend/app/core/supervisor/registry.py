@@ -7,15 +7,19 @@ Supervisor 专家 Agent 注册表。
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, SkipValidation
 
+from app.core.agent.base import Reviewer
 from app.core.agent.reviewer import create_reviewer_agent
 from app.core.supervisor.workflow import WorkflowNodeDefinition
 
 
 class RegisteredAgent(BaseModel):
+    # Reviewer 是 callable Protocol，不在 Pydantic 已知类型里，需要放开 arbitrary_types。
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     name: str
     label: str
     description: str
@@ -23,7 +27,10 @@ class RegisteredAgent(BaseModel):
     tools: list[dict[str, Any]] = Field(default_factory=list)
     skill_names: list[str] = Field(default_factory=list)
     model: str = "gemini-3-flash-preview"
-    reviewer: Optional[Any] = None
+    # Protocol 本身没 @runtime_checkable，Pydantic 默认会尝试 isinstance(value, Reviewer)
+    # 而 isinstance 对未标 runtime_checkable 的 Protocol 直接报错；这里跳过校验，
+    # 静态类型仍是 Optional[Reviewer]，由调用方 / type checker 保证契约。
+    reviewer: Annotated[Optional[Reviewer], SkipValidation()] = None
 
 
 class SupervisorAgentRegistry(BaseModel):
