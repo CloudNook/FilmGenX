@@ -759,7 +759,13 @@ export default function WorkspacePage({
                         value={inputValue}
                         onChange={(e) => setInputValue(e.target.value)}
                         onKeyDown={(e) => {
-                          if (e.key === 'Enter' && !e.shiftKey) {
+                          // IME（如中文输入法）组词期间回车是"确认候选词"，不应触发发送。
+                          if (
+                            e.key === 'Enter' &&
+                            !e.shiftKey &&
+                            !e.nativeEvent.isComposing &&
+                            e.keyCode !== 229
+                          ) {
                             e.preventDefault();
                             handleSendMessage();
                           }

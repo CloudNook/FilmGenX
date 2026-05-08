@@ -1152,7 +1152,14 @@ export default function SupervisorPage({
                     value={inputValue}
                     onChange={(event) => setInputValue(event.target.value)}
                     onKeyDown={(event) => {
-                      if (event.key === 'Enter' && !event.shiftKey) {
+                      // IME（如中文输入法）组词期间回车是"确认候选词"，不应触发发送。
+                      // nativeEvent.isComposing 是现代标准；keyCode 229 是老 webkit 的兜底。
+                      if (
+                        event.key === 'Enter' &&
+                        !event.shiftKey &&
+                        !event.nativeEvent.isComposing &&
+                        event.keyCode !== 229
+                      ) {
                         event.preventDefault();
                         handleStartSupervisor();
                       }
