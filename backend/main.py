@@ -5,14 +5,26 @@ FilmGenX 后端主入口。
     uv run uvicorn main:app --reload --host 0.0.0.0 --port 8000
 """
 
+import logging
+import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+# uvicorn 默认只给自己的 access / error logger 配 handler，应用代码 ``logger.info``
+# 走 root logger 会因为没 handler 被静默丢弃。这里在 import 任何 app.* 模块之前
+# 装一次 basicConfig，保证 sub-agent prompt / call_sub_agent 等 INFO 级日志能落
+# 到 stderr。LOG_LEVEL 环境变量可调（默认 INFO）。
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
 
-from app.api.v1.router import api_router
-from app.core.config import settings
-from app.utils.evolink import evolink_client
+from fastapi import FastAPI  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+
+from app.api.v1.router import api_router  # noqa: E402
+from app.core.config import settings  # noqa: E402
+from app.utils.evolink import evolink_client  # noqa: E402
 
 
 @asynccontextmanager
