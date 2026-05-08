@@ -16,6 +16,26 @@ from pydantic import BaseModel, Field
 AspectRatio = Literal["16:9", "9:16", "1:1", "3:4", "4:3"]
 
 
+class ExpressionVariant(BaseModel):
+    """单个表情变体（name + prompt 配对）。
+
+    用 ``List[ExpressionVariant]`` 而不是 ``Dict[str, str]`` 是为了让 Gemini
+    response_schema 的 ``minItems`` 真正生效——Dict（``additionalProperties`` 形式）
+    在 Gemini 上不强制 ``minProperties``，LLM 容易交 ``{}`` 蒙混。
+    """
+
+    name: str = Field(
+        ...,
+        title="表情名",
+        description="表情关键词，如 angry / determined / exhausted / sad / smile",
+    )
+    prompt: str = Field(
+        ...,
+        title="提示词补充",
+        description="该表情对应的提示词补充（与 base_prompt 配合时差异化的部分）",
+    )
+
+
 class CharacterRef(BaseModel):
     """单个角色的图生图参考设计。"""
 
@@ -34,11 +54,11 @@ class CharacterRef(BaseModel):
         title="基础描述",
         description="中文基础外观描述（发型 + 发色 + 瞳色 + 体型 + 服装核心），用作所有变体共享 base",
     )
-    expressions: Dict[str, str] = Field(
+    expressions: List[ExpressionVariant] = Field(
         ...,
         min_length=3,
         title="表情变体",
-        description="key=表情名（angry / determined / exhausted / sad / smile），value=该表情的提示词补充。至少 3 项，主角建议 4-5 项",
+        description="表情变体列表（至少 3 项，主角建议 4-5 项）。每项含表情名 + 提示词补充",
     )
     clothing_detail: str = Field(
         ...,

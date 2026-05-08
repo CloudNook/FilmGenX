@@ -19,6 +19,26 @@ from pydantic import BaseModel, Field
 AspectRatio = Literal["16:9", "9:16", "1:1", "3:4", "4:3"]
 
 
+class TimeVariant(BaseModel):
+    """同一地点的时段 / 天气变体。
+
+    用 ``List[TimeVariant]`` 而不是 ``Dict[str, str]`` 是为了让 Gemini
+    response_schema 的 ``minItems`` 真正生效——Dict（``additionalProperties`` 形式）
+    在 Gemini 上不强制 ``minProperties``，LLM 容易交 ``{}`` 蒙混。
+    """
+
+    name: str = Field(
+        ...,
+        title="变体名",
+        description="时段或天气关键词，如 day / night / rain / sunset",
+    )
+    prompt: str = Field(
+        ...,
+        title="提示词",
+        description="该时段 / 天气下的场景描述（光照 / 氛围 / 色调差异）",
+    )
+
+
 class SceneRef(BaseModel):
     """单个场景地点的图生图参考设计。"""
 
@@ -47,11 +67,11 @@ class SceneRef(BaseModel):
         title="道具",
         description="可选关键道具 / 陈设描述",
     )
-    time_variants: Dict[str, str] = Field(
+    time_variants: List[TimeVariant] = Field(
         ...,
         min_length=1,
         title="时段变体",
-        description="同一地点不同时段 / 天气的变体提示词，key=变体名（day / night / rain / sunset），value=该变体的描述。至少 1 项",
+        description="同一地点不同时段 / 天气的变体列表（至少 1 项）。每项含变体名 + 描述",
     )
     color_restrictions: str = Field(
         ...,
