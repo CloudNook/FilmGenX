@@ -49,6 +49,61 @@ logger = logging.getLogger(__name__)
 _OK_DEPENDENCY_STATUSES = frozenset({"fresh", "completed"})
 
 
+def _build_workflow_context_block(
+    workflow: WorkflowSnapshot,
+    current_node_keys: list[str],
+) -> str:
+    """构造给 sub-agent 看的整体工作流上下文块。
+
+    sub-agent 们各自跑独立 session，不直接共享 in-memory 历史。如果不主动注入工作流
+    状态，下游 sub-agent 只能依赖 supervisor LLM 临场摘录上游产物，漏一处就生不出
+    对应内容（character_ref 漏了角色名 / frame_prompt 漏了风格锚都会塌）。
+
+    所以每次 ``call_sub_agent`` 时把当前 ``WorkflowSnapshot`` 编码成两段贴在 sub_prompt
+    末尾：
+
+    - ``## 工作流状态``：完整链路 + 每个节点的 status，标记 ``← 当前``
+    - ``## 上游产出``：所有已完成上游节点的 raw_output（从 ``node.artifact["output"]``
+      取出），用 ``json`` 围栏保留原始结构
+
+    "上游" 由 ``WorkflowSnapshot.nodes`` 的插入序列定义——本期工作流是线性的
+    （outline → … → video_prompt），插入序与拓扑序一致。后续做并行 / DAG 编排时这
+    里要换成 ``dependency_map`` 的拓扑遍历。
+    """
+    current_set = set(current_node_keys)
+
+    status_lines = [
+        "## 工作流状态",
+        "",
+        "| 节点 | 状态 |",
+        "| --- | --- |",
+    ]
+    for key, node in workflow.nodes.items():
+        marker = " ← 当前" if key in current_set else ""
+        status_lines.append(f"| {key} | {node.status}{marker} |")
+
+    upstream: list[tuple[str, str]] = []
+    for key, node in workflow.nodes.items():
+        if key in current_set:
+            break  # 自己 + 之后的节点都不展示
+        if node.artifact and isinstance(node.artifact, dict):
+            output = node.artifact.get("output")
+            if isinstance(output, str) and output.strip():
+                upstream.append((key, output))
+
+    parts = ["\n".join(status_lines)]
+    if upstream:
+        out_lines = ["", "## 上游产出"]
+        for key, output in upstream:
+            out_lines.append(f"\n### {key}")
+            out_lines.append("```json")
+            out_lines.append(output)
+            out_lines.append("```")
+        parts.append("\n".join(out_lines))
+
+    return "\n\n".join(parts)
+
+
 def _check_dependency_guard(
     workflow: Optional[WorkflowSnapshot],
     registered: RegisteredAgent,
@@ -204,7 +259,31 @@ async def call_sub_agent(
 
     sub_prompt = task_description
     if context_snapshot:
-        sub_prompt = f"{task_description}\n\n## 参考上下文\n{context_snapshot}"
+        sub_prompt = f"{sub_prompt}\n\n## 参考上下文\n{context_snapshot}"
+
+    # 自动注入工作流整体上下文：状态表 + 已完成上游节点的 raw_output。
+    # 这是 sub-agent 之间唯一的串接通道——不靠这一注入，下游 sub-agent 只能信任
+    # supervisor LLM 临场摘录。
+    if supervisor_context.workflow is not None:
+        workflow_block = _build_workflow_context_block(
+            supervisor_context.workflow,
+            registered.node_keys,
+        )
+        sub_prompt = f"{sub_prompt}\n\n---\n\n{workflow_block}"
+
+    # 完整 prompt 日志：每次调起 sub-agent 时把 initial_input 全文打到日志，便于
+    # 现场审查工作流上下文是否真的注入到位、supervisor LLM 给的 task_description
+    # 是否合理。日志量大但定位 sub-agent 输出问题的关键证据。
+    logger.info(
+        "[call_sub_agent] %s (session=%s) sub_prompt (%d chars):\n"
+        "----------- BEGIN sub_prompt -----------\n"
+        "%s\n"
+        "----------- END sub_prompt -----------",
+        sub_agent_name,
+        sub_session_id,
+        len(sub_prompt),
+        sub_prompt,
+    )
 
     limiter = SubAgentConcurrencyLimiter.get_instance()
     persist_strategy = DBPersistStrategy(

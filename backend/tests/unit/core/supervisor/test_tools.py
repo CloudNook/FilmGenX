@@ -370,3 +370,192 @@ async def test_call_sub_agent_binds_db_persist_to_supervisor_session(monkeypatch
     assert persist.default_supervisor_session_id == "sv-persist-001"
 
 
+# --------------------------------------------------------------------------- #
+# Workflow 上下文自动注入
+# --------------------------------------------------------------------------- #
+
+
+class _PromptCapturingAgent:
+    """记录 sub_agent.stream(initial_input=...) 的 initial_input 给断言检查。"""
+
+    captured: list[str] = []
+
+    def __init__(self):
+        self._called = False
+
+    async def stream(self, initial_input: str):
+        type(self).captured.append(initial_input)
+        yield DoneEvent(
+            result=AgentResult(
+                agent_name="captured",
+                raw_output="captured",
+                finished=True,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_call_sub_agent_injects_workflow_state_table_into_sub_prompt(monkeypatch):
+    """workflow 状态表必须出现在下游 sub-agent 的 sub_prompt 末尾。"""
+    from app.core.supervisor.workflow import apply_node_update
+
+    _PromptCapturingAgent.captured = []
+    monkeypatch.setattr(
+        "app.core.supervisor.tools.create_agent",
+        lambda **kwargs: _PromptCapturingAgent(),
+    )
+
+    ctx = SupervisorContext(
+        supervisor_session_id="sv-ctx-block",
+        user_request="start",
+        workflow_definitions=[
+            WorkflowNodeDefinition(key="outline", label="Outline", node_type="text", depends_on=[]),
+            WorkflowNodeDefinition(key="script", label="Script", node_type="text", depends_on=["outline"]),
+        ],
+    )
+    apply_node_update(
+        ctx.workflow,
+        "outline",
+        {"output": '{"title": "test outline", "logline": "..."}'},
+        updated_by="agent",
+        last_agent="outline_agent",
+    )
+
+    registry = SupervisorAgentRegistry(
+        agents=[
+            RegisteredAgent(
+                name="script_agent",
+                label="Script",
+                description="Writes scripts",
+                node_keys=["script"],
+            )
+        ]
+    )
+
+    async for _ in call_sub_agent(
+        sub_agent_name="script_agent",
+        task_description="Write episode 1 script",
+        supervisor_context=ctx,
+        registry=registry,
+    ):
+        pass
+
+    assert len(_PromptCapturingAgent.captured) == 1
+    sub_prompt = _PromptCapturingAgent.captured[0]
+
+    # task_description 在最前
+    assert sub_prompt.startswith("Write episode 1 script")
+    # 状态表存在
+    assert "## 工作流状态" in sub_prompt
+    assert "| outline | fresh |" in sub_prompt
+    # 当前节点（script）打 marker，注意 status 取自 _build_workflow_context_block 调用瞬间
+    # （此时 script 的状态是 ready，因为 running 是在工作流上下文构造之后才被置入）
+    assert "ready ← 当前" in sub_prompt
+
+
+@pytest.mark.asyncio
+async def test_call_sub_agent_injects_upstream_outputs(monkeypatch):
+    """所有上游已完成节点的 raw_output 必须以 json 围栏注入到 sub_prompt。"""
+    from app.core.supervisor.workflow import apply_node_update
+
+    _PromptCapturingAgent.captured = []
+    monkeypatch.setattr(
+        "app.core.supervisor.tools.create_agent",
+        lambda **kwargs: _PromptCapturingAgent(),
+    )
+
+    ctx = SupervisorContext(
+        supervisor_session_id="sv-ctx-upstream",
+        user_request="start",
+        workflow_definitions=[
+            WorkflowNodeDefinition(key="outline", label="Outline", node_type="text", depends_on=[]),
+            WorkflowNodeDefinition(key="script", label="Script", node_type="text", depends_on=["outline"]),
+            WorkflowNodeDefinition(key="storyboard", label="Storyboard", node_type="plan", depends_on=["script"]),
+        ],
+    )
+    apply_node_update(
+        ctx.workflow, "outline",
+        {"output": '{"title": "OUTLINE_PAYLOAD"}'},
+        updated_by="agent", last_agent="outline_agent",
+    )
+    apply_node_update(
+        ctx.workflow, "script",
+        {"output": '{"scenes": ["SCRIPT_PAYLOAD"]}'},
+        updated_by="agent", last_agent="script_agent",
+    )
+
+    registry = SupervisorAgentRegistry(
+        agents=[
+            RegisteredAgent(
+                name="storyboard_agent",
+                label="Storyboard",
+                description="Plans shots",
+                node_keys=["storyboard"],
+            )
+        ]
+    )
+
+    async for _ in call_sub_agent(
+        sub_agent_name="storyboard_agent",
+        task_description="Plan shots",
+        supervisor_context=ctx,
+        registry=registry,
+    ):
+        pass
+
+    sub_prompt = _PromptCapturingAgent.captured[0]
+    assert "## 上游产出" in sub_prompt
+    assert "### outline" in sub_prompt
+    assert "OUTLINE_PAYLOAD" in sub_prompt
+    assert "### script" in sub_prompt
+    assert "SCRIPT_PAYLOAD" in sub_prompt
+    # 自己的节点不在上游列表里
+    assert "### storyboard" not in sub_prompt
+    # 用 json 围栏
+    assert "```json" in sub_prompt
+
+
+@pytest.mark.asyncio
+async def test_call_sub_agent_explicit_context_snapshot_composes_with_workflow_block(monkeypatch):
+    """显式 context_snapshot 与工作流自动注入是叠加关系，顺序：task → context_snapshot → workflow。"""
+    _PromptCapturingAgent.captured = []
+    monkeypatch.setattr(
+        "app.core.supervisor.tools.create_agent",
+        lambda **kwargs: _PromptCapturingAgent(),
+    )
+
+    ctx = SupervisorContext(
+        supervisor_session_id="sv-ctx-compose",
+        user_request="start",
+        workflow_definitions=[
+            WorkflowNodeDefinition(key="outline", label="Outline", node_type="text", depends_on=[]),
+        ],
+    )
+    registry = SupervisorAgentRegistry(
+        agents=[
+            RegisteredAgent(
+                name="outline_agent",
+                label="Outline",
+                description="Writes outlines",
+                node_keys=["outline"],
+            )
+        ]
+    )
+
+    async for _ in call_sub_agent(
+        sub_agent_name="outline_agent",
+        task_description="MARK_TASK",
+        context_snapshot="MARK_SNAPSHOT",
+        supervisor_context=ctx,
+        registry=registry,
+    ):
+        pass
+
+    sub_prompt = _PromptCapturingAgent.captured[0]
+    task_idx = sub_prompt.index("MARK_TASK")
+    snap_idx = sub_prompt.index("## 参考上下文")
+    snap_payload_idx = sub_prompt.index("MARK_SNAPSHOT")
+    flow_idx = sub_prompt.index("## 工作流状态")
+    assert task_idx < snap_idx < snap_payload_idx < flow_idx
+
+

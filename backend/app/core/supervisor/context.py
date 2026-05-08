@@ -42,10 +42,15 @@ class ExecutionRecord(BaseModel):
 
 class SupervisorContext(BaseModel):
     """
-    Supervisor 的工作内存，所有 SubAgent 可访问。
+    Supervisor 的工作内存。
 
-    注意：SubAgent 不直接访问此对象。
-    Supervisor 通过 call_sub_agent 的 context_snapshot 参数选择性注入必要数据。
+    SubAgent **不直接持有这个对象的引用**——独立 session、独立 in-memory 历史。但
+    ``call_sub_agent`` 在启动每个 sub-agent 之前会把当前 ``workflow`` 快照编码到
+    sub_prompt 末尾（状态表 + 已完成上游节点的 raw_output），下游 sub-agent 因此能
+    感知到 "我处于 8 步链路第 N 步" + "上游各节点的完整产物"。
+
+    Supervisor 仍可通过 ``call_sub_agent.context_snapshot`` 显式传额外信息（跨会话
+    memory 召回、用户补充、特定字段强调等），自动注入 + 显式注入是叠加关系。
     """
 
     supervisor_session_id: str = Field(..., description="Supervisor session ID")
