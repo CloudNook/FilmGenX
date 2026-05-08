@@ -1534,11 +1534,18 @@ function SubAgentDrawerTrigger({
   userFallback: string;
 }) {
   const [open, setOpen] = useState(false);
+  // session 复用 + start 原地改写成 end 的模式下，"是否还在运行"看该 session
+  // 最后一个 sub_agent_* 事件的 kind：start = 进行中，end = 已完成。
   const runningCount = useMemo(
     () =>
-      sessions.filter(
-        (s) => !s.entries.some((e) => e.kind === 'sub_agent_end'),
-      ).length,
+      sessions.filter((s) => {
+        const last = s.entries
+          .filter(
+            (e) => e.kind === 'sub_agent_start' || e.kind === 'sub_agent_end',
+          )
+          .at(-1);
+        return last?.kind === 'sub_agent_start';
+      }).length,
     [sessions],
   );
   const completedCount = sessions.length - runningCount;
@@ -1636,7 +1643,11 @@ function SubAgentSessionCard({
   entries: SupervisorDisplayEntry[];
   userFallback: string;
 }) {
-  const hasCompleted = entries.some((entry) => entry.kind === 'sub_agent_end');
+  // session 复用 + 原地 mutation 模式：最后一个 sub_agent_* 事件是 end → 已完成。
+  const lastLifecycle = entries
+    .filter((e) => e.kind === 'sub_agent_start' || e.kind === 'sub_agent_end')
+    .at(-1);
+  const hasCompleted = lastLifecycle?.kind === 'sub_agent_end';
   const hasError = entries.some(
     (entry) =>
       entry.kind === 'error' ||

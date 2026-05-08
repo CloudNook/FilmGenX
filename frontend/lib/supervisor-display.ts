@@ -227,10 +227,19 @@ export function appendSupervisorDisplayEvent(
 
   if (event.type === 'sub_agent_start') {
     const nextEntries = completeLatestThinking(entries, event.source, event.session_id);
+    // Supervisor 反复 call 同一个 sub-agent 时 session_id 会复用（agent loop 才能
+    // 自动加载历史对话）。前端用"该 session 已发生的 start/end 事件总数"作 turn 序号，
+    // 让每一轮的 start/end 卡片有唯一 React key。end 事件到达时会保留这个 id 把 start
+    // 原地改写成 end，所以一轮始终是一张卡片。
+    const turnIndex = nextEntries.filter(
+      (e) =>
+        (e.kind === 'sub_agent_start' || e.kind === 'sub_agent_end') &&
+        e.sessionId === event.session_id,
+    ).length;
     return [
       ...nextEntries,
       {
-        id: `sub-agent-start-${event.session_id}`,
+        id: `sub-agent-${event.session_id}-${turnIndex}`,
         kind: 'sub_agent_start',
         source: event.source || 'supervisor',
         subAgentName: event.sub_agent_name,
@@ -294,32 +303,33 @@ export function appendSupervisorDisplayEvent(
 
   if (event.type === 'sub_agent_end') {
     const baseEntries = completeLatestThinking(entries, event.source, event.session_id);
+    // 找该 session 最近一个还没"收尾"的 start，把它原地改写成 end ——同 session 多
+    // 轮调用时，每一轮各自的 start 已经按 turn 序号编 id（见 sub_agent_start 分支），
+    // 所以不会撞车。每一轮始终是 1 张卡片：先 loader（start），完成后变成可折叠的
+    // 结果卡片（end），不会出现僵尸 loader。
     const existingIndex = baseEntries.findLastIndex(
       (entry) =>
         entry.sessionId === event.session_id &&
         entry.kind === 'sub_agent_start',
     );
+    const matchingStart = existingIndex !== -1 ? baseEntries[existingIndex] : null;
     const nextEntry: SupervisorDisplayEntry = {
-      id: `sub-agent-start-${event.session_id}`,
+      id: matchingStart?.id || `sub-agent-${event.session_id}-orphan-end`,
       kind: 'sub_agent_end',
       source: event.source || 'supervisor',
       subAgentName: event.sub_agent_name,
       sessionId: event.session_id,
       result: event.result,
+      taskDescription: matchingStart?.taskDescription,
     };
 
     if (existingIndex === -1) {
       return [...baseEntries, nextEntry];
     }
 
-    const existingEntry = baseEntries[existingIndex];
     return [
       ...baseEntries.slice(0, existingIndex),
-      {
-        ...existingEntry,
-        ...nextEntry,
-        taskDescription: existingEntry.taskDescription,
-      },
+      { ...baseEntries[existingIndex], ...nextEntry },
       ...baseEntries.slice(existingIndex + 1),
     ];
   }
