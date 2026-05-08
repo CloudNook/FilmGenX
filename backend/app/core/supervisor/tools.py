@@ -255,32 +255,18 @@ async def call_sub_agent(
         )
         return
 
-    # Session 复用：同一个 supervisor 会话内多次调同一个 sub-agent 时，复用上次
-    # session_id。agent loop 的 _load_history 会按 session_id 从 DB 读回所有历史
-    # 消息（task / 候选输出 / reviewer feedback），LLM 看到的是连续对话而不是每次
-    # 从零开始。第一次调时才分配新 uuid。
-    existing_session = supervisor_context.sub_agent_sessions.get(sub_agent_name)
-    known_sessions_keys = list(supervisor_context.sub_agent_sessions.keys())
-    if existing_session is not None:
-        sub_session_id = existing_session.session_id
-        logger.info(
-            "[call_sub_agent] REUSE session %s for %s (turn N+1, supervisor_session=%s, "
-            "known_sub_sessions=%s)",
-            sub_session_id,
-            sub_agent_name,
-            supervisor_context.supervisor_session_id,
-            known_sessions_keys,
-        )
-    else:
-        sub_session_id = f"sub-{sub_agent_name}-{str(uuid4())[:8]}"
-        logger.info(
-            "[call_sub_agent] NEW session %s for %s (first call this supervisor turn, "
-            "supervisor_session=%s, known_sub_sessions=%s)",
-            sub_session_id,
-            sub_agent_name,
-            supervisor_context.supervisor_session_id,
-            known_sessions_keys,
-        )
+    # Deterministic session_id：同一 supervisor session 下同名 sub-agent 永远是同一
+    # 个 session_id。agent loop 的 _load_history 按 session_id 从 DB 读回历史，无论
+    # 是同 stream 内多次调用，还是跨 stream（用户重启 / 重发消息），LLM 都能直接
+    # 接续之前的对话——不用持久化 sub_agent_sessions 字典或 DB 反查。
+    # 不同 supervisor session（新建会话）天然按 supervisor_session_id 隔离。
+    sub_session_id = f"sub-{sub_agent_name}-{supervisor_context.supervisor_session_id}"
+    logger.info(
+        "[call_sub_agent] dispatch %s under session_id=%s (supervisor_session=%s)",
+        sub_agent_name,
+        sub_session_id,
+        supervisor_context.supervisor_session_id,
+    )
 
     sub_prompt = task_description
     if context_snapshot:
