@@ -559,3 +559,112 @@ async def test_call_sub_agent_explicit_context_snapshot_composes_with_workflow_b
     assert task_idx < snap_idx < snap_payload_idx < flow_idx
 
 
+# --------------------------------------------------------------------------- #
+# Session 复用：同一 supervisor 内多次调同一 sub-agent 应复用 session_id
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_call_sub_agent_reuses_session_for_same_subagent(monkeypatch):
+    """第二次调用同一个 sub-agent 时，session_id 必须复用，让 _load_history
+    能从 DB 把上一轮 task / 候选输出 / reviewer feedback 都读回来。"""
+    captured_session_ids: list[str] = []
+
+    def _fake_create_agent(**kwargs):
+        captured_session_ids.append(kwargs["session_id"])
+        return _FakeAgent()
+
+    monkeypatch.setattr("app.core.supervisor.tools.create_agent", _fake_create_agent)
+
+    ctx = SupervisorContext(
+        supervisor_session_id="sv-reuse-001",
+        user_request="start",
+        workflow_definitions=[
+            WorkflowNodeDefinition(
+                key="outline",
+                label="Outline",
+                node_type="text",
+                depends_on=[],
+            ),
+        ],
+    )
+    registry = SupervisorAgentRegistry(
+        agents=[
+            RegisteredAgent(
+                name="outline_agent",
+                label="Outline",
+                description="Writes outlines",
+                node_keys=["outline"],
+            )
+        ]
+    )
+
+    # 第一次调用：分配新 session
+    async for _ in call_sub_agent(
+        sub_agent_name="outline_agent",
+        task_description="first attempt",
+        supervisor_context=ctx,
+        registry=registry,
+    ):
+        pass
+
+    # 第二次调用：必须复用同一 session_id
+    async for _ in call_sub_agent(
+        sub_agent_name="outline_agent",
+        task_description="second attempt",
+        supervisor_context=ctx,
+        registry=registry,
+    ):
+        pass
+
+    assert len(captured_session_ids) == 2
+    assert captured_session_ids[0] == captured_session_ids[1], (
+        f"session 应复用，但两次拿到不同 session_id: {captured_session_ids}"
+    )
+    assert captured_session_ids[0].startswith("sub-outline_agent-")
+
+
+@pytest.mark.asyncio
+async def test_call_sub_agent_independent_sessions_per_subagent(monkeypatch):
+    """不同 sub-agent 之间 session_id 仍然彼此独立。"""
+    captured_session_ids: dict[str, str] = {}
+
+    def _fake_create_agent(**kwargs):
+        captured_session_ids[kwargs["agent_name"]] = kwargs["session_id"]
+        return _FakeAgent()
+
+    monkeypatch.setattr("app.core.supervisor.tools.create_agent", _fake_create_agent)
+
+    ctx = SupervisorContext(
+        supervisor_session_id="sv-isolate-001",
+        user_request="start",
+        workflow_definitions=[
+            WorkflowNodeDefinition(key="outline", label="Outline", node_type="text", depends_on=[]),
+            WorkflowNodeDefinition(key="script", label="Script", node_type="text", depends_on=["outline"]),
+        ],
+    )
+    registry = SupervisorAgentRegistry(
+        agents=[
+            RegisteredAgent(name="outline_agent", label="Outline", description="…", node_keys=["outline"]),
+            RegisteredAgent(name="script_agent", label="Script", description="…", node_keys=["script"]),
+        ]
+    )
+
+    async for _ in call_sub_agent(
+        sub_agent_name="outline_agent",
+        task_description="o",
+        supervisor_context=ctx,
+        registry=registry,
+    ):
+        pass
+    async for _ in call_sub_agent(
+        sub_agent_name="script_agent",
+        task_description="s",
+        supervisor_context=ctx,
+        registry=registry,
+    ):
+        pass
+
+    assert captured_session_ids["outline_agent"] != captured_session_ids["script_agent"]
+
+
