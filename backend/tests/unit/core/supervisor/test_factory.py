@@ -20,6 +20,11 @@ def test_create_supervisor_builds_default_registry_and_workflow():
         "outline_agent",
         "script_agent",
         "storyboard_agent",
+        "visual_style_agent",
+        "character_ref_agent",
+        "scene_ref_agent",
+        "frame_prompt_agent",
+        "video_prompt_agent",
     ]
     assert supervisor.context.workflow is not None
     assert supervisor.context.workflow.nodes["outline"].status == "ready"

@@ -883,7 +883,7 @@ export default function WorkspacePage({
                         className="w-full text-xs bg-secondary border border-border rounded-md px-2 py-1.5 text-foreground focus:outline-none focus:border-primary/50 disabled:opacity-50"
                       >
                         <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
-                        <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+                        <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro Preview</option>
                       </select>
                     </div>
                     <div>

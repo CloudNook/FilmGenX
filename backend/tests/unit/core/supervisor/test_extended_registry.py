@@ -1,0 +1,150 @@
+"""
+Phase 1 扩展链路装配回归（路径 B）。
+
+钉死：
+- workflow 含 8 个节点 + 正确依赖链
+- registry 含 8 个 sub-agent，5 个新 agent prompt / response_schema / reviewer 装载到位
+- frame_prompt / video_prompt 在 default skill 工具之外额外挂载 media tools
+- 其他 5 个 agent 不挂 media tools
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from app.agents import (
+    REVIEWER_PROMPT,
+    SUB_AGENT_PROMPT,
+    SUB_AGENT_RESPONSE_SCHEMA,
+)
+from app.core.supervisor.registry import (
+    build_default_registry,
+    build_default_workflow_definitions,
+)
+
+
+EXPECTED_NODES = [
+    "outline",
+    "script",
+    "storyboard",
+    "visual_style",
+    "character_ref",
+    "scene_ref",
+    "frame_prompt",
+    "video_prompt",
+]
+
+EXPECTED_DEPENDENCIES = {
+    "outline": [],
+    "script": ["outline"],
+    "storyboard": ["script"],
+    "visual_style": ["storyboard"],
+    "character_ref": ["visual_style"],
+    "scene_ref": ["character_ref"],
+    "frame_prompt": ["scene_ref"],
+    "video_prompt": ["frame_prompt"],
+}
+
+NEW_AGENTS = [
+    "visual_style_agent",
+    "character_ref_agent",
+    "scene_ref_agent",
+    "frame_prompt_agent",
+    "video_prompt_agent",
+]
+
+ALL_AGENTS = [
+    "outline_agent",
+    "script_agent",
+    "storyboard_agent",
+    *NEW_AGENTS,
+]
+
+
+def test_workflow_definitions_contain_eight_nodes_in_order():
+    nodes = build_default_workflow_definitions()
+    assert [n.key for n in nodes] == EXPECTED_NODES
+
+
+def test_workflow_definitions_match_expected_dependencies():
+    nodes = {n.key: n for n in build_default_workflow_definitions()}
+    for key, deps in EXPECTED_DEPENDENCIES.items():
+        assert nodes[key].depends_on == deps, f"{key} 依赖错位"
+
+
+def test_default_registry_contains_eight_agents():
+    registry = build_default_registry()
+    assert registry.agent_names() == ALL_AGENTS
+
+
+@pytest.mark.parametrize("name", NEW_AGENTS)
+def test_new_agent_has_domain_prompt_schema_reviewer(name: str):
+    registry = build_default_registry()
+    agent = registry.get(name)
+    assert agent is not None
+
+    assert agent.prompt == SUB_AGENT_PROMPT[name]
+    assert len(agent.prompt) > 200, f"{name} prompt 太短，可能退化成占位"
+
+    assert agent.response_schema is not None
+    assert agent.response_schema == SUB_AGENT_RESPONSE_SCHEMA[name]
+    assert "properties" in agent.response_schema
+
+    assert agent.reviewer is not None
+    assert agent.reviewer.agent.config.prompt == REVIEWER_PROMPT[name]
+    assert agent.reviewer.min_score == 7.5
+    assert agent.reviewer.max_revision_rounds == 2
+    assert agent.reviewer.on_exhausted == "accept_last"
+
+
+def _tool_names(agent) -> list[str]:
+    return [t.get("name") for t in agent.tools]
+
+
+def test_frame_prompt_agent_has_image_tool():
+    agent = build_default_registry().get("frame_prompt_agent")
+    names = _tool_names(agent)
+    assert "load_skill" in names
+    assert "load_skill_reference" in names
+    assert "generate_image" in names
+    # 不应混进视频工具或老的拆分工具
+    assert "generate_video" not in names
+    assert "generate_image_pro" not in names
+    assert "generate_image_flash" not in names
+
+
+def test_video_prompt_agent_has_video_tool():
+    agent = build_default_registry().get("video_prompt_agent")
+    names = _tool_names(agent)
+    assert "load_skill" in names
+    assert "load_skill_reference" in names
+    assert "generate_video" in names
+    assert "generate_image" not in names
+    assert "generate_video_text_to_video" not in names
+    assert "generate_video_image_to_video" not in names
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "outline_agent",
+        "script_agent",
+        "storyboard_agent",
+        "visual_style_agent",
+        "character_ref_agent",
+        "scene_ref_agent",
+    ],
+)
+def test_other_agents_only_have_default_skill_tools(name: str):
+    agent = build_default_registry().get(name)
+    names = _tool_names(agent)
+    assert names == ["load_skill", "load_skill_reference"], (
+        f"{name} 不应挂载 media 工具，但挂了 {names}"
+    )
+
+
+def test_node_keys_align_with_workflow_nodes():
+    nodes = {n.key for n in build_default_workflow_definitions()}
+    for agent in build_default_registry().agents:
+        for key in agent.node_keys:
+            assert key in nodes, f"{agent.name} 引用的 node {key} 不在 workflow 里"

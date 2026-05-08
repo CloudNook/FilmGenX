@@ -28,6 +28,17 @@ import {
   useAgentSchema,
   type JsonSchema,
 } from '@/lib/agent-schemas';
+// 没有专用 renderer 的 sub-agent（visual_style / character_ref / scene_ref /
+// frame_prompt / video_prompt 等）走 schema-aware 通用渲染：用 schema.title 当卡片标题，
+// 内容交给 ToolPayloadView 递归展开。等积累足够 prompt 调通的 fixture 再回头写专用
+// renderer，避免在字段还在调整时重复造样式。
+const GENERIC_AGENT_NAMES = new Set([
+  'visual_style_agent',
+  'character_ref_agent',
+  'scene_ref_agent',
+  'frame_prompt_agent',
+  'video_prompt_agent',
+]);
 
 /**
  * 字段标签：优先用 schema 的 title，缺失时退到 fallback；都没有就用 field key 原文。
@@ -211,6 +222,15 @@ export function SubAgentResultCard({
           }
           break;
       }
+      // 5 个新 sub-agent（visual_style / character_ref / scene_ref / frame_prompt /
+      // video_prompt）暂未实现专用 renderer，走 schema-aware 通用展示
+      if (
+        GENERIC_AGENT_NAMES.has(subAgentName) &&
+        parsed &&
+        typeof parsed === 'object'
+      ) {
+        return <GenericSchemaRenderer data={parsed} schema={schema} />;
+      }
       // 已成功 parse 为 JSON 但 schema 不对：退回 JSON pretty print
       return <JsonFallback value={parsed} />;
     }
@@ -328,6 +348,213 @@ function JsonFallback({ value }: { value: unknown }) {
       {JSON.stringify(value, null, 2)}
     </pre>
   );
+}
+
+/**
+ * Schema-aware 通用渲染器。
+ *
+ * 与 outline / script / storyboard 专用 renderer 同体系：
+ * - 顶层 ``StructuredShell``（title 取 schema.title，subtitle 取 description 或数组计数）
+ * - 标量字段走 ``Field`` 行（label 优先 schema.title，缺失时人化字段名）
+ * - 字符串数组 → ``Badge`` 列
+ * - 对象数组 → ``SectionHeading`` + 一组小卡片（每张卡片再递归渲染）
+ * - 嵌套对象 → ``SectionHeading`` + 子卡片
+ *
+ * 字段顺序保持 LLM 输出原序；scalar 字段先渲染、复杂字段后渲染。
+ */
+function GenericSchemaRenderer({
+  data,
+  schema,
+}: {
+  data: unknown;
+  schema: JsonSchema | null;
+}) {
+  if (!isPlainObject(data)) {
+    return <JsonFallback value={data} />;
+  }
+  const title =
+    (schema && typeof schema.title === 'string' && schema.title) || '结构化输出';
+  const subtitle = buildSubtitle(data, schema);
+  return (
+    <StructuredShell title={title} subtitle={subtitle}>
+      <SchemaObjectBody data={data} rootSchema={schema} path={[]} />
+    </StructuredShell>
+  );
+}
+
+function SchemaObjectBody({
+  data,
+  rootSchema,
+  path,
+}: {
+  data: Record<string, unknown>;
+  rootSchema: JsonSchema | null;
+  path: string[];
+}) {
+  const entries = Object.entries(data).filter(([, v]) => !isEmpty(v));
+  const scalarEntries = entries.filter(([, v]) => isScalar(v));
+  const complexEntries = entries.filter(([, v]) => !isScalar(v));
+
+  return (
+    <div className="space-y-3">
+      {scalarEntries.length > 0 && (
+        <div className="space-y-2.5">
+          {scalarEntries.map(([k, v]) => (
+            <Field
+              key={k}
+              label={fieldLabel(rootSchema, [...path, k], humanizeKey(k))}
+            >
+              {renderScalar(v)}
+            </Field>
+          ))}
+        </div>
+      )}
+      {complexEntries.map(([k, v]) => (
+        <ComplexSection
+          key={k}
+          title={fieldLabel(rootSchema, [...path, k], humanizeKey(k))}
+          value={v}
+          rootSchema={rootSchema}
+          path={[...path, k]}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ComplexSection({
+  title,
+  value,
+  rootSchema,
+  path,
+}: {
+  title: string;
+  value: unknown;
+  rootSchema: JsonSchema | null;
+  path: string[];
+}) {
+  if (Array.isArray(value) && value.length > 0 && value.every(isScalar)) {
+    return (
+      <div className="space-y-2">
+        <SectionHeading>{title}</SectionHeading>
+        <div className="flex flex-wrap gap-1.5">
+          {value.map((v, i) => (
+            <Badge key={i} variant="secondary" className="text-xs">
+              {String(v)}
+            </Badge>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (Array.isArray(value) && value.length > 0 && value.every(isPlainObject)) {
+    return (
+      <div className="space-y-2">
+        <SectionHeading>{`${title} · ${value.length}`}</SectionHeading>
+        <div className="space-y-2">
+          {value.map((item, i) => (
+            <div
+              key={i}
+              className="rounded-md border border-border/60 bg-background/80 px-3 py-2.5"
+            >
+              <SchemaObjectBody
+                data={item as Record<string, unknown>}
+                rootSchema={rootSchema}
+                path={path}
+              />
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (isPlainObject(value)) {
+    return (
+      <div className="space-y-2">
+        <SectionHeading>{title}</SectionHeading>
+        <div className="rounded-md border border-border/60 bg-background/80 px-3 py-2.5">
+          <SchemaObjectBody
+            data={value}
+            rootSchema={rootSchema}
+            path={path}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <SectionHeading>{title}</SectionHeading>
+      <JsonFallback value={value} />
+    </div>
+  );
+}
+
+function isScalar(v: unknown): boolean {
+  return v === null || typeof v !== 'object';
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+function isEmpty(v: unknown): boolean {
+  if (v === null || v === undefined) return true;
+  if (typeof v === 'string' && v.trim() === '') return true;
+  if (Array.isArray(v) && v.length === 0) return true;
+  if (isPlainObject(v) && Object.keys(v).length === 0) return true;
+  return false;
+}
+
+function renderScalar(v: unknown): ReactNode {
+  if (v === null || v === undefined || v === '') {
+    return <span className="italic text-muted-foreground">—</span>;
+  }
+  if (typeof v === 'boolean' || typeof v === 'number') {
+    return (
+      <Badge variant="outline" className="font-mono text-[10px]">
+        {String(v)}
+      </Badge>
+    );
+  }
+  const s = String(v);
+  if (s.length > 80) {
+    return (
+      <p className="text-sm leading-6 whitespace-pre-wrap break-words">
+        {s}
+      </p>
+    );
+  }
+  return <span className="text-sm">{s}</span>;
+}
+
+function humanizeKey(key: string): string {
+  return key
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function buildSubtitle(
+  data: Record<string, unknown>,
+  schema: JsonSchema | null,
+): string | undefined {
+  if (
+    schema &&
+    typeof schema.description === 'string' &&
+    schema.description.length > 0 &&
+    schema.description.length < 120
+  ) {
+    return schema.description;
+  }
+  const arrays = Object.entries(data).filter(([, v]) => Array.isArray(v));
+  if (arrays.length === 1) {
+    const [k, v] = arrays[0];
+    return `${humanizeKey(k)} · ${(v as unknown[]).length}`;
+  }
+  return undefined;
 }
 
 function RawTextFallback({ text }: { text: string }) {

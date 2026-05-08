@@ -14,12 +14,16 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, Depends
 
-from app.api.deps import get_current_user
-from app.models.user import User
+from app.api.deps import get_current_user_id
 from app.schemas.agent_outputs import (
+    CharacterRefSet,
+    FramePromptSet,
     OutlineOutput,
+    SceneRefSet,
     ScriptOutput,
     StoryboardOutput,
+    VideoPromptSet,
+    VisualStyleGuide,
 )
 
 router = APIRouter()
@@ -30,6 +34,11 @@ _SUB_AGENT_OUTPUT_SCHEMAS = {
     "outline_agent": OutlineOutput,
     "script_agent": ScriptOutput,
     "storyboard_agent": StoryboardOutput,
+    "visual_style_agent": VisualStyleGuide,
+    "character_ref_agent": CharacterRefSet,
+    "scene_ref_agent": SceneRefSet,
+    "frame_prompt_agent": FramePromptSet,
+    "video_prompt_agent": VideoPromptSet,
 }
 
 
@@ -38,7 +47,7 @@ _SUB_AGENT_OUTPUT_SCHEMAS = {
     summary="获取所有 sub-agent 输出 schema",
 )
 def list_agent_schemas(
-    _user: User = Depends(get_current_user),
+    _user_id: int = Depends(get_current_user_id),
 ) -> Dict[str, Dict[str, Any]]:
     """
     返回 ``{sub_agent_name: <JSON Schema>}`` 字典。

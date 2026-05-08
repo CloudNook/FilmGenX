@@ -1220,7 +1220,7 @@ export default function SupervisorPage({
                         className="w-full text-xs bg-secondary border border-border rounded-md px-2 py-1.5 text-foreground focus:outline-none focus:border-primary/50 disabled:opacity-50"
                       >
                         <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
-                        <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+                        <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro Preview</option>
                       </select>
                     </div>
                     <div>
@@ -1379,6 +1379,11 @@ const STRUCTURED_SUB_AGENTS = new Set([
   'outline_agent',
   'script_agent',
   'storyboard_agent',
+  'visual_style_agent',
+  'character_ref_agent',
+  'scene_ref_agent',
+  'frame_prompt_agent',
+  'video_prompt_agent',
 ]);
 
 function isStructuredSubAgent(source: string | null | undefined): boolean {

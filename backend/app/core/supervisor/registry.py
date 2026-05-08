@@ -89,26 +89,58 @@ class SupervisorAgentRegistry(BaseModel):
 
 
 def build_default_workflow_definitions() -> list[WorkflowNodeDefinition]:
+    """完整生产链路（plan b）的 8 个节点。
+
+    Layer 1 创作层：outline → script → storyboard
+    Layer 2 视觉锚点：visual_style
+    Layer 3 参考图设计：character_ref → scene_ref（顺序跑；并行编排是 Phase 2）
+    Layer 4 提示词层：frame_prompt → video_prompt
+    """
     return [
+        # Layer 1
         WorkflowNodeDefinition(
-            key="outline",
-            label="Outline",
-            node_type="text",
-            depends_on=[],
+            key="outline", label="Outline", node_type="text", depends_on=[],
         ),
         WorkflowNodeDefinition(
-            key="script",
-            label="Script",
-            node_type="text",
-            depends_on=["outline"],
+            key="script", label="Script", node_type="text", depends_on=["outline"],
         ),
         WorkflowNodeDefinition(
-            key="storyboard",
-            label="Storyboard",
-            node_type="plan",
-            depends_on=["script"],
+            key="storyboard", label="Storyboard", node_type="plan", depends_on=["script"],
+        ),
+        # Layer 2
+        WorkflowNodeDefinition(
+            key="visual_style", label="Visual Style", node_type="text", depends_on=["storyboard"],
+        ),
+        # Layer 3
+        WorkflowNodeDefinition(
+            key="character_ref", label="Character Ref", node_type="plan", depends_on=["visual_style"],
+        ),
+        WorkflowNodeDefinition(
+            key="scene_ref", label="Scene Ref", node_type="plan", depends_on=["character_ref"],
+        ),
+        # Layer 4
+        WorkflowNodeDefinition(
+            key="frame_prompt", label="Frame Prompt", node_type="plan", depends_on=["scene_ref"],
+        ),
+        WorkflowNodeDefinition(
+            key="video_prompt", label="Video Prompt", node_type="plan", depends_on=["frame_prompt"],
         ),
     ]
+
+
+def _resolve_tool_schemas(extra_tool_names: list[str]) -> list[dict[str, Any]]:
+    """默认 skill 工具 + 额外指定的工具。命中 extra 的工具不存在时记 warning。"""
+    schemas = list(_default_sub_agent_tool_schemas())
+    for tool_name in extra_tool_names:
+        tool = ToolRegistry.get(tool_name)
+        if tool is None:
+            logger.warning(
+                "[registry] extra tool %r not registered; skipping for sub-agent injection",
+                tool_name,
+            )
+            continue
+        schemas.append(tool.get_schema())
+    return schemas
 
 
 def _build_registered_agent(
@@ -117,17 +149,24 @@ def _build_registered_agent(
     label: str,
     description: str,
     node_keys: list[str],
+    extra_tool_names: list[str] | None = None,
 ) -> RegisteredAgent:
-    """从 app.agents 装配 prompt / schema / reviewer，构造一个 RegisteredAgent。"""
+    """从 app.agents 装配 prompt / schema / reviewer，构造一个 RegisteredAgent。
+
+    Args:
+        extra_tool_names: 在默认 skill 工具之外，额外挂载到此 sub-agent 的工具名列表。
+            目前用于给 frame_prompt_agent / video_prompt_agent 暴露 media gen 工具。
+    """
     return RegisteredAgent(
+        model="gemini-3.1-pro-preview",
         name=name,
         label=label,
         description=description,
         node_keys=node_keys,
         prompt=SUB_AGENT_PROMPT[name],
         response_schema=SUB_AGENT_RESPONSE_SCHEMA[name],
-        # 默认装载 load_skill / load_skill_reference，让 sub-agent 真的能消费 L2/L3
-        tools=_default_sub_agent_tool_schemas(),
+        # 默认装载 load_skill / load_skill_reference + 可选 extra（如 media gen 工具）
+        tools=_resolve_tool_schemas(extra_tool_names or []),
         reviewer=create_reviewer_agent(
             prompt=REVIEWER_PROMPT[name],
             criteria=REVIEWER_CRITERIA[name],
@@ -139,8 +178,15 @@ def _build_registered_agent(
 
 
 def build_default_registry() -> SupervisorAgentRegistry:
+    """完整生产链路（plan b）的 8 个 sub-agent。
+
+    frame_prompt_agent 额外挂 ``generate_image``，video_prompt_agent 额外挂
+    ``generate_video``——本期只支持文字驱动，等 project-level memory 落地后再加
+    reference_assets 入参（参见 docs/engineering/TODO.md）。其它 agent 仅有默认 skill 工具。
+    """
     return SupervisorAgentRegistry(
         agents=[
+            # Layer 1 创作层
             _build_registered_agent(
                 name="outline_agent",
                 label="Outline Agent",
@@ -158,6 +204,41 @@ def build_default_registry() -> SupervisorAgentRegistry:
                 label="Storyboard Agent",
                 description="Creates shot-group and storyboard plans",
                 node_keys=["storyboard"],
+            ),
+            # Layer 2 视觉锚点
+            _build_registered_agent(
+                name="visual_style_agent",
+                label="Visual Style Agent",
+                description="Defines global visual anchor (palette / lighting / composition / art style)",
+                node_keys=["visual_style"],
+            ),
+            # Layer 3 参考图设计
+            _build_registered_agent(
+                name="character_ref_agent",
+                label="Character Ref Agent",
+                description="Designs character reference image prompts (base + expressions + outfits)",
+                node_keys=["character_ref"],
+            ),
+            _build_registered_agent(
+                name="scene_ref_agent",
+                label="Scene Ref Agent",
+                description="Designs scene reference image prompts (deduped by location, with time variants)",
+                node_keys=["scene_ref"],
+            ),
+            # Layer 4 提示词层
+            _build_registered_agent(
+                name="frame_prompt_agent",
+                label="Frame Prompt Agent",
+                description="Produces per-shot first-frame image prompts ready for gemini image gen",
+                node_keys=["frame_prompt"],
+                extra_tool_names=["generate_image"],
+            ),
+            _build_registered_agent(
+                name="video_prompt_agent",
+                label="Video Prompt Agent",
+                description="Produces per-shot text-to-video prompts ready for Kling",
+                node_keys=["video_prompt"],
+                extra_tool_names=["generate_video"],
             ),
         ]
     )
