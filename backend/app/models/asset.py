@@ -6,14 +6,11 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
 if TYPE_CHECKING:
-    from app.models.character import Character
-    from app.models.location import Location
     from app.models.project import Project
-    from app.models.shot import Shot
 
 
 class Asset(Base):
-    """Asset metadata for uploaded and generated files."""
+    """Project-scoped asset (image / video / audio / reference)."""
 
     __tablename__ = "assets"
 
@@ -22,24 +19,6 @@ class Asset(Base):
         nullable=False,
         index=True,
         comment="Project ID",
-    )
-    shot_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("shots.id", ondelete="CASCADE"),
-        nullable=True,
-        index=True,
-        comment="Related shot ID",
-    )
-    location_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("locations.id", ondelete="SET NULL"),
-        nullable=True,
-        index=True,
-        comment="Related location ID",
-    )
-    character_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("characters.id", ondelete="SET NULL"),
-        nullable=True,
-        index=True,
-        comment="Related character ID",
     )
 
     asset_code: Mapped[str] = mapped_column(
@@ -89,20 +68,4 @@ class Asset(Base):
     )
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="Description")
 
-    version: Mapped[int] = mapped_column(
-        Integer,
-        nullable=False,
-        default=1,
-        comment="Asset version number",
-    )
-    is_current: Mapped[bool] = mapped_column(comment="Whether this is the current version", default=True)
-    parent_asset_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("assets.id", ondelete="SET NULL"),
-        nullable=True,
-        comment="Previous asset version ID",
-    )
-
     project: Mapped["Project"] = relationship("Project", back_populates="assets")
-    shot: Mapped[Optional["Shot"]] = relationship("Shot", back_populates="assets")
-    location: Mapped[Optional["Location"]] = relationship("Location", back_populates="assets")
-    character: Mapped[Optional["Character"]] = relationship("Character", back_populates="assets")

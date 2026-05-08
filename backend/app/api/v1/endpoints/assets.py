@@ -1,16 +1,19 @@
-"""Assets API endpoints."""
+"""Assets API endpoints.
+
+仅暴露 project 级素材增删查与上传，按 asset_type 区分图片 / 视频 / 音频 / 参考。
+不再绑定 shot / character / location 等业务子表。
+"""
 
 import os
 import uuid
 from datetime import datetime
 from typing import Dict, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user_id, get_db
 from app.repositories.asset import AssetRepository
-from app.repositories.location import LocationRepository
 from app.repositories.project import ProjectRepository
 from app.schemas.asset import AssetCreate, AssetResponse
 from app.schemas.base import PageResponse
@@ -26,30 +29,13 @@ async def _require_project(project_id: int, user_id: int, db: AsyncSession):
     return project
 
 
-async def _resolve_location_scope(
-    db: AsyncSession,
-    project_id: int,
-    *,
-    location_id: Optional[int],
-) -> Optional[int]:
-    """Validate location scope."""
-    if location_id is not None:
-        location = await LocationRepository(db).get_by_id_and_project(location_id, project_id)
-        if not location:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="场景不存在")
-    return location_id
-
-
 @router.get("", response_model=PageResponse[AssetResponse], summary="获取素材列表")
 async def list_assets(
     project_id: int,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     asset_type: Optional[str] = Query(None, description="按类型过滤"),
-    shot_id: Optional[int] = Query(None, description="按镜头过滤"),
-    location_id: Optional[int] = Query(None, description="按场景过滤"),
     source: Optional[str] = Query(None, description="按来源过滤"),
-    is_current: Optional[bool] = Query(None, description="是否仅返回当前版本"),
     db: AsyncSession = Depends(get_db),
     user_id: int = Depends(get_current_user_id),
 ):
@@ -58,10 +44,7 @@ async def list_assets(
     items, total = await repo.get_by_project(
         project_id,
         asset_type=asset_type,
-        shot_id=shot_id,
-        location_id=location_id,
         source=source,
-        is_current=is_current,
         page=page,
         page_size=page_size,
     )
@@ -78,17 +61,6 @@ async def get_asset_stats(
     return await AssetRepository(db).get_stats_by_project(project_id)
 
 
-@router.get("/shot/{shot_id}/stats", response_model=Dict[str, int], summary="获取镜头素材统计")
-async def get_shot_asset_stats(
-    project_id: int,
-    shot_id: int,
-    db: AsyncSession = Depends(get_db),
-    user_id: int = Depends(get_current_user_id),
-):
-    await _require_project(project_id, user_id, db)
-    return await AssetRepository(db).get_stats_by_shot(shot_id)
-
-
 @router.post("", response_model=AssetResponse, status_code=status.HTTP_201_CREATED, summary="手动创建素材记录")
 async def create_asset(
     project_id: int,
@@ -97,15 +69,7 @@ async def create_asset(
     user_id: int = Depends(get_current_user_id),
 ):
     await _require_project(project_id, user_id, db)
-    location_id = await _resolve_location_scope(
-        db,
-        project_id,
-        location_id=body.location_id,
-    )
-
     payload = body.model_dump()
-    payload["location_id"] = location_id
-
     asset = await AssetRepository(db).create(project_id=project_id, **payload)
     await db.commit()
     return asset
@@ -165,18 +129,10 @@ ALLOWED_TYPES = {
 async def upload_asset(
     project_id: int,
     file: UploadFile = File(..., description="要上传的文件"),
-    shot_id: Optional[int] = Form(None, description="关联镜头 ID"),
-    location_id: Optional[int] = Form(None, description="关联场景 ID"),
     db: AsyncSession = Depends(get_db),
     user_id: int = Depends(get_current_user_id),
 ):
     await _require_project(project_id, user_id, db)
-
-    location_id = await _resolve_location_scope(
-        db,
-        project_id,
-        location_id=location_id,
-    )
 
     content_type = file.content_type or "application/octet-stream"
     if content_type not in ALLOWED_TYPES:
@@ -205,18 +161,10 @@ async def upload_asset(
     asset_code = f"upload_{timestamp}_{project_id}_{uuid.uuid4().hex[:8]}"
     filename = f"{asset_code}{file_ext}"
 
-    directory = "uploads"
-    if shot_id:
-        directory = f"shots/{shot_id}"
-    elif location_id:
-        directory = f"locations/{location_id}"
-
-    file_url = oss_client.upload_bytes(content, filename=filename, directory=directory)
+    file_url = oss_client.upload_bytes(content, filename=filename, directory=f"projects/{project_id}/uploads")
 
     asset = await AssetRepository(db).create(
         project_id=project_id,
-        shot_id=shot_id,
-        location_id=location_id,
         asset_code=asset_code,
         asset_type=asset_type,
         file_url=file_url,
