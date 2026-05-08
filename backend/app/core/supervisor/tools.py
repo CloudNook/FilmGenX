@@ -260,15 +260,27 @@ async def call_sub_agent(
     # 消息（task / 候选输出 / reviewer feedback），LLM 看到的是连续对话而不是每次
     # 从零开始。第一次调时才分配新 uuid。
     existing_session = supervisor_context.sub_agent_sessions.get(sub_agent_name)
+    known_sessions_keys = list(supervisor_context.sub_agent_sessions.keys())
     if existing_session is not None:
         sub_session_id = existing_session.session_id
         logger.info(
-            "[call_sub_agent] reusing session %s for %s (turn N+1)",
+            "[call_sub_agent] REUSE session %s for %s (turn N+1, supervisor_session=%s, "
+            "known_sub_sessions=%s)",
             sub_session_id,
             sub_agent_name,
+            supervisor_context.supervisor_session_id,
+            known_sessions_keys,
         )
     else:
         sub_session_id = f"sub-{sub_agent_name}-{str(uuid4())[:8]}"
+        logger.info(
+            "[call_sub_agent] NEW session %s for %s (first call this supervisor turn, "
+            "supervisor_session=%s, known_sub_sessions=%s)",
+            sub_session_id,
+            sub_agent_name,
+            supervisor_context.supervisor_session_id,
+            known_sessions_keys,
+        )
 
     sub_prompt = task_description
     if context_snapshot:
