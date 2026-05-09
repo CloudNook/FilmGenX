@@ -17,6 +17,7 @@ from app.core.agent.usage import merge_usage
 from app.core.middleware.chain import AgentMiddleware, MiddlewareChain, MiddlewareContext
 
 if TYPE_CHECKING:
+    from app.core.agent.memory.harness import MemoryHarness
     from app.core.agent.persist.base import PersistStrategy
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,7 @@ class Agent:
         persist: "PersistStrategy | None" = None,
         skill_names: List[str] | None = None,
         reviewer: Reviewer | None = None,
+        memory: "Optional[MemoryHarness]" = None,
     ):
         self.agent_id = str(uuid4())
         self.config = config
@@ -49,6 +51,7 @@ class Agent:
         self.persist = persist
         self.skill_names = skill_names or []
         self.reviewer = reviewer
+        self.memory = memory
         self._chain = MiddlewareChain(self.middlewares)
         self._llm: Optional[LLMAdapter] = None
         self._tool_executor: Optional[ToolExecutor] = None
@@ -62,7 +65,12 @@ class Agent:
     def _init_tool_executor(self) -> None:
         if self._tool_executor is not None:
             return
-        self._tool_executor = ToolExecutor()
+        # 当挂载了 memory，把 harness 注入 ToolExecutor.extra_kwargs，让
+        # memory_save 工具能拿到 harness 实例（等同于 supervisor 注入 supervisor_context）
+        extra_kwargs: dict = {}
+        if self.memory is not None:
+            extra_kwargs["memory_harness"] = self.memory
+        self._tool_executor = ToolExecutor(extra_kwargs=extra_kwargs)
 
     async def _inject_skills(self) -> None:
         """加载 L1 skill 元信息并注入 system prompt（启动时一次）。
@@ -175,6 +183,23 @@ class Agent:
             prev_msg_count = len(messages)
             await self._chain.on_loop_end(ctx)
 
+            # Memory 兜底 compact：每 N 轮抓最近一段 messages 走写入管道
+            if self.memory is not None and self.memory.tick_loop():
+                from app.core.agent.memory.types import WriteTrigger
+                window = self.memory.fallback_message_window
+                recent = list(messages)[-window:]
+                try:
+                    await self.memory.write(
+                        messages=recent,
+                        trigger=WriteTrigger.FALLBACK_COMPACT,
+                        loop_count=loop.loop_count,
+                    )
+                except Exception:
+                    logger.exception(
+                        "[Agent:%s] fallback memory compact failed",
+                        self.config.agent_name,
+                    )
+
         loop = AgentLoop(
             config=self.config,
             llm=self._llm,
@@ -186,6 +211,7 @@ class Agent:
             on_loop_start=on_loop_start,
             on_loop_end=on_loop_end,
             reviewer=self.reviewer,
+            memory=self.memory,
         )
         ctx.llm = self._llm
         ctx.loop = loop

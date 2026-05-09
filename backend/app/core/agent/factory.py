@@ -12,6 +12,9 @@ from typing import Any, Dict, List, Literal, Optional, Union
 
 from app.core.agent.agent import Agent
 from app.core.agent.base import AgentConfig, Reviewer
+from app.core.agent.memory.config import MemoryConfig
+from app.core.agent.memory.harness import MemoryHarness
+from app.core.agent.memory.tool import build_memory_save_tool_schema
 from app.core.agent.persist.base import PersistStrategy
 from app.core.agent.persist.redis_strategy import RedisPersistStrategy
 from app.core.middleware.chain import AgentMiddleware
@@ -89,6 +92,7 @@ def create_agent(
     middlewares: Optional[List[AgentMiddleware]] = None,
     reviewer: Optional[Reviewer] = None,
     response_schema: Optional[Dict[str, Any]] = None,
+    memory: Optional[MemoryConfig] = None,
 ) -> Agent:
     """
     创建 Agent 实例。
@@ -118,13 +122,30 @@ def create_agent(
     Returns:
         Agent 实例，需调用 run() / stream() 执行
     """
+    resolved_tools = list(tools or [])
+
+    # Memory 挂载：如果声明了 memory 配置，构造 harness 并按需把 memory_save
+    # 工具 schema 注入 tools 表（运行期 ToolExecutor 已经能拿到 harness 实例，
+    # 通过 Agent 内部 extra_kwargs 注入 memory_handler）。
+    memory_harness: Optional[MemoryHarness] = None
+    if memory is not None:
+        memory_harness = MemoryHarness(
+            memory,
+            agent_name=agent_name,
+            session_id=session_id,
+        )
+        if memory.save_tool_enabled:
+            existing_names = {t.get("name") for t in resolved_tools}
+            if "memory_save" not in existing_names:
+                resolved_tools.append(build_memory_save_tool_schema())
+
     config = AgentConfig(
         agent_name=agent_name,
         prompt=prompt,
         model=model,
         temperature=temperature,
         max_tokens=max_tokens,
-        tools=tools or [],
+        tools=resolved_tools,
         max_loop=max_loop,
         response_schema=response_schema,
     )
@@ -138,4 +159,5 @@ def create_agent(
         persist=persist_strategy,
         middlewares=middlewares,
         reviewer=reviewer,
+        memory=memory_harness,
     )

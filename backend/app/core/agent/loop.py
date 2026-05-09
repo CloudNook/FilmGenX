@@ -29,6 +29,7 @@ from app.core.agent.tool import ToolExecutor
 from app.core.agent.usage import merge_usage
 
 if TYPE_CHECKING:
+    from app.core.agent.memory.harness import MemoryHarness
     from app.core.middleware.chain import MiddlewareChain, MiddlewareContext
 
 logger = logging.getLogger(__name__)
@@ -125,6 +126,7 @@ class AgentLoop:
         on_loop_end: Optional[Any] = None,
         chain: "MiddlewareChain" = None,
         reviewer: Optional[Reviewer] = None,
+        memory: "Optional[MemoryHarness]" = None,
     ):
         self.config = config
         self.llm = llm
@@ -135,6 +137,7 @@ class AgentLoop:
         self.on_loop_start = on_loop_start
         self.on_loop_end = on_loop_end
         self.chain = chain
+        self.memory = memory
         self.review_harness = ReviewHarness(
             config=config,
             session_id=session_id,
@@ -147,6 +150,7 @@ class AgentLoop:
         self._seq = 0  # 全局序号，run() 开始时从历史最大 seq + 1 初始化
         self._system_prompt: Optional[str] = None  # 缓存，内容不随循环变化
         self._session_accumulated_usage: Optional[Dict[str, Any]] = None  # 会话历史累积 usage
+        self._memory_recall_done = False  # 同一 stream 只召回一次
 
     def _build_system_prompt(self) -> str:
         if self._system_prompt is not None:
@@ -564,6 +568,50 @@ class AgentLoop:
             f"session_accumulated_usage={self._session_accumulated_usage}"
         )
 
+    async def _maybe_inject_recalled_memories(self, initial_input: Optional[str]) -> None:
+        """显式调用 memory 召回，按 inject_strategy 注入到 messages / system prompt。
+
+        - 没挂 memory → no-op
+        - 同一 stream 内只跑一次（resume 路径不再注入）
+        - 失败 / 超时 / 空召回都已经在 ``MemoryHarness.recall`` 内静默处理
+        """
+        if self.memory is None or self._memory_recall_done:
+            return
+        self._memory_recall_done = True
+
+        recent_msgs = list(self.messages)[-5:] if self.messages else []
+        scored = await self.memory.recall(
+            initial_input=initial_input,
+            recent_messages=recent_msgs,
+        )
+        if not scored:
+            return
+
+        block = self.memory.format_recalled_for_prompt(scored)
+        if not block:
+            return
+
+        strategy = self.memory.config.inject_strategy
+        if strategy == "system_message":
+            # 把召回块作为新的 system 消息插在最前
+            self.messages.insert(
+                0,
+                {"role": "system", "content": block, "metadata": {"source": "memory_recall"}},
+            )
+        else:
+            # structured_block / user_preamble 都作为一条 user 消息追加，
+            # 紧接 _load_history 恢复的内容、initial_input 进入 messages 之前
+            self.messages.append(
+                {"role": "user", "content": block, "metadata": {"source": "memory_recall"}},
+            )
+
+        logger.info(
+            "[AgentLoop:%s] injected %d recalled memory item(s) (strategy=%s)",
+            self.config.agent_name,
+            len(scored),
+            strategy,
+        )
+
     async def run(
         self,
         initial_input: Optional[str],
@@ -876,6 +924,10 @@ class AgentLoop:
         # ── Resume 分支：执行 pending tool 后直接进入主循环 ──────────────────────
         # 先加载历史消息（持久化层可能有之前中断后的消息）
         await self._load_history()
+
+        # Memory 召回（显式调用，不在 hook 里）：在历史回放后、用户消息接入前注入。
+        # 失败 / 超时 / 空召回都静默跳过，不阻塞主流。
+        await self._maybe_inject_recalled_memories(initial_input)
 
         if checkpoint is not None and resume is not None:
             self.loop_count = checkpoint.loop_count
