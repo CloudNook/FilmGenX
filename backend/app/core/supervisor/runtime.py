@@ -101,6 +101,7 @@ class SupervisorRuntime:
         auto_run: bool,
         hitl_enabled: bool,
         review_nodes: Optional[list[str]],
+        memory_enabled: bool,
     ) -> Any:
         workflow = await self.workflow_store.create_workflow(
             project_id=project_id,
@@ -112,6 +113,7 @@ class SupervisorRuntime:
             auto_run=auto_run,
             hitl_enabled=hitl_enabled,
             review_nodes=review_nodes,
+            memory_enabled=memory_enabled,
         )
         await self.save_snapshot(
             supervisor.supervisor_session_id,
@@ -249,6 +251,7 @@ class SupervisorRuntime:
                 auto_run=supervisor.context.auto_run,
                 hitl_enabled=supervisor.hitl_enabled,
                 review_nodes=supervisor.review_nodes,
+                memory_enabled=supervisor.context.memory_enabled,
             )
             return PreparedSupervisorStream(
                 workflow_record=workflow_record,

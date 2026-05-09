@@ -221,6 +221,7 @@ class SupervisorWorkflowStore:
         auto_run: bool = False,
         hitl_enabled: bool = False,
         review_nodes: Optional[List[str]] = None,
+        memory_enabled: bool = True,
     ) -> SupervisorWorkflow:
         workflow = await self._create_workflow_record(
             project_id=project_id,
@@ -233,6 +234,7 @@ class SupervisorWorkflowStore:
             auto_run=auto_run,
             hitl_enabled=hitl_enabled,
             review_nodes=review_nodes,
+            memory_enabled=memory_enabled,
         )
         await self.db.commit()
         await _maybe_await(self.db.refresh(workflow))

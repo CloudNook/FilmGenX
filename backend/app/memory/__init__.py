@@ -15,7 +15,7 @@ FilterChain）；这一层是具体后端 / 算法的实现，由业务装配后
 
 from app.memory.embeddings import GeminiEmbeddingService
 from app.memory.extractors import GeminiLLMExtractor
-from app.memory.factory import build_project_memory_config
+from app.memory.factory import build_domain_memory_config
 from app.memory.providers import PgvectorMemoryProvider
 from app.memory.rankers import HybridRanker
 
@@ -24,5 +24,5 @@ __all__ = [
     "GeminiLLMExtractor",
     "PgvectorMemoryProvider",
     "HybridRanker",
-    "build_project_memory_config",
+    "build_domain_memory_config",
 ]

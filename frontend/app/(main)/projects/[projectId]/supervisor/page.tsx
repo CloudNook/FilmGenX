@@ -223,6 +223,7 @@ export default function SupervisorPage({
   const [workflowProfile, setWorkflowProfile] = useState('default');
   const [autoRun, setAutoRun] = useState(true);
   const [humanReview, setHumanReview] = useState(false);
+  const [memoryEnabled, setMemoryEnabled] = useState(true);
   const [activeRunId, setActiveRunId] = useState<number | null>(null);
   const [liveEntries, setLiveEntries] = useState<SupervisorDisplayEntry[]>([]);
   const [liveWorkflow, setLiveWorkflow] = useState<Record<string, unknown> | null>(null);
@@ -434,6 +435,7 @@ export default function SupervisorPage({
         setWorkflowProfile(detail.workflow_profile);
         setAutoRun(detail.auto_run);
         setHumanReview(detail.hitl_enabled);
+        setMemoryEnabled(detail.memory_enabled ?? true);
       })
       .catch(() => {
         setSelectedRunDetail(null);
@@ -569,6 +571,7 @@ export default function SupervisorPage({
               error_message: null,
               hitl_enabled: humanReview,
               review_nodes: null,
+              memory_enabled: memoryEnabled,
               completed_at: null,
               created_at: now,
               updated_at: now,
@@ -576,7 +579,7 @@ export default function SupervisorPage({
         return [nextItem, ...prev.filter((run) => run.id !== workflowId)];
       });
     },
-    [autoRun, humanReview, model, projectIdNum, user?.id, workflowProfile],
+    [autoRun, humanReview, memoryEnabled, model, projectIdNum, user?.id, workflowProfile],
   );
 
   const applyLocalRunStatus = useCallback(
@@ -662,6 +665,7 @@ export default function SupervisorPage({
         workflowProfile,
         autoRun,
         humanReview,
+        memoryEnabled,
       });
       if (!response.ok) {
         throw new Error(`Supervisor request failed: ${response.status}`);
@@ -1265,6 +1269,12 @@ export default function SupervisorPage({
                       description="在 call_sub_agent 前进入审批"
                       checked={humanReview}
                       onChange={() => setHumanReview((value) => !value)}
+                    />
+                    <ToggleRow
+                      label="项目级 Memory"
+                      description="按 project 隔离的长期记忆，supervisor + 子 agent 共享"
+                      checked={memoryEnabled}
+                      onChange={() => setMemoryEnabled((value) => !value)}
                     />
                   </div>
                 </div>

@@ -1,13 +1,13 @@
 """
-``build_project_memory_config(project_id, ...)`` —— 业务装配快捷函数。
+``build_domain_memory_config(domain_id, ...)`` —— 业务装配快捷函数。
 
-FilmGenX 一个 project = 一个剧本，每个 project 有独立的全局记忆。这个 factory
-强制 ``project_id`` 必填，把 Provider / Ranker / Extractor / Embedding 一次装好，
-返回一个可直接传给 ``create_agent(memory=...)`` 的 ``MemoryConfig``。
+framework 不知道 "domain" 是什么含义；FilmGenX 把 ``project.id`` 映射成
+``domain_id``（一个 project = 一个剧本 = 一个 domain），其它业务可以映射成
+``user.id`` / ``repo.id`` 等。
 
 业务调用方（supervisor 或 endpoint）只需要：
 
-    cfg = build_project_memory_config(project_id=42)
+    cfg = build_domain_memory_config(domain_id=42)
     agent = create_agent(..., memory=cfg)
 
 Embedding 服务在 Provider 和 Ranker 之间共享同一个实例（避免重复构造客户端）。
@@ -27,23 +27,23 @@ from app.memory.providers import PgvectorMemoryProvider
 from app.memory.rankers import HybridRanker
 
 
-def build_project_memory_config(
-    project_id: int,
+def build_domain_memory_config(
+    domain_id: int | str,
     *,
     session_factory: Optional[async_sessionmaker[AsyncSession]] = None,
     pre_extraction_filters: Optional[FilterChain] = None,
     post_extraction_filters: Optional[FilterChain] = None,
     save_tool_enabled: bool = True,
-    fallback_compact_every_n_loops: int = 5,
+    fallback_compact_every_n_loops: int = 1,
     fallback_compact_message_window: int = 20,
     recall_threshold: float = 0.5,
     recall_max_items: int = 10,
 ) -> MemoryConfig:
-    """构造 project-scoped MemoryConfig。
+    """构造 domain-scoped MemoryConfig。
 
     Args:
-        project_id: FilmGenX 项目 ID（剧本 ID）。Provider 锁定到这个值；
-            所有 write / recall 强制按这个 project_id 隔离
+        domain_id: 业务 "领域" 标识（FilmGenX = project.id）。Provider 锁定到这个值；
+            所有 write / recall 强制按这个 domain_id 隔离
         session_factory: 默认用 ``AsyncSessionFactory``，测试时可注入 mock
         pre_extraction_filters / post_extraction_filters: 业务自定义过滤链；
             为空表示不过滤（任何抽出来的候选都落库）
@@ -61,7 +61,7 @@ def build_project_memory_config(
     return MemoryConfig(
         provider=PgvectorMemoryProvider(
             session_factory=sf,
-            project_id=project_id,
+            domain_id=domain_id,
             embedding_service=embedding,
         ),
         extractor=GeminiLLMExtractor(),
@@ -73,6 +73,6 @@ def build_project_memory_config(
         fallback_compact_message_window=fallback_compact_message_window,
         recall_threshold=recall_threshold,
         recall_max_items=recall_max_items,
-        # framework 的 scope_metadata 同步设上 project_id —— 给 filter 上下文 / 日志用
-        scope_metadata={"project_id": project_id},
+        # framework 的 scope_metadata 同步设上 domain_id —— 给 filter 上下文 / 日志用
+        scope_metadata={"domain_id": domain_id},
     )

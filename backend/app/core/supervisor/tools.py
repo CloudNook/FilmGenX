@@ -302,6 +302,17 @@ async def call_sub_agent(
         supervisor_session_id=supervisor_context.supervisor_session_id,
     )
 
+    # Memory：跟 supervisor 共享同一个 domain_id，sub-agent 之间也共享 memory 池。
+    # 没传 domain_id 或全局 memory_enabled=False 时 sub-agent 不挂 memory。
+    sub_agent_memory = None
+    if supervisor_context.memory_enabled and supervisor_context.domain_id is not None:
+        # 延迟 import：core/supervisor 不应永远依赖 app/memory（极端业务可能不需要）
+        from app.memory import build_domain_memory_config
+
+        sub_agent_memory = build_domain_memory_config(
+            domain_id=supervisor_context.domain_id,
+        )
+
     sub_agent = create_agent(
         agent_name=sub_agent_name,
         session_id=sub_session_id,
@@ -313,6 +324,7 @@ async def call_sub_agent(
         persist=persist_strategy,
         reviewer=registered.reviewer,
         response_schema=registered.response_schema,
+        memory=sub_agent_memory,
     )
 
     accumulated_result = {}

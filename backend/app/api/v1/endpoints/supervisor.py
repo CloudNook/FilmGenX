@@ -141,6 +141,15 @@ class SupervisorStartRequest(BaseModel):
         None,
         description="Resume decision for a paused run",
     )
+    memory_enabled: bool = Field(
+        True,
+        description=(
+            "Global memory toggle. When True (default), supervisor + all sub-agents "
+            "automatically attach project-scoped memory using project_id as the "
+            "domain_id. Set to False to opt out (e.g. ad-hoc tests, tasks where "
+            "long-term memory shouldn't apply)."
+        ),
+    )
 
 
 SupervisorChatRequest = SupervisorStartRequest
@@ -175,6 +184,7 @@ class SupervisorWorkflowSummary(BaseModel):
     error_message: Optional[str] = None
     hitl_enabled: bool
     review_nodes: Optional[List[str]] = None
+    memory_enabled: bool = True
     completed_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
@@ -244,6 +254,10 @@ async def _stream_supervisor(
         hitl_enabled=body.human_review,
         review_nodes=body.review_nodes,
         db=db,
+        # FilmGenX 业务约定：HTTP 层的 project_id 即 framework 的 domain_id
+        # （memory 隔离边界 = 一个剧本）。其它业务可改成传 user_id 等
+        domain_id=body.project_id,
+        memory_enabled=body.memory_enabled,
     )
     supervisor_session_id = getattr(supervisor, "supervisor_session_id", body.session_id)
     resume_decision = (

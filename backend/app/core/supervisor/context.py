@@ -54,6 +54,21 @@ class SupervisorContext(BaseModel):
     """
 
     supervisor_session_id: str = Field(..., description="Supervisor session ID")
+    domain_id: int | str | None = Field(
+        default=None,
+        description=(
+            "memory 隔离边界。FilmGenX 用 project.id（一个 project = 一个剧本），"
+            "其它业务可用 user.id / repo.id 等。framework 不解释含义，仅作为 scope key 透传。"
+            "为 None 时 supervisor / sub-agent 都不挂 memory。"
+        ),
+    )
+    memory_enabled: bool = Field(
+        default=True,
+        description=(
+            "全局开关：False 时 supervisor / 所有 sub-agent 都不挂 memory（与 domain_id 无关）。"
+            "前端可在请求体里传过来；默认开。"
+        ),
+    )
     user_request: str = Field(..., description="用户原始需求")
     workflow_profile: str = Field(default="default", description="工作流配置名称")
     workflow_definitions: List[WorkflowNodeDefinition] = Field(

@@ -126,6 +126,13 @@ class SupervisorWorkflow(Base):
         nullable=True,
         comment="Configured review node names for HITL",
     )
+    memory_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="true",
+        comment="是否启用项目级 memory（按 project_id 作为 domain_id）",
+    )
     completed_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
         nullable=True,

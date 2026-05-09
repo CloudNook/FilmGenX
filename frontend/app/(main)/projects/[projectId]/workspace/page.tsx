@@ -180,6 +180,7 @@ export default function WorkspacePage({
   const [isResuming, setIsResuming] = useState(false);
   const [hitlEnabled, setHitlEnabled] = useState(false);
   const [reviewEnabled, setReviewEnabled] = useState(false);
+  const [memoryEnabled, setMemoryEnabled] = useState(true);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -249,6 +250,30 @@ export default function WorkspacePage({
         setHitl(null);
       });
   }, [selectedWsId, projectIdNum, applyDetail]);
+
+  // Hydrate toggle state from selected workspace record
+  useEffect(() => {
+    if (!selectedWs) return;
+    setModel(selectedWs.model ?? 'gemini-3-flash-preview');
+    setTemperature(selectedWs.temperature ?? 0.7);
+    setHitlEnabled(!!selectedWs.hitl_enabled);
+    setReviewEnabled(!!selectedWs.review_enabled);
+    setMemoryEnabled(selectedWs.memory_enabled ?? true);
+  }, [selectedWs?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Persist a settings patch to the workspace record
+  const saveSettings = useCallback(
+    async (patch: Partial<Pick<WorkspaceResponse, 'model' | 'temperature' | 'hitl_enabled' | 'review_enabled' | 'memory_enabled'>>) => {
+      if (!selectedWsId) return;
+      try {
+        const updated = await workspacesApi.update(projectIdNum, selectedWsId, patch);
+        setWorkspaces((prev) => prev.map((w) => (w.id === selectedWsId ? { ...w, ...updated } : w)));
+      } catch (err) {
+        console.error('Failed to save workspace settings:', err);
+      }
+    },
+    [projectIdNum, selectedWsId],
+  );
 
   // Scroll to bottom
   useEffect(() => {
@@ -834,7 +859,11 @@ export default function WorkspacePage({
                     <button
                       role="switch"
                       aria-checked={hitlEnabled}
-                      onClick={() => setHitlEnabled((v) => !v)}
+                      onClick={() => {
+                        const next = !hitlEnabled;
+                        setHitlEnabled(next);
+                        saveSettings({ hitl_enabled: next });
+                      }}
                       className={cn(
                         'relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors',
                         hitlEnabled ? 'bg-yellow-500' : 'bg-secondary'
@@ -859,7 +888,11 @@ export default function WorkspacePage({
                     <button
                       role="switch"
                       aria-checked={reviewEnabled}
-                      onClick={() => setReviewEnabled((v) => !v)}
+                      onClick={() => {
+                        const next = !reviewEnabled;
+                        setReviewEnabled(next);
+                        saveSettings({ review_enabled: next });
+                      }}
                       className={cn(
                         'relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors',
                         reviewEnabled ? 'bg-primary' : 'bg-secondary'
@@ -876,6 +909,35 @@ export default function WorkspacePage({
                   )}
                 </div>
 
+                {/* Memory */}
+                <div className="space-y-2">
+                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">项目级 Memory</p>
+                  <label className="flex items-center justify-between cursor-pointer">
+                    <span className="text-xs text-muted-foreground">启用 Memory（按项目隔离）</span>
+                    <button
+                      role="switch"
+                      aria-checked={memoryEnabled}
+                      onClick={() => {
+                        const next = !memoryEnabled;
+                        setMemoryEnabled(next);
+                        saveSettings({ memory_enabled: next });
+                      }}
+                      className={cn(
+                        'relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors',
+                        memoryEnabled ? 'bg-primary' : 'bg-secondary'
+                      )}
+                    >
+                      <span className={cn(
+                        'pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform',
+                        memoryEnabled ? 'translate-x-4' : 'translate-x-0'
+                      )} />
+                    </button>
+                  </label>
+                  {memoryEnabled && (
+                    <p className="text-[10px] text-primary">Agent 会自动检索 / 写入项目级长期记忆</p>
+                  )}
+                </div>
+
                 {/* Model Settings */}
                 <div className="space-y-2">
                   <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">模型设置</p>
@@ -884,7 +946,10 @@ export default function WorkspacePage({
                       <label className="text-xs text-muted-foreground mb-1 block">模型</label>
                       <select
                         value={model}
-                        onChange={(e) => setModel(e.target.value)}
+                        onChange={(e) => {
+                          setModel(e.target.value);
+                          saveSettings({ model: e.target.value });
+                        }}
                         disabled={isStreaming}
                         className="w-full text-xs bg-secondary border border-border rounded-md px-2 py-1.5 text-foreground focus:outline-none focus:border-primary/50 disabled:opacity-50"
                       >
@@ -904,6 +969,8 @@ export default function WorkspacePage({
                         step="0.1"
                         value={temperature}
                         onChange={(e) => setTemperature(Number(e.target.value))}
+                        onMouseUp={(e) => saveSettings({ temperature: Number((e.target as HTMLInputElement).value) })}
+                        onTouchEnd={(e) => saveSettings({ temperature: Number((e.target as HTMLInputElement).value) })}
                         disabled={isStreaming}
                         className="w-full h-1.5 accent-primary disabled:opacity-50"
                       />

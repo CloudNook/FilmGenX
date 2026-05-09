@@ -13,13 +13,17 @@ PgvectorMemoryProvider —— 业务实现 ``MemoryProvider`` Protocol。
 - ``include_memory = True``（默认）→ memory_entries 向量召回（需要
   ``embedding_service`` 注入；缺失时退化为按时间倒排）
 
-**Project 级强绑**：FilmGenX 中"一个 project = 一个剧本"，每个 project 有独立的
-全局记忆。本 Provider 构造时绑定 ``project_id``：所有 write 操作把 scope.project_id
-强制设为绑定值（覆盖任何外部传入的值），所有 recall 操作也强制按这个 project_id
-过滤。这样杜绝了"业务忘记传 project_id 导致跨剧本泄露"的人为错误。
+**Domain 级强绑**：framework 不知道"领域"是什么含义——可能是 project / user /
+repo / 等业务定义的隔离边界。本 Provider 构造时绑定 ``domain_id``：所有 write
+操作把 ``scope.domain_id`` 强制设为绑定值（覆盖任何外部传入的值），所有 recall
+操作也强制按这个 ``domain_id`` 过滤。
 
-每个 project 应该单独建一个 Provider 实例（比如 supervisor 启动时按 project_id
-构造）；多个 project 并发时 session_factory / embedding_service 可共享。
+业务（FilmGenX）的语义是"一个 domain = 一个 project = 一个剧本"——把 project.id
+作为 domain_id 传进来即可；其它业务可以用 user.id / org.id 等。framework 不解释
+domain 的具体含义。
+
+每个 domain 应该单独建一个 Provider 实例（业务层启动时按 domain_id 构造）；
+多个 domain 并发时 session_factory / embedding_service 可共享。
 """
 
 from __future__ import annotations
@@ -53,29 +57,33 @@ class PgvectorMemoryProvider(MemoryProvider):
         self,
         *,
         session_factory: async_sessionmaker[AsyncSession],
-        project_id: int,
+        domain_id: int | str,
         embedding_service: Optional[EmbeddingService] = None,
         memory_topk: int = 50,
     ) -> None:
         """
         Args:
             session_factory: AsyncSessionFactory 之类，每次操作开新 session
-            project_id: 必填——本 Provider 绑定的 project（FilmGenX 一个 project
-                即一个剧本）。所有 write / recall 强制按这个值锁 scope.project_id
+            domain_id: 必填——本 Provider 绑定的"领域"标识。framework 不解释含义；
+                FilmGenX 用 ``project.id``（剧本级），其它业务可用 ``user.id`` /
+                ``repo.id`` 等。所有 write / recall 强制按这个值锁 ``scope.domain_id``，
+                业务忘传 / 传错都不会出现跨域泄露
             embedding_service: 写入时给 content 算向量；召回时给 text_query 算向量。
                 None 时 memory_entries 走纯时间倒排，召回质量明显下降但依然能用
             memory_topk: 召回时 memory_entries 最多返回多少条候选（ranker 后续会再过滤）
         """
-        if not isinstance(project_id, int) or project_id <= 0:
-            raise ValueError("project_id must be a positive integer")
+        if not isinstance(domain_id, (int, str)) or (isinstance(domain_id, str) and not domain_id):
+            raise ValueError("domain_id must be a non-empty int or str")
+        if isinstance(domain_id, int) and domain_id <= 0:
+            raise ValueError("domain_id (int) must be positive")
         self._session_factory = session_factory
-        self._project_id = project_id
+        self._domain_id = domain_id
         self._embedding = embedding_service
         self._memory_topk = memory_topk
 
-    def _enforce_project_scope(self, scope: dict[str, Any]) -> dict[str, Any]:
-        """合并外部 scope，但强制 project_id 用绑定值（防止 leak / cross-write）。"""
-        return {**scope, "project_id": self._project_id}
+    def _enforce_domain_scope(self, scope: dict[str, Any]) -> dict[str, Any]:
+        """合并外部 scope，但强制 domain_id 用绑定值（防止 leak / cross-write）。"""
+        return {**scope, "domain_id": self._domain_id}
 
     # ---------------------------------------------------------------- #
     # commit_extraction —— 原子写入 + 推进游标
@@ -92,7 +100,7 @@ class PgvectorMemoryProvider(MemoryProvider):
         if cursor_key is not None and cursor_marker is None:
             raise ValueError("cursor_marker is required when cursor_key is provided")
 
-        scope = self._enforce_project_scope(scope_metadata)
+        scope = self._enforce_domain_scope(scope_metadata)
 
         # 把 embedding 算在事务外（embedding 调用是 RPC 外联，慢，不该卡住 PG 事务）
         memory_candidates = [c for c in candidates if not _is_profile_candidate(c)]
@@ -214,8 +222,8 @@ class PgvectorMemoryProvider(MemoryProvider):
     # ---------------------------------------------------------------- #
 
     async def recall(self, query: RecallQuery) -> list[RecalledMemory]:
-        # 强制覆盖 project_id：不允许业务用其他 project 的 scope 召回
-        enriched_metadata = self._enforce_project_scope(query.metadata)
+        # 强制覆盖 domain_id：不允许业务用其他 domain 的 scope 召回
+        enriched_metadata = self._enforce_domain_scope(query.metadata)
         scoped_query = query.model_copy(update={"metadata": enriched_metadata})
 
         results: list[RecalledMemory] = []

@@ -14,6 +14,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from app.core.agent.base import AgentResult, DoneEvent, InterruptEvent, ResumeDecision
 from app.core.agent.factory import create_agent
+from app.core.agent.memory.config import MemoryConfig
 from app.core.agent.persist.base import PersistStrategy
 from app.core.middleware.chain import AgentMiddleware
 from app.core.supervisor.context import SupervisorContext
@@ -53,6 +54,24 @@ $user_request
 )
 
 
+def _maybe_build_memory(
+    domain_id: int | str | None,
+    memory_enabled: bool,
+) -> Optional[MemoryConfig]:
+    """根据 domain_id + memory_enabled 决定是否构造 MemoryConfig。
+
+    domain_id 为 None 或 memory_enabled=False → 返回 None（agent 不挂 memory）。
+    framework 不知道 domain 是什么；FilmGenX 业务（这里）把 project.id 当 domain_id
+    传进来；其它业务可以传 user.id / repo.id 等。
+    """
+    if not memory_enabled or domain_id is None:
+        return None
+    # 延迟 import 避免 supervisor 模块永远依赖业务实现（极端业务可能不需要 memory）
+    from app.memory import build_domain_memory_config
+
+    return build_domain_memory_config(domain_id=domain_id)
+
+
 class SupervisorAgent:
     """
     高层 Supervisor 编排器。
@@ -76,6 +95,8 @@ class SupervisorAgent:
         hitl_enabled: bool = False,
         review_nodes: Optional[List[str]] = None,
         db: Any = None,
+        domain_id: int | str | None = None,
+        memory_enabled: bool = True,
     ):
         self.supervisor_session_id = supervisor_session_id
         self.model = model
@@ -92,6 +113,8 @@ class SupervisorAgent:
             workflow_profile=workflow_profile,
             workflow_definitions=self.workflow_definitions,
             auto_run=auto_run,
+            domain_id=domain_id,
+            memory_enabled=memory_enabled,
         )
         self._sub_agent_configs = sub_agent_configs
 
@@ -99,6 +122,14 @@ class SupervisorAgent:
             "supervisor_context": self.context,
             "registry": self.registry,
         }
+
+        # Supervisor 自己也可挂 memory（它本质就是 Agent，可以借项目级记忆做调度判断）
+        supervisor_memory = _maybe_build_memory(domain_id, memory_enabled)
+        if supervisor_memory is not None:
+            logger.info(
+                "[SupervisorAgent] memory enabled (domain_id=%s) for supervisor itself",
+                domain_id,
+            )
 
         self._agent = create_agent(
             agent_name="supervisor",
@@ -109,11 +140,17 @@ class SupervisorAgent:
             max_loop=max_loop,
             persist=persist,
             middlewares=middlewares,
+            memory=supervisor_memory,
         )
 
         from app.core.agent.tool import ToolExecutor
 
-        self._agent._tool_executor = ToolExecutor(extra_kwargs=self._tool_ctx)
+        # Agent 内部 _init_tool_executor 已经把 memory_harness 塞进 extra_kwargs；
+        # 这里在它基础上再叠加 supervisor_context / registry，保持原有 supervisor 工具的注入
+        merged_extra = dict(self._tool_ctx)
+        if supervisor_memory is not None:
+            merged_extra["memory_harness"] = self._agent.memory
+        self._agent._tool_executor = ToolExecutor(extra_kwargs=merged_extra)
 
         logger.info(
             "[SupervisorAgent] created supervisor_session=%s, workflow_profile=%s, agents=%s",

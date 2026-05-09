@@ -82,6 +82,8 @@ def create_supervisor(
     hitl_enabled: bool = False,
     review_nodes: Optional[List[str]] = None,
     db: Any = None,
+    domain_id: int | str | None = None,
+    memory_enabled: bool = True,
 ) -> SupervisorAgent:
     """
     创建 SupervisorAgent 实例。
@@ -131,6 +133,8 @@ def create_supervisor(
         hitl_enabled=hitl_enabled,
         review_nodes=review_nodes,
         db=db,
+        domain_id=domain_id,
+        memory_enabled=memory_enabled,
     )
 
     return supervisor

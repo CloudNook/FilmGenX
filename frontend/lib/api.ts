@@ -624,6 +624,11 @@ export interface WorkspaceResponse {
   last_message_at: string | null;
   created_at: string;
   updated_at: string;
+  model: string;
+  temperature: number;
+  hitl_enabled: boolean;
+  review_enabled: boolean;
+  memory_enabled: boolean;
 }
 
 export interface AgentMessageExtraMetadata {
@@ -702,7 +707,20 @@ export const workspacesApi = {
     );
   },
 
-  update(projectId: number, workspaceId: number, data: { title?: string; system_prompt?: string | null; status?: string }) {
+  update(
+    projectId: number,
+    workspaceId: number,
+    data: {
+      title?: string;
+      system_prompt?: string | null;
+      status?: string;
+      model?: string;
+      temperature?: number;
+      hitl_enabled?: boolean;
+      review_enabled?: boolean;
+      memory_enabled?: boolean;
+    },
+  ) {
     return request<WorkspaceResponse>(
       `/projects/${projectId}/workspaces/${workspaceId}`,
       { method: 'PATCH', body: data },
@@ -817,6 +835,7 @@ export interface SupervisorWorkflowSummaryResponse {
   error_message: string | null;
   hitl_enabled: boolean;
   review_nodes: string[] | null;
+  memory_enabled: boolean;
   completed_at: string | null;
   created_at: string;
   updated_at: string;
@@ -942,6 +961,7 @@ export const supervisorApi = {
       autoRun?: boolean;
       humanReview?: boolean;
       reviewNodes?: string[];
+      memoryEnabled?: boolean;
     },
   ) {
     const token = getToken();
@@ -963,6 +983,7 @@ export const supervisorApi = {
         auto_run: options?.autoRun,
         human_review: options?.humanReview,
         review_nodes: options?.reviewNodes,
+        memory_enabled: options?.memoryEnabled,
       }),
     });
   },

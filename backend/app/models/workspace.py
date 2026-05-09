@@ -10,7 +10,7 @@ AI 工作台模型。
 from datetime import datetime
 from typing import TYPE_CHECKING, List, Optional
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -70,6 +70,41 @@ class Workspace(Base):
         DateTime(timezone=True),
         nullable=True,
         comment="最后一条消息时间",
+    )
+    model: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="gemini-3-flash-preview",
+        server_default="gemini-3-flash-preview",
+        comment="使用的 LLM 模型",
+    )
+    temperature: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+        default=0.7,
+        server_default="0.7",
+        comment="LLM temperature",
+    )
+    hitl_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+        comment="是否启用 human-in-the-loop",
+    )
+    review_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+        comment="是否启用 review agent",
+    )
+    memory_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="true",
+        comment="是否启用项目级 memory（按 project_id 作为 domain_id）",
     )
 
     # Relations

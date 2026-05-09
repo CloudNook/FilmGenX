@@ -358,9 +358,13 @@ async def chat_workspace(
     )
 
     middlewares = []
-    if body.hitl_auto_tools is not None:
-        middlewares.append(HumanInTheLoopMiddleware(auto_tool_list=body.hitl_auto_tools))
+    hitl_auto_tools = body.hitl_auto_tools
+    if hitl_auto_tools is None and ws.hitl_enabled:
+        hitl_auto_tools = []
+    if hitl_auto_tools is not None:
+        middlewares.append(HumanInTheLoopMiddleware(auto_tool_list=hitl_auto_tools))
 
+    enable_review = body.enable_review or ws.review_enabled
     reviewer = (
         create_reviewer_agent(
             criteria=["内容质量", "创意表达", "专业性", "可执行性"],
@@ -368,21 +372,29 @@ async def chat_workspace(
             max_revision_rounds=1,
             on_exhausted="accept_last",
         )
-        if body.enable_review
+        if enable_review
         else None
     )
+
+    # Project-scoped memory: ws.project_id 当 framework 的 domain_id
+    memory_config = None
+    if ws.memory_enabled:
+        from app.memory import build_domain_memory_config
+
+        memory_config = build_domain_memory_config(domain_id=ws.project_id)
 
     agent = create_agent(
         agent_name=ws.agent_name,
         session_id=ws.session_id,
         prompt=prompt,
-        model=body.model or "gemini-3-flash-preview",
-        temperature=body.temperature,
+        model=body.model or ws.model or "gemini-3-flash-preview",
+        temperature=body.temperature if body.temperature is not None else ws.temperature,
         tools=tools,
         skill_names=ws.skill_names if hasattr(ws, "skill_names") else [],
         persist=persist,
         middlewares=middlewares,
         reviewer=reviewer,
+        memory=memory_config,
     )
     agent._tool_executor = tool_executor
 

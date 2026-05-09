@@ -40,6 +40,22 @@ from app.core.agent.memory.types import (
 logger = logging.getLogger(__name__)
 
 
+def _to_message_dict(message: Any) -> dict[str, Any]:
+    """归一化 message：dict 直通；Pydantic 模型 → model_dump。
+
+    AgentLoop 在 on_loop_end 传 ``AgentMessage`` 实例（Pydantic），其它路径传 dict。
+    内部所有字段访问统一走 ``.get(...)``，所以这里收拢成 dict。
+    """
+    if isinstance(message, dict):
+        return message
+    if hasattr(message, "model_dump"):
+        return message.model_dump()
+    raise TypeError(
+        f"unsupported message type: {type(message).__name__}; "
+        "expected dict or pydantic BaseModel"
+    )
+
+
 class MemoryHarness:
     """每个 Agent 实例对应一个 harness。"""
 
@@ -135,7 +151,7 @@ class MemoryHarness:
     async def write(
         self,
         *,
-        messages: list[dict[str, Any]],
+        messages: list[Any],
         trigger: WriteTrigger,
         loop_count: int = 0,
         tool_calls_made: list[ToolCallSummary] | None = None,
@@ -153,10 +169,15 @@ class MemoryHarness:
         marker 失效（messages 里找不到），自动 fallback 到全量。explicit_save
         触发时不做截取（用户/LLM 主动指定要存什么，整个 messages 视为有意义）。
         """
+        # 把 caller 传进来的 message 序列归一化成 dict 视图：
+        # AgentLoop 在 on_loop_end 传的是 AgentMessage Pydantic 实例；
+        # 框架内部的 messages list 是 dict；这两路都得能跑。
+        normalized_messages = [_to_message_dict(m) for m in messages]
+
         # 增量截取：explicit_save 不增量（caller 已经精确控制内容）；其它触发都按
         # cursor 截取，节省 extractor LLM 成本 + 防重复落库
         sliced_messages, marker_advances_to = await self._slice_unextracted(
-            messages, trigger
+            normalized_messages, trigger
         )
 
         now = datetime.now(timezone.utc)

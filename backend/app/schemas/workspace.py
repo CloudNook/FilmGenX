@@ -27,6 +27,11 @@ class WorkspaceUpdate(BaseModel):
     title: Optional[str] = Field(None, max_length=200)
     system_prompt: Optional[str] = Field(None, description="自定义 system prompt")
     status: Optional[str] = Field(None, pattern="^(active|archived)$")
+    model: Optional[str] = Field(None, description="LLM 模型")
+    temperature: Optional[float] = Field(None, ge=0, le=2)
+    hitl_enabled: Optional[bool] = Field(None, description="启用 human-in-the-loop")
+    review_enabled: Optional[bool] = Field(None, description="启用 review agent")
+    memory_enabled: Optional[bool] = Field(None, description="启用项目级 memory")
 
 
 class WorkspaceResponse(BaseResponse):
@@ -40,6 +45,11 @@ class WorkspaceResponse(BaseResponse):
     status: str
     total_tokens: int
     last_message_at: Optional[datetime]
+    model: str = "gemini-3-flash-preview"
+    temperature: float = 0.7
+    hitl_enabled: bool = False
+    review_enabled: bool = False
+    memory_enabled: bool = True
 
 
 # ---------------------------------------------------------------------------
