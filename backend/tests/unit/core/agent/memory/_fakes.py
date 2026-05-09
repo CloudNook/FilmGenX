@@ -18,12 +18,14 @@ from app.core.agent.memory.types import (
 
 
 class FakeProvider:
-    """dict 后端的最小 fake provider。"""
+    """dict 后端的最小 fake provider，含 commit_extraction 原子语义模拟。"""
 
     def __init__(self) -> None:
         self.store: dict[str, dict[str, Any]] = {}
+        self.cursors: dict[str, str] = {}
         self.recall_calls: list[RecallQuery] = []
-        self.write_calls: list[CandidateMemory] = []
+        self.committed_candidates: list[CandidateMemory] = []
+        self.commit_calls: int = 0  # commit_extraction 调用次数
 
     async def recall(self, query: RecallQuery) -> list[RecalledMemory]:
         self.recall_calls.append(query)
@@ -42,22 +44,39 @@ class FakeProvider:
             )
         return results
 
-    async def write(
+    async def get_extract_cursor(self, cursor_key: str):
+        return self.cursors.get(cursor_key)
+
+    async def commit_extraction(
         self,
-        candidate: CandidateMemory,
+        candidates: list[CandidateMemory],
         scope_metadata: dict[str, Any],
-    ) -> str:
-        self.write_calls.append(candidate)
-        new_id = str(uuid.uuid4())
-        self.store[new_id] = {
-            "id": new_id,
-            "content": candidate.content,
-            "kind": candidate.kind,
-            "confidence": candidate.confidence,
-            "created_at": datetime.now(timezone.utc),
-            "scope_metadata": dict(scope_metadata),
-        }
-        return new_id
+        cursor_key: str | None = None,
+        cursor_marker: str | None = None,
+    ) -> list[str]:
+        if cursor_key is not None and cursor_marker is None:
+            raise ValueError("cursor_marker required when cursor_key is provided")
+
+        self.commit_calls += 1
+        written_ids: list[str] = []
+        for candidate in candidates:
+            self.committed_candidates.append(candidate)
+            new_id = str(uuid.uuid4())
+            self.store[new_id] = {
+                "id": new_id,
+                "content": candidate.content,
+                "kind": candidate.kind,
+                "confidence": candidate.confidence,
+                "created_at": datetime.now(timezone.utc),
+                "scope_metadata": dict(scope_metadata),
+            }
+            written_ids.append(new_id)
+
+        if cursor_key is not None:
+            # 模拟原子：候选写入和 cursor 推进在同一调用内，不会出现"写了但 cursor 没动"
+            self.cursors[cursor_key] = cursor_marker  # type: ignore[assignment]
+
+        return written_ids
 
 
 class FixedCandidatesExtractor:

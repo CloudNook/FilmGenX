@@ -12,11 +12,14 @@ MemoryHarness ——内部协调器。
 - write 同步阻塞；失败抛异常给 caller。但 caller（AgentLoop on_loop_end /
   memory_save 工具）自己 try-except 防止主流被拖垮
 - 不直接调用 LLM；extractor 是 caller-injected Protocol
+- **增量抽取**：write 入口先查 Provider 上次的 extract cursor，把 messages 截到
+  "新增量"再喂给 extractor。极大节省 LLM 抽取成本，避免重复落库相似条目
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -140,14 +143,25 @@ class MemoryHarness:
         explicit_kind: str | None = None,
         explicit_confidence: float | None = None,
     ) -> WriteOutcome:
-        """raw messages → pre_filter → extract → post_filter → provider.write。
+        """raw messages → cutoff by cursor → pre_filter → extract → post_filter → provider.write。
 
         ``explicit_kind`` / ``explicit_confidence`` 给 explicit_save 用：让 LLM
         指定的 kind / confidence 覆盖 extractor 的默认值。
+
+        **增量抽取**：先从 Provider 查这个 (session_id, agent_name) 上次抽到的
+        marker，把 ``messages`` 截到 marker 之后的新增量再走管道。如果上次没抽过、
+        marker 失效（messages 里找不到），自动 fallback 到全量。explicit_save
+        触发时不做截取（用户/LLM 主动指定要存什么，整个 messages 视为有意义）。
         """
+        # 增量截取：explicit_save 不增量（caller 已经精确控制内容）；其它触发都按
+        # cursor 截取，节省 extractor LLM 成本 + 防重复落库
+        sliced_messages, marker_advances_to = await self._slice_unextracted(
+            messages, trigger
+        )
+
         now = datetime.now(timezone.utc)
         pre_ctx = PreExtractionContext(
-            messages=messages,
+            messages=sliced_messages,
             loop_count=loop_count,
             tool_calls_made=tool_calls_made or [],
             session_started_at=self.session_started_at,
@@ -176,7 +190,7 @@ class MemoryHarness:
 
         try:
             candidates = await self.config.extractor.extract(
-                messages,
+                sliced_messages,
                 dict(self.config.scope_metadata),
             )
         except Exception:
@@ -191,9 +205,9 @@ class MemoryHarness:
                 if explicit_confidence is not None:
                     c.confidence = max(0.0, min(1.0, explicit_confidence))
 
-        written_ids: list[str] = []
+        # 跑 post_filter，分出"通过的候选"和"被砍的"
+        passed_candidates: list[CandidateMemory] = []
         post_decisions: list[FilterDecision] = []
-
         for candidate in candidates:
             post_ctx = PostExtractionContext(
                 **pre_ctx.model_dump(),
@@ -201,7 +215,9 @@ class MemoryHarness:
             )
             post_decision = await self.config.post_extraction_filters.evaluate(post_ctx)
             post_decisions.append(post_decision)
-            if not post_decision.passed:
+            if post_decision.passed:
+                passed_candidates.append(candidate)
+            else:
                 logger.info(
                     "[memory:%s] post-extraction rejected trigger=%s score=%.2f rejected_by=%s",
                     self.agent_name,
@@ -209,23 +225,35 @@ class MemoryHarness:
                     post_decision.aggregate_score,
                     post_decision.rejected_by,
                 )
-                continue
 
-            try:
-                new_id = await self.config.provider.write(
-                    candidate,
-                    dict(self.config.scope_metadata),
-                )
-                written_ids.append(new_id)
-                logger.info(
-                    "[memory:%s] wrote id=%s kind=%s trigger=%s",
-                    self.agent_name,
-                    new_id,
-                    candidate.kind,
-                    trigger.value,
-                )
-            except Exception:
-                logger.exception("[memory:%s] provider.write failed", self.agent_name)
+        # 原子提交：候选写入 + 推进游标在 provider 端单事务完成。
+        # 即便 candidates 为空（extractor 返回空 / post filter 全砍），只要走完了
+        # extractor（pre filter 通过），仍应推进 cursor —— 表示"这段对话已被评估，
+        # 没有可记的内容"，下次不必重抽。
+        # explicit_save 触发时 marker_advances_to=None，不动 cursor。
+        written_ids: list[str] = []
+        try:
+            written_ids = await self.config.provider.commit_extraction(
+                candidates=passed_candidates,
+                scope_metadata=dict(self.config.scope_metadata),
+                cursor_key=self._cursor_key() if marker_advances_to is not None else None,
+                cursor_marker=marker_advances_to,
+            )
+        except Exception:
+            logger.exception(
+                "[memory:%s] commit_extraction failed (atomic); "
+                "neither writes nor cursor advanced",
+                self.agent_name,
+            )
+
+        if written_ids:
+            logger.info(
+                "[memory:%s] committed %d entrie(s) trigger=%s cursor=%s",
+                self.agent_name,
+                len(written_ids),
+                trigger.value,
+                marker_advances_to,
+            )
 
         return WriteOutcome(
             pre_decision=pre_decision,
@@ -234,6 +262,112 @@ class MemoryHarness:
             written_ids=written_ids,
             post_decisions=post_decisions,
         )
+
+    # ------------------------------------------------------------------ #
+    # 增量截取
+    # ------------------------------------------------------------------ #
+
+    async def _slice_unextracted(
+        self,
+        messages: list[dict[str, Any]],
+        trigger: WriteTrigger,
+    ) -> tuple[list[dict[str, Any]], Optional[str]]:
+        """根据 Provider 的 cursor 把 messages 截到"未抽部分"。
+
+        Returns:
+            (sliced_messages, marker_advances_to)
+            - sliced_messages：传给 extractor 的实际消息列表
+            - marker_advances_to：写入成功后 cursor 应该推进到的 marker（None 表示不推进）
+        """
+        # explicit_save 触发时，caller 已经精确控制内容（一般就是 LLM 给的一句话），
+        # 不应当 cursor 化处理 —— 直接全量进 extractor，且不动游标
+        if trigger == WriteTrigger.EXPLICIT_SAVE:
+            return messages, None
+
+        if not messages:
+            return messages, None
+
+        try:
+            last_marker = await self.config.provider.get_extract_cursor(
+                self._cursor_key()
+            )
+        except Exception:
+            logger.exception(
+                "[memory:%s] get_extract_cursor failed; falling back to full messages",
+                self.agent_name,
+            )
+            last_marker = None
+
+        sliced = messages
+        if last_marker:
+            cutoff_idx = self._find_marker_index(messages, last_marker)
+            if cutoff_idx is not None:
+                sliced = messages[cutoff_idx + 1:]
+                logger.info(
+                    "[memory:%s] incremental: cursor=%s sliced %d -> %d messages",
+                    self.agent_name,
+                    last_marker,
+                    len(messages),
+                    len(sliced),
+                )
+            else:
+                # marker 在当前 messages 列表里找不到（caller 可能传了截断的子序列）
+                # → fallback 到全量；保守一点保证不丢内容
+                logger.warning(
+                    "[memory:%s] last cursor marker %s not found in current messages; "
+                    "falling back to full extraction",
+                    self.agent_name,
+                    last_marker,
+                )
+
+        # 写入成功后 cursor 推到本次最后一条 message
+        marker_advances_to = self._make_marker(messages[-1]) if messages else None
+        return sliced, marker_advances_to
+
+    def _cursor_key(self) -> str:
+        """同一 (session_id, agent_name) 共享一个 cursor。"""
+        return f"{self.session_id}:{self.agent_name}"
+
+    @staticmethod
+    def _make_marker(message: dict[str, Any]) -> str:
+        """计算一条 message 的稳定 marker，用作增量抽取的"截止点"标识。
+
+        优先级：
+        1. ``message["seq"]`` 是整数 → ``"seq:<n>"``。AgentLoop 在 ``_load_history``
+           等场景下从 DB 表 ``agent_messages.seq`` 还原历史时，**caller 应该把 seq
+           回填到 dict**，让 marker 直接绑 DB 序号——稳定、唯一、可比较。
+        2. 否则退回 ``"hash:<sha256(role+content)[:16]>"``。In-memory 新构造的
+           message dict（system / user_input / assistant turn）通常没 seq 字段，
+           只能基于内容做 hash。
+
+        hash 路径的局限：
+        - 如果某条历史消息的 content 被改写（比如 system prompt 调整、上下文 block
+          注入到原有消息中），hash 变了，下次就找不到游标对应的 message → fallback
+          到全量抽取（保守安全，但浪费 LLM 调用）。
+        - 业务想避免这个 fallback，应在 _load_history / 持久化层把 seq 字段穿透到
+          in-memory messages dict。
+
+        framework 当前默认走 hash 路径——它对 caller 没要求，开箱即用；性能上
+        最坏退化到"重抽过去内容"，不会丢数据。
+        """
+        if "seq" in message and isinstance(message["seq"], int):
+            return f"seq:{message['seq']}"
+        role = str(message.get("role", ""))
+        content = str(message.get("content", ""))
+        digest = hashlib.sha256(f"{role}|{content}".encode("utf-8")).hexdigest()
+        return f"hash:{digest[:16]}"
+
+    @classmethod
+    def _find_marker_index(
+        cls,
+        messages: list[dict[str, Any]],
+        marker: str,
+    ) -> Optional[int]:
+        """从尾向头找 marker 对应的 message 下标。找不到返回 None。"""
+        for i in range(len(messages) - 1, -1, -1):
+            if cls._make_marker(messages[i]) == marker:
+                return i
+        return None
 
     # ------------------------------------------------------------------ #
     # 兜底 compact 触发器

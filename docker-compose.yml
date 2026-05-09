@@ -1,6 +1,8 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    # 用官方 pgvector 镜像（PG 16 + pgvector 扩展预装）。换镜像不影响现有数据
+    # （挂的是同一个 postgres_data volume），只是容器内多了 pgvector C 扩展。
+    image: pgvector/pgvector:pg16
     restart: unless-stopped
     env_file:
       - ./backend/.env

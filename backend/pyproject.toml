@@ -12,6 +12,7 @@ dependencies = [
     "httpx[socks]>=0.28.1",
     "oss2>=2.19.1",
     "passlib[bcrypt]>=1.7.4",
+    "pgvector>=0.4.2",
     "pillow>=12.2.0",
     "psycopg2-binary>=2.9.11",
     "pydantic>=2.7.0",

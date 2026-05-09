@@ -20,6 +20,7 @@ filter 后注入即可。
 """
 
 from app.core.agent.memory.config import MemoryConfig
+from app.core.agent.memory.embedding import EmbeddingService
 from app.core.agent.memory.extractor import MemoryExtractor
 from app.core.agent.memory.filter import FilterChain, MemoryFilter
 from app.core.agent.memory.harness import MemoryHarness
@@ -52,6 +53,7 @@ __all__ = [
     "MemoryRanker",
     "MemoryExtractor",
     "MemoryFilter",
+    "EmbeddingService",
     # framework 自有的聚合逻辑
     "FilterChain",
     # 数据类型

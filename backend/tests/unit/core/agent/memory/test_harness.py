@@ -72,7 +72,7 @@ async def test_write_full_pipeline_passes_when_filters_open():
     assert out.candidates_total == 1
     assert out.candidates_written == 1
     assert len(out.written_ids) == 1
-    assert len(provider.write_calls) == 1
+    assert len(provider.committed_candidates) == 1
     assert len(extractor.calls) == 1
 
 
@@ -91,12 +91,12 @@ async def test_write_pre_filter_blocks_extractor():
     assert out.candidates_total == 0
     assert out.candidates_written == 0
     assert len(extractor.calls) == 0  # 关键：pre 砍了，extractor 没被调
-    assert len(provider.write_calls) == 0
+    assert len(provider.committed_candidates) == 0
 
 
 @pytest.mark.asyncio
 async def test_write_post_filter_blocks_low_quality_candidate():
-    """post_filter 失败 → provider.write 不被调用。"""
+    """post_filter 失败 → provider.commit_extraction 写入 0 条。"""
     h, provider, _ = _make_harness(
         post_filters=[ConstFilter("hard_no", 0.0)],
         post_threshold=0.5,
@@ -109,7 +109,7 @@ async def test_write_post_filter_blocks_low_quality_candidate():
     assert out.candidates_total == 1
     assert out.candidates_written == 0
     assert all(not d.passed for d in out.post_decisions)
-    assert len(provider.write_calls) == 0
+    assert len(provider.committed_candidates) == 0
 
 
 @pytest.mark.asyncio
@@ -146,8 +146,8 @@ async def test_explicit_save_overrides_kind_and_confidence():
         explicit_confidence=0.95,
     )
     assert out.candidates_written == 1
-    assert provider.write_calls[0].kind == "preference"
-    assert provider.write_calls[0].confidence == 0.95
+    assert provider.committed_candidates[0].kind == "preference"
+    assert provider.committed_candidates[0].confidence == 0.95
 
 
 @pytest.mark.asyncio
@@ -164,8 +164,8 @@ async def test_user_correction_does_not_override_kind():
     )
     assert out.candidates_written == 1
     # 非 explicit_save 时 kind / confidence 不被覆盖
-    assert provider.write_calls[0].kind == "default"
-    assert provider.write_calls[0].confidence == 0.4
+    assert provider.committed_candidates[0].kind == "default"
+    assert provider.committed_candidates[0].confidence == 0.4
 
 
 # -------------------------- recall 主路径 -------------------------- #

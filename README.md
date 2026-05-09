@@ -123,6 +123,51 @@ uv run alembic current
 uv run alembic revision --autogenerate -m "描述"
 ```
 
+## PostgreSQL 安装 pgvector 扩展
+
+Memory 框架的语义召回依赖 [pgvector](https://github.com/pgvector/pgvector)。
+官方 `postgres:16-alpine` 镜像**没有**预装这个扩展，需要切换到官方
+`pgvector/pgvector:pg16` 镜像（已包含 pgvector，跟原镜像同一基础 PG 16，数据
+完全兼容；只要继续挂同一个 `postgres_data` volume，原有数据不会丢）。
+
+`docker-compose.yml` 中 `postgres` service 的 image 字段已经改为
+`pgvector/pgvector:pg16`。**首次切换需要做下面三步**（数据保留）：
+
+```bash
+# 1. 停掉旧 postgres 容器（不要 down -v，否则 volume 会被一起删，数据丢失）
+docker compose stop postgres
+docker compose rm -f postgres
+
+# 2. 拉新镜像
+docker compose pull postgres
+
+# 3. 启动新容器（继续挂同一个 postgres_data volume）
+docker compose up -d postgres
+```
+
+启动完成后，扩展是**容器内可用**但**数据库内未启用**——alembic migration 会自动
+跑 `CREATE EXTENSION IF NOT EXISTS vector`：
+
+```bash
+cd backend
+uv run alembic upgrade head
+```
+
+验证扩展启用 + 表创建成功：
+
+```bash
+docker compose exec postgres psql -U postgres -d filmgenx -c \
+  "SELECT extname FROM pg_extension WHERE extname='vector';"
+# 期望输出包含一行 vector
+
+docker compose exec postgres psql -U postgres -d filmgenx -c \
+  "\d memory_entries"
+# 期望看到 embedding 列类型为 vector(768)
+```
+
+如果以后切换更高维度的 embedding 模型（比如 1536 维），需要在 alembic 写一条新
+迁移 ALTER 列 + 重建 HNSW 索引；不要直接改老 migration 文件。
+
 ## 项目结构
 
 ```

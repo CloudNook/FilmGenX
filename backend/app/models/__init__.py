@@ -2,6 +2,9 @@
 # 此文件统一导入所有模型，确保 Alembic 迁移时能自动发现所有表。
 
 from app.models.asset import Asset
+from app.models.memory_entry import MemoryEntry
+from app.models.memory_extract_cursor import MemoryExtractCursor
+from app.models.memory_profile import MemoryProfile
 from app.models.project import Project
 from app.models.skill import Skill
 from app.models.supervisor_event import SupervisorEvent
@@ -15,6 +18,9 @@ from app.models.workspace import Workspace
 
 __all__ = [
     "Asset",
+    "MemoryEntry",
+    "MemoryExtractCursor",
+    "MemoryProfile",
     "Project",
     "Skill",
     "SupervisorEvent",
