@@ -43,6 +43,7 @@ from app.core.agent.memory.types import (
     RecallQuery,
     RecalledMemory,
 )
+from app.memory.taxonomy import KIND_REGISTRY, validate_kv
 from app.models.memory_entry import MemoryEntry
 from app.models.memory_extract_cursor import MemoryExtractCursor
 from app.models.memory_profile import MemoryProfile
@@ -96,11 +97,36 @@ class PgvectorMemoryProvider(MemoryProvider):
         cursor_key: Optional[str] = None,
         cursor_marker: Optional[str] = None,
     ) -> list[str]:
-        """单一 PG 事务：所有 candidate 写入 + cursor 推进 atomically。"""
+        """单一 PG 事务：所有 candidate 写入 + cursor 推进 atomically。
+
+        Profile candidate（含 entity_kind+entity_key）会按 ``app.memory.taxonomy``
+        校验：kind 必须在 ALLOWED_KINDS 内，key 符合 kind 的 open/closed/single 规则，
+        value 符合 kind 的 Pydantic schema。**校验失败的 candidate 直接丢弃**（log
+        warning），其余正常入库 + cursor 仍然推进。
+        """
         if cursor_key is not None and cursor_marker is None:
             raise ValueError("cursor_marker is required when cursor_key is provided")
 
         scope = self._enforce_domain_scope(scope_metadata)
+
+        # 先按 taxonomy 过滤 profile candidate；保留无 entity 的 entry candidate
+        validated_candidates: list[CandidateMemory] = []
+        for c in candidates:
+            if not _is_profile_candidate(c):
+                validated_candidates.append(c)
+                continue
+            try:
+                self._normalize_profile_candidate(c)
+            except ValueError as exc:
+                logger.warning(
+                    "[pgvector] dropping invalid candidate kind=%s key=%s: %s",
+                    (c.entity or {}).get("entity_kind"),
+                    (c.entity or {}).get("entity_key"),
+                    exc,
+                )
+                continue
+            validated_candidates.append(c)
+        candidates = validated_candidates
 
         # 把 embedding 算在事务外（embedding 调用是 RPC 外联，慢，不该卡住 PG 事务）
         memory_candidates = [c for c in candidates if not _is_profile_candidate(c)]
@@ -150,23 +176,32 @@ class PgvectorMemoryProvider(MemoryProvider):
     # 事务内的写入辅助（不开 session，不 commit；session 由 caller 管理）
     # ---------------------------------------------------------------- #
 
+    def _normalize_profile_candidate(
+        self, candidate: CandidateMemory
+    ) -> tuple[str, str, dict[str, Any]]:
+        """从 candidate 抽出 (kind, key, value) 并按 taxonomy 校验+归一化。"""
+        assert candidate.entity is not None
+        entity_kind = candidate.entity.get("entity_kind")
+        entity_key = candidate.entity.get("entity_key")
+        if not isinstance(entity_kind, str) or not isinstance(entity_key, str):
+            raise ValueError("entity_kind / entity_key must both be strings")
+
+        # candidate.entity 里除了 entity_kind / entity_key，剩下的都是 value 字段
+        raw_value = {
+            k: v
+            for k, v in candidate.entity.items()
+            if k not in ("entity_kind", "entity_key")
+        }
+        value = validate_kv(entity_kind, entity_key, raw_value)
+        return entity_kind, entity_key, value
+
     async def _upsert_profile_in_session(
         self,
         session: AsyncSession,
         candidate: CandidateMemory,
         scope_metadata: dict[str, Any],
     ) -> str:
-        assert candidate.entity is not None  # 由 _is_profile_candidate 保证
-        entity_kind = candidate.entity["entity_kind"]
-        entity_key = candidate.entity["entity_key"]
-        value = {
-            "content": candidate.content,
-            **{
-                k: v
-                for k, v in candidate.entity.items()
-                if k not in ("entity_kind", "entity_key")
-            },
-        }
+        entity_kind, entity_key, value = self._normalize_profile_candidate(candidate)
 
         # 把当前生效行 superseded
         stmt = (
@@ -218,6 +253,94 @@ class PgvectorMemoryProvider(MemoryProvider):
         return f"entry:{row.id}"
 
     # ---------------------------------------------------------------- #
+    # 业务扩展：直接 set_kv（绕过 extractor），list_active 全量取
+    # ---------------------------------------------------------------- #
+
+    async def set_kv(
+        self,
+        kind: str,
+        key: str,
+        value: dict[str, Any],
+        *,
+        scope_metadata: Optional[dict[str, Any]] = None,
+        confidence: float = 1.0,
+        extra_metadata: Optional[dict[str, Any]] = None,
+    ) -> str:
+        """**确定性写入**：业务工具 / agent 直接 UPSERT 一条 KV，不走 extractor。
+
+        和 commit_extraction 用同一份 taxonomy 校验逻辑。校验失败抛 ValueError，由
+        caller 决定如何处理（一般直接抛回给 LLM 做参数纠正）。
+        """
+        validated_value = validate_kv(kind, key, value)
+        clean_scope = _scope_metadata_for_filter(scope_metadata or {})
+        scope = self._enforce_domain_scope(clean_scope)
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                stmt = (
+                    update(MemoryProfile)
+                    .where(
+                        and_(
+                            MemoryProfile.scope.op("@>")(scope),
+                            MemoryProfile.scope.op("<@")(scope),
+                            MemoryProfile.entity_kind == kind,
+                            MemoryProfile.entity_key == key,
+                            MemoryProfile.superseded_at.is_(None),
+                            MemoryProfile.is_deleted.is_(False),
+                        )
+                    )
+                    .values(superseded_at=datetime.now(timezone.utc))
+                )
+                await session.execute(stmt)
+
+                row = MemoryProfile(
+                    scope=dict(scope),
+                    entity_kind=kind,
+                    entity_key=key,
+                    value=validated_value,
+                    confidence=float(confidence),
+                    extra_metadata=dict(extra_metadata or {}),
+                )
+                session.add(row)
+                await session.flush()
+                new_id = row.id
+
+        return f"profile:{new_id}"
+
+    async def list_active(
+        self,
+        scope_metadata: Optional[dict[str, Any]] = None,
+    ) -> list[RecalledMemory]:
+        """全量返回当前 domain 的 active KV。给"全量注入" prompt 用。
+
+        按 (entity_kind, entity_key, created_at) 排序，方便上层按 kind group 后渲染。
+        不走 vector 检索，不走 ranker —— KV 是有限集合，全量注入。
+        """
+        # 过滤出真正的业务 scope 字段（去掉 strategy / query_embedding 这些框架专用 key），
+        # 再 enforce domain
+        clean_scope = _scope_metadata_for_filter(scope_metadata or {})
+        scope = self._enforce_domain_scope(clean_scope)
+
+        async with self._session_factory() as session:
+            stmt = (
+                select(MemoryProfile)
+                .where(
+                    MemoryProfile.scope.op("@>")(scope),
+                    MemoryProfile.scope.op("<@")(scope),
+                    MemoryProfile.superseded_at.is_(None),
+                    MemoryProfile.is_deleted.is_(False),
+                )
+                .order_by(
+                    MemoryProfile.entity_kind,
+                    MemoryProfile.entity_key,
+                    MemoryProfile.created_at,
+                )
+            )
+            rows = (await session.execute(stmt)).scalars().all()
+
+        return [_profile_row_to_recalled(r) for r in rows]
+
+    # ---------------------------------------------------------------- #
     # recall
     # ---------------------------------------------------------------- #
 
@@ -226,6 +349,13 @@ class PgvectorMemoryProvider(MemoryProvider):
         enriched_metadata = self._enforce_domain_scope(query.metadata)
         scoped_query = query.model_copy(update={"metadata": enriched_metadata})
 
+        # FilmGenX 默认走全量注入（KV 是有限集合，召回 = 全量）。framework 仍然
+        # 接收 RecallQuery 走 ranker，但 ranker 在 full_kv 模式下应当是 passthrough。
+        strategy = scoped_query.metadata.get("strategy", "full_kv")
+        if strategy == "full_kv":
+            return await self.list_active(scoped_query.metadata)
+
+        # 旧的 vector_ranked 路径保留：
         results: list[RecalledMemory] = []
 
         entity_filter = scoped_query.metadata.get("entity_filter") or {}
@@ -260,22 +390,7 @@ class PgvectorMemoryProvider(MemoryProvider):
 
             rows = (await session.execute(stmt)).scalars().all()
 
-        return [
-            RecalledMemory(
-                id=f"profile:{r.id}",
-                content=str(r.value.get("content", "")),
-                kind=r.entity_kind,
-                entity={
-                    "entity_kind": r.entity_kind,
-                    "entity_key": r.entity_key,
-                    **{k: v for k, v in r.value.items() if k != "content"},
-                },
-                confidence=float(r.confidence),
-                created_at=r.created_at,
-                metadata=dict(r.extra_metadata or {}),
-            )
-            for r in rows
-        ]
+        return [_profile_row_to_recalled(r) for r in rows]
 
     async def _query_memory_entries(self, query: RecallQuery) -> list[RecalledMemory]:
         scope_filter = _scope_metadata_for_filter(query.metadata)
@@ -352,6 +467,48 @@ def _is_profile_candidate(candidate: CandidateMemory) -> bool:
     return "entity_kind" in candidate.entity and "entity_key" in candidate.entity
 
 
+def _profile_row_to_recalled(row: MemoryProfile) -> RecalledMemory:
+    """把 MemoryProfile ORM 行翻译成 framework 的 RecalledMemory。
+
+    value 是 taxonomy 校验过的结构化 dict；这里用 ``content`` 字段拼一个
+    简短摘要给框架的 ranker / inject 使用，但 entity 里保留完整 value 字段
+    供下游 agent 直接消费。
+    """
+    value = dict(row.value or {})
+    summary = _format_kv_summary(row.entity_kind, row.entity_key, value)
+    return RecalledMemory(
+        id=f"profile:{row.id}",
+        content=summary,
+        kind=row.entity_kind,
+        entity={
+            "entity_kind": row.entity_kind,
+            "entity_key": row.entity_key,
+            **value,
+        },
+        confidence=float(row.confidence),
+        created_at=row.created_at,
+        metadata=dict(row.extra_metadata or {}),
+    )
+
+
+def _format_kv_summary(kind: str, key: str, value: dict[str, Any]) -> str:
+    """把结构化 value 渲染成给 LLM 看的紧凑摘要。
+
+    每个 kind 自己挑代表字段（character.appearance / scene.atmosphere / preference.description...）。
+    上层 inject 时还会再 group 渲染，这里给个单行 fallback。
+    """
+    parts: list[str] = []
+    for field in ("description", "summary", "appearance", "atmosphere", "name"):
+        v = value.get(field)
+        if isinstance(v, str) and v:
+            parts.append(v)
+            break
+    if not parts:
+        # 兜底：拼字段
+        parts.append(", ".join(f"{k}={v}" for k, v in value.items() if v))
+    return f"[{kind}.{key}] " + (parts[0] if parts else "")
+
+
 def _scope_metadata_for_filter(metadata: dict[str, Any]) -> dict[str, Any]:
     """从 RecallQuery.metadata 抽出真正的 scope 字段，过滤掉框架专用 key。
 
@@ -359,5 +516,5 @@ def _scope_metadata_for_filter(metadata: dict[str, Any]) -> dict[str, Any]:
     ``query_embedding`` / ``entity_filter`` / ``include_memory`` / ``kinds`` 等是
     召回参数，不参与 scope 比对。
     """
-    reserved = {"query_embedding", "entity_filter", "include_memory", "kinds"}
+    reserved = {"query_embedding", "entity_filter", "include_memory", "kinds", "strategy"}
     return {k: v for k, v in metadata.items() if k not in reserved}

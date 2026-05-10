@@ -36,8 +36,8 @@ def build_domain_memory_config(
     save_tool_enabled: bool = True,
     fallback_compact_every_n_loops: int = 1,
     fallback_compact_message_window: int = 20,
-    recall_threshold: float = 0.5,
-    recall_max_items: int = 10,
+    recall_threshold: float = 0.0,
+    recall_max_items: int = 200,
 ) -> MemoryConfig:
     """构造 domain-scoped MemoryConfig。
 

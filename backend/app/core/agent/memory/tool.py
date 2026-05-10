@@ -1,48 +1,64 @@
 """
-``memory_save`` 工具——LLM 主动调它把当前对话中的事实 / 偏好 / 决策固化到长期 memory。
+``memory_save`` 工具——LLM 主动写入项目级 KV memory。
 
-工具走的是和 fallback_compact / user_correction 完全相同的 ``MemoryHarness.write``
-管道：raw → pre_filter → extract → post_filter → provider.write。Filter 链能拦下
-噪音；LLM 调了不一定真落库。
+设计原则（FilmGenX 业务约定）：
+- ``kind`` 是闭集：character / scene / style / preference / outline / script
+- ``key`` 按 kind 不同有不同规则（详见 ``app/memory/taxonomy.py``）
+- ``value`` 是结构化 dict，由 taxonomy 的 Pydantic schema 校验
 
-工具实例不直接走 ToolRegistry 的 @register_tool（那是全局注册），而是由 Agent
-在 ``_init_tool_executor`` 时注入 ``memory_harness`` 到 ``ToolExecutor.extra_kwargs``，
-让本工具 await harness.write() 即可。
+确定性写入路径，不走 extractor。失败（kind/key/value 不合规）会把错误抛回给
+LLM，让 LLM 看到 tool_result 后自行纠正。
+
+业务定义在 ``app/memory/taxonomy.py``，框架不感知具体 kind / key。这个工具的
+schema 也是按 taxonomy 动态构造，业务改 taxonomy 时无需改 framework。
 """
 
 from __future__ import annotations
 
 from typing import Any, Optional
 
-from app.core.agent.memory.types import WriteOutcome, WriteTrigger
 from app.core.tools.registry import register_tool
 
 
 def build_memory_save_tool_schema() -> dict[str, Any]:
-    """供 AgentConfig.tools 注入的 OpenAI/Gemini 兼容 tool schema。"""
+    """构造 memory_save 的 LLM 工具 schema，taxonomy 注入到 description。"""
+    # 延迟 import：framework 不应在 import 时依赖业务 taxonomy
+    from app.memory.taxonomy import ALLOWED_KINDS, taxonomy_prompt_block
+
     return {
         "name": "memory_save",
         "description": (
-            "Persist a fact / preference / decision from the current conversation "
-            "into long-term memory. Use sparingly: only for information worth "
-            "remembering across sessions. Provide content as one or more concise "
-            "sentences; the framework's filter chain may still drop low-quality "
-            "candidates."
+            "Persist a structured KV entry into the project's long-term memory. "
+            "All subsequent agents in this project will see it. "
+            "kind / key / value must conform to the FilmGenX taxonomy:\n\n"
+            + taxonomy_prompt_block()
+            + "\n\nUSE ONLY when you have concrete information matching the taxonomy. "
+              "Do NOT invent new kinds or keys. Tool returns an error you can read "
+              "and correct from."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "content": {
-                    "type": "string",
-                    "description": "Concise summary of what to remember.",
-                },
                 "kind": {
                     "type": "string",
+                    "enum": ALLOWED_KINDS,
+                    "description": "Memory kind (taxonomy enum).",
+                },
+                "key": {
+                    "type": "string",
                     "description": (
-                        "Type of memory (e.g. preference, fact, decision). "
-                        "Free-form, business-defined."
+                        "Entity key. For 'character' / 'scene' use the canonical name. "
+                        "For 'style' use one of palette/lighting/composition/mood/camera. "
+                        "For 'preference' use one of genre/duration/pacing/format/structure. "
+                        "For 'outline' / 'script' use 'main'."
                     ),
-                    "default": "fact",
+                },
+                "value": {
+                    "type": "object",
+                    "description": (
+                        "Structured value matching the kind's schema. See description "
+                        "above for fields per kind."
+                    ),
                 },
                 "confidence": {
                     "type": "number",
@@ -52,7 +68,7 @@ def build_memory_save_tool_schema() -> dict[str, Any]:
                     "default": 1.0,
                 },
             },
-            "required": ["content"],
+            "required": ["kind", "key", "value"],
         },
     }
 
@@ -60,66 +76,54 @@ def build_memory_save_tool_schema() -> dict[str, Any]:
 @register_tool(
     name="memory_save",
     description=(
-        "Persist a fact / preference / decision from the current conversation "
-        "into long-term memory. Use sparingly—only for information worth "
-        "remembering across sessions. The framework's filter chain may still "
-        "drop low-quality candidates; check the returned ``ok`` field."
+        "Persist a structured KV entry (kind, key, value) into the project's "
+        "long-term memory. Schema is enforced by the FilmGenX taxonomy."
     ),
 )
 async def memory_save_handler(
-    content: str,
-    kind: str = "fact",
+    kind: str,
+    key: str,
+    value: dict[str, Any],
     confidence: float = 1.0,
     *,
     memory_harness: Optional[Any] = None,
-    loop_count: int = 0,
 ) -> dict[str, Any]:
-    """工具处理器。``memory_harness`` 由 Agent 通过 ToolExecutor.extra_kwargs 注入。
-
-    返回结构对 LLM 友好：``{ok, written_count, written_ids, rejected_reason?}``。
-    """
+    """工具处理器。``memory_harness`` 由 Agent 通过 ``ToolExecutor.extra_kwargs`` 注入。"""
     if memory_harness is None:
         return {
             "ok": False,
             "error": "memory not configured for this agent",
-            "written_count": 0,
         }
 
-    # 构造一条 user 消息作为 raw payload，让管道走完整流程
-    fake_messages: list[dict[str, Any]] = [
-        {"role": "user", "content": content, "metadata": {"kind": kind}}
-    ]
-
-    outcome: WriteOutcome = await memory_harness.write(
-        messages=fake_messages,
-        trigger=WriteTrigger.EXPLICIT_SAVE,
-        loop_count=loop_count,
-        explicit_kind=kind,
-        explicit_confidence=confidence,
-    )
-
-    if outcome.candidates_written > 0:
-        return {
-            "ok": True,
-            "written_count": outcome.candidates_written,
-            "written_ids": outcome.written_ids,
-        }
-
-    rejected_reasons = []
-    if not outcome.pre_decision.passed:
-        rejected_reasons.append(
-            f"pre-extraction filters rejected (score={outcome.pre_decision.aggregate_score:.2f})"
+    try:
+        new_id = await memory_harness.set_kv(
+            kind=kind,
+            key=key,
+            value=value,
+            confidence=confidence,
+            extra_metadata={"source": "memory_save_tool"},
         )
-    for d in outcome.post_decisions:
-        if not d.passed:
-            rejected_reasons.append(
-                f"post-extraction rejected (score={d.aggregate_score:.2f}"
-                + (f", by={d.rejected_by}" if d.rejected_by else "")
-                + ")"
-            )
+    except ValueError as exc:
+        # taxonomy 校验失败 —— 把详细错误抛回 LLM，它能从 tool_result 里看到
+        return {
+            "ok": False,
+            "error": f"invalid kind/key/value: {exc}",
+        }
+    except Exception as exc:  # pragma: no cover - 容灾
+        return {
+            "ok": False,
+            "error": f"unexpected memory error: {type(exc).__name__}: {exc}",
+        }
+
+    if new_id is None:
+        return {
+            "ok": False,
+            "error": "memory provider does not support set_kv",
+        }
 
     return {
-        "ok": False,
-        "written_count": 0,
-        "rejected_reason": "; ".join(rejected_reasons) or "no candidates extracted",
+        "ok": True,
+        "id": new_id,
+        "kind": kind,
+        "key": key,
     }

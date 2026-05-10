@@ -1,20 +1,21 @@
 """
 GeminiLLMExtractor —— 实现 ``MemoryExtractor`` Protocol。
 
-把原始消息序列喂给 Gemini，让它抽出"值得记的事实/偏好/决策"。LLM 返回结构化
-JSON（按 schema 强约束），每条对应一个 ``CandidateMemory``。
+**只抽 preference / outline 两种 kind**。其它 kind（character / scene / style / script）
+全部走"agent 通过 memory_save 工具显式写入"——LLM 看到工具结果（OSS URL 等）后
+主动调 memory_save 才入库。这样：
+- LLM 不会乱发明 entity_key / entity_kind（比如不同会话给同一角色起 4 个 key）
+- 只有"对话里能挖出的软信息"（preference / outline）走自动抽取
 
-抽取出来的 candidate 后续走 framework 的 post-extraction filter chain，所以这里
-不需要做去重 / 质量评估 —— 只管"用 LLM 把对话压成结构化候选"。
-
-业务可以自己写更高级的 Extractor（比如规则式 + LLM 兜底），实现同样的 Protocol 即可。
+response_schema 结构化输出 + per-kind value 字段，让 Gemini 直接产出与 taxonomy
+对齐的结构。下游 provider 还会再走一次 ``validate_kv`` 兜底。
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from google import genai
 from google.genai import types as genai_types
@@ -27,75 +28,70 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_EXTRACT_MODEL = "gemini-3-flash-preview"  # 抽取用便宜模型
+DEFAULT_EXTRACT_MODEL = "gemini-3-flash-preview"
 
 
-# ---- LLM 输出 schema（response_schema 强约束）----
+# ---- LLM response_schema ------------------------------------------------ #
 
 
-class _ExtractedMemoryItem(BaseModel):
-    """LLM 抽取出的单条候选 —— 与 CandidateMemory 字段对齐。"""
+class _PreferenceItem(BaseModel):
+    """与 ``app.memory.taxonomy.PreferenceValue`` 对齐 + 限定 key 的 enum。"""
 
-    content: str = Field(..., description="自然语言陈述：1-2 句话，可直接读")
-    kind: str = Field(
-        ...,
-        description=(
-            "条目类型，从 fact / preference / decision / episode_outcome 中选。"
-            "fact = 客观事实；preference = 用户偏好；decision = 关键决定；"
-            "episode_outcome = 集级结尾状态 / 伏笔"
-        ),
+    key: Literal["genre", "duration", "pacing", "format", "structure"] = Field(
+        ..., description="偏好维度"
     )
-    confidence: float = Field(
-        default=0.8,
-        ge=0.0,
-        le=1.0,
-        description="置信度 0-1，模糊或推断时降低",
-    )
-    entity_kind: Optional[str] = Field(
-        default=None,
-        description=(
-            "如果这条是关于某个具体实体（角色 / 场景 / asset / 用户偏好）的当前态，"
-            "在这里写实体类型，如 character / scene / preference。否则留空。"
-        ),
-    )
-    entity_key: Optional[str] = Field(
-        default=None,
-        description=(
-            "实体的业务 key（角色名 / 场景名 / 偏好 key）。entity_kind 非空时必填，"
-            "否则留空。"
-        ),
-    )
+    description: str = Field(..., description="该偏好的具体描述")
+    confidence: float = Field(default=0.8, ge=0.0, le=1.0)
 
 
-class _ExtractedMemoryList(BaseModel):
-    items: list[_ExtractedMemoryItem] = Field(
+class _OutlineItem(BaseModel):
+    """与 ``app.memory.taxonomy.OutlineValue`` 对齐。一份 outline 一个 project。"""
+
+    summary: str = Field(..., description="一句话剧情综述")
+    characters: list[str] = Field(default_factory=list, description="主要角色名清单")
+    key_arcs: list[str] = Field(default_factory=list, description="关键情节段落")
+    duration_seconds: Optional[int] = Field(default=None, description="预期总时长（秒）")
+    confidence: float = Field(default=0.8, ge=0.0, le=1.0)
+
+
+class _ExtractedOutput(BaseModel):
+    """整体输出。preference 可多条；outline 至多一份。"""
+
+    preferences: list[_PreferenceItem] = Field(
         default_factory=list,
-        description="抽出的候选条目列表；没什么值得记的就返回空数组",
+        description="抽出的用户偏好。一个偏好维度不重复出现；不确定就不抽。",
+    )
+    outline: Optional[_OutlineItem] = Field(
+        default=None,
+        description="项目大纲。只有当对话里出现完整剧情大纲讨论时才抽，否则留空。",
     )
 
 
-_DEFAULT_SYSTEM_PROMPT = """你是一个 memory 抽取助手。从给定的对话片段中识别"值得跨会话记忆的内容"，输出结构化候选条目。
+_DEFAULT_SYSTEM_PROMPT = """你是 FilmGenX 项目的 memory 抽取助手。从对话片段中识别"值得跨会话记忆的软信息"，输出结构化候选。
 
-判定标准（满足任一即可抽出）：
-- 客观事实：项目 / 用户身上稳定不变的属性
-- 用户偏好：用户明确说"我喜欢/不喜欢/总是这样做"
-- 关键决定：影响后续工作的决策（"用 photorealistic 风格"）
-- 集级结尾 / 伏笔：跨会话还会被引用的剧情节点
+# 你只抽两种内容
+1. **preference**：用户对作品的明确偏好。维度限定为 5 个：
+   - genre（题材：科幻/玄幻/都市…）
+   - duration（时长：60秒/3分钟…）
+   - pacing（节奏：快节奏/慢热…）
+   - format（剧本格式：含镜头号/旁白…）
+   - structure（结构：起承转合时间分配…）
+   每个维度只产出一条，描述清楚即可。
 
-不要抽：闲聊、临时讨论、过程性思考、reviewer 反复修订的中间产物。
+2. **outline**：项目级剧情大纲。一个 project 只一份。
+   仅当用户/agent 给出完整剧情大纲讨论（不是片段台词）时抽出。
+   字段：summary（一句话）、characters（主要角色名）、key_arcs（关键情节段）、duration_seconds（总时长秒）。
 
-如果某条信息是关于一个具体实体的当前态（"陈墨的最新设定"、"用户的色调偏好"），
-填写 entity_kind + entity_key，下游会把它存到实体表（profile）做精确召回。
-否则留空，存到事件表（memory）做语义召回。
+# 你不抽什么
+- character（角色）/ scene（场景）/ style（视觉风格）/ script（剧本）：这些由 agent 调
+  memory_save 工具显式写入；你不要碰这些 kind。
+- 闲聊 / 临时讨论 / 过程性思考 / reviewer 中间态。
+- 用户没明确表态的内容。宁可不抽，不要硬猜。
 
-实体识别规则：
-- character / 角色：entity_key = 角色名
-- scene / 场景：entity_key = 地点名
-- preference / 偏好：entity_key = 偏好领域（如 dialog_length / color_palette）
-- visual_style / 风格锚：entity_key = 风格 ID
-- asset / 已生成素材：entity_key = 资产业务 key
-
-宁可抽取保守一些少几条，不要把不确定的内容硬抽成"事实"。
+# 重要约束
+- 只输出 schema 里定义的字段，不要发明新字段。
+- 不要重复抽：同一 preference 维度只出现一次。
+- 没什么可抽就返回空数组 / outline=null。
 """
 
 
@@ -108,7 +104,6 @@ class GeminiLLMExtractor(MemoryExtractor):
         model: str = DEFAULT_EXTRACT_MODEL,
         system_prompt: str = _DEFAULT_SYSTEM_PROMPT,
     ) -> None:
-        """API key 走 ``settings.GOOGLE_API_KEY``（``.env`` 配置），不显式传。"""
         self._model = model
         self._system_prompt = system_prompt
         self._client: Optional[genai.Client] = None
@@ -138,13 +133,13 @@ class GeminiLLMExtractor(MemoryExtractor):
         user_prompt = (
             f"## 当前 scope\n{scope_summary}\n\n"
             f"## 对话片段\n{conversation}\n\n"
-            "请按 schema 输出值得记的候选条目。"
+            "请按 schema 输出 preference / outline 候选条目。"
         )
 
         config = genai_types.GenerateContentConfig(
             system_instruction=self._system_prompt,
             response_mime_type="application/json",
-            response_schema=_ExtractedMemoryList.model_json_schema(),
+            response_schema=_strip_unsupported(_ExtractedOutput.model_json_schema()),
             temperature=0.2,
         )
 
@@ -164,7 +159,7 @@ class GeminiLLMExtractor(MemoryExtractor):
 
         try:
             payload = json.loads(raw_text)
-            parsed = _ExtractedMemoryList.model_validate(payload)
+            parsed = _ExtractedOutput.model_validate(payload)
         except Exception:
             logger.exception(
                 "[gemini-extractor] failed to parse LLM JSON output: %r",
@@ -173,32 +168,69 @@ class GeminiLLMExtractor(MemoryExtractor):
             return []
 
         candidates: list[CandidateMemory] = []
-        for item in parsed.items:
-            entity: Optional[dict[str, Any]] = None
-            if item.entity_kind and item.entity_key:
-                entity = {
-                    "entity_kind": item.entity_kind,
-                    "entity_key": item.entity_key,
-                }
+        meta_base = {"extractor": "gemini_llm", "model": self._model}
+
+        for pref in parsed.preferences:
             candidates.append(
                 CandidateMemory(
-                    content=item.content,
-                    kind=item.kind,
-                    entity=entity,
-                    confidence=item.confidence,
-                    extraction_metadata={
-                        "extractor": "gemini_llm",
-                        "model": self._model,
+                    content=pref.description,
+                    kind="preference",
+                    entity={
+                        "entity_kind": "preference",
+                        "entity_key": pref.key,
+                        "description": pref.description,
                     },
+                    confidence=pref.confidence,
+                    extraction_metadata=dict(meta_base),
+                )
+            )
+
+        if parsed.outline is not None:
+            ol = parsed.outline
+            outline_value = {
+                "summary": ol.summary,
+                "characters": list(ol.characters),
+                "key_arcs": list(ol.key_arcs),
+                "duration_seconds": ol.duration_seconds,
+            }
+            candidates.append(
+                CandidateMemory(
+                    content=ol.summary,
+                    kind="outline",
+                    entity={
+                        "entity_kind": "outline",
+                        "entity_key": "main",
+                        **outline_value,
+                    },
+                    confidence=ol.confidence,
+                    extraction_metadata=dict(meta_base),
                 )
             )
 
         logger.info(
-            "[gemini-extractor] extracted %d candidate(s) from %d message(s)",
+            "[gemini-extractor] extracted %d candidate(s) from %d message(s) "
+            "(preference=%d, outline=%s)",
             len(candidates),
             len(messages),
+            len(parsed.preferences),
+            "yes" if parsed.outline else "no",
         )
         return candidates
+
+
+def _strip_unsupported(schema: Any) -> Any:
+    """剥掉 Gemini response_schema 不识别的 JSON Schema 关键字。
+
+    Pydantic 默认输出 ``additionalProperties`` / ``$defs`` / ``title`` 等；Gemini 的
+    structured output 是 JSON Schema 的子集，遇到不识别的字段会 400。简单地把这些
+    递归删掉即可。
+    """
+    blocked = {"additionalProperties", "$schema", "title", "examples"}
+    if isinstance(schema, dict):
+        return {k: _strip_unsupported(v) for k, v in schema.items() if k not in blocked}
+    if isinstance(schema, list):
+        return [_strip_unsupported(item) for item in schema]
+    return schema
 
 
 def _format_messages(messages: list[dict[str, Any]]) -> str:
