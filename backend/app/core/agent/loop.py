@@ -19,7 +19,7 @@ from fastapi.encoders import jsonable_encoder
 from app.core.agent.base import (
     AgentConfig, AgentMessage, AgentResult, ToolCall, ToolExecutionResult,
     ToolResult, ThinkingEvent, TextEvent, ToolStartEvent, ToolEndEvent,
-    DoneEvent, ErrorEvent, InterruptEvent, InterruptDecision, AgentInterrupted,
+    DoneEvent, UsageEvent, ErrorEvent, InterruptEvent, InterruptDecision, AgentInterrupted,
     AgentCheckpoint, ResumeDecision, Reviewer,
 )
 from app.core.agent.llm import LLMAdapter
@@ -1143,6 +1143,18 @@ class AgentLoop:
 
             if final_chunk is not None:
                 self._add_usage(result, final_chunk.usage)
+                # 每次 LLM call 结束都 fire 一次 UsageEvent，给前端 / 上层流水线
+                # 做实时 token 累计计费用。usage 可能为 None（adapter 没返）这种情况
+                # 不 fire——caller 看不到就当 0 处理。
+                if final_chunk.usage:
+                    yield UsageEvent(
+                        usage=dict(final_chunk.usage),
+                        accumulated_usage=(
+                            dict(self._session_accumulated_usage)
+                            if self._session_accumulated_usage else None
+                        ),
+                        loop_count=self.loop_count,
+                    )
 
             # --- 把 assistant 消息记账到内存 ---
             _assistant_seq, current_assistant_msg_idx = self._record_assistant_message(

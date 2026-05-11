@@ -74,6 +74,24 @@ class _FakeVideoTask:
         self.video_duration = video_duration
 
 
+class _FakeMemoryHarness:
+    """最小 memory_harness mock：generate_image 只读 scope_metadata.domain_id 拿 project_id。"""
+
+    def __init__(self, domain_id: int = 1):
+        from types import SimpleNamespace
+        self.config = SimpleNamespace(scope_metadata={"domain_id": domain_id})
+
+
+def _patch_asset_save(monkeypatch, *, code: str = "img-test", asset_id: int = 1):
+    """绕过 Asset 表写入：直接 mock 内部 helper 返 (code, id)。"""
+    async def _fake_save(**kwargs):
+        return (code, asset_id)
+    monkeypatch.setattr(
+        "app.core.tools.media_tools._save_image_asset",
+        _fake_save,
+    )
+
+
 # --------------------------------------------------------------------- #
 # generate_image 成功路径
 # --------------------------------------------------------------------- #
@@ -81,6 +99,7 @@ class _FakeVideoTask:
 
 @pytest.mark.asyncio
 async def test_generate_image_default_model_is_pro(monkeypatch):
+    """t2i 默认走 pro 模型，自动落 OSS + 落 Asset 表分配 asset_code。"""
     captured_gen: dict = {}
     captured_oss: dict = {}
 
@@ -96,6 +115,7 @@ async def test_generate_image_default_model_is_pro(monkeypatch):
 
     monkeypatch.setattr("app.utils.image_gen.image_gen_client.generate", _fake_generate)
     monkeypatch.setattr("app.utils.oss.oss_client.upload_bytes", _fake_upload)
+    _patch_asset_save(monkeypatch, code="char-test-3view", asset_id=10)
 
     from app.core.tools.media_tools import generate_image
 
@@ -103,20 +123,18 @@ async def test_generate_image_default_model_is_pro(monkeypatch):
         prompt="一个少年站在悬崖边",
         aspect_ratio="9:16",
         image_size="2K",
+        memory_harness=_FakeMemoryHarness(domain_id=1),
     )
 
-    assert result == {
-        "success": True,
-        "url": "https://oss/test/image.png",
-        "model": "gemini-3-pro-image-preview",
-        "mime_type": "image/png",
-        "aspect_ratio": "9:16",
-        "image_size": "2K",
-    }
+    assert result["success"] is True
+    assert result["asset_code"] == "char-test-3view"  # 来自 _patch_asset_save 的 mock
+    assert result["asset_id"] == 10
+    assert result["mode"] == "text2image"
+    assert result["model"] == "gemini-3-pro-image-preview"
+    assert result["aspect_ratio"] == "9:16"
+    assert "url" not in result, "agent 不应看到 URL，只看 asset_code"
     assert captured_gen["prompt"] == "一个少年站在悬崖边"
     assert captured_gen["model"] == "gemini-3-pro-image-preview"
-    assert captured_gen["aspect_ratio"] == "9:16"
-    assert captured_gen["image_size"] == "2K"
     assert captured_oss["directory"] == "supervisor/images"
 
 
@@ -133,12 +151,14 @@ async def test_generate_image_explicit_flash_model(monkeypatch):
         "app.utils.oss.oss_client.upload_bytes",
         lambda *a, **kw: "https://oss/x.png",
     )
+    _patch_asset_save(monkeypatch)
 
     from app.core.tools.media_tools import generate_image
 
     result = await generate_image(
         prompt="quick sketch",
         model="gemini-3.1-flash-image-preview",
+        memory_harness=_FakeMemoryHarness(),
     )
     assert result["success"] is True
     assert result["model"] == "gemini-3.1-flash-image-preview"
@@ -179,7 +199,7 @@ async def test_generate_image_tool_error_when_gen_fails(monkeypatch):
 
     from app.core.tools.media_tools import generate_image
 
-    result = await generate_image(prompt="bad prompt")
+    result = await generate_image(prompt="bad prompt", memory_harness=_FakeMemoryHarness())
     assert result.get("ok") is False
     assert result["error_code"] == "IMAGE_GEN_FAILED"
     assert "RAI blocked" in result["message"]
@@ -194,7 +214,7 @@ async def test_generate_image_handles_gen_exception(monkeypatch):
 
     from app.core.tools.media_tools import generate_image
 
-    result = await generate_image(prompt="anything")
+    result = await generate_image(prompt="anything", memory_harness=_FakeMemoryHarness())
     assert result.get("ok") is False
     assert result["error_code"] == "IMAGE_GEN_EXCEPTION"
     assert "network down" in result["message"]
@@ -213,9 +233,81 @@ async def test_generate_image_handles_oss_failure(monkeypatch):
 
     from app.core.tools.media_tools import generate_image
 
-    result = await generate_image(prompt="x")
+    result = await generate_image(prompt="x", memory_harness=_FakeMemoryHarness())
     assert result.get("ok") is False
     assert result["error_code"] == "OSS_UPLOAD_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_generate_image_missing_project_id(monkeypatch):
+    """没传 memory_harness → 无法解析 project_id，应早早返错。"""
+    from app.core.tools.media_tools import generate_image
+
+    result = await generate_image(prompt="x")
+    assert result.get("ok") is False
+    assert result["error_code"] == "PROJECT_ID_MISSING"
+
+
+@pytest.mark.asyncio
+async def test_generate_image_i2i_mode(monkeypatch):
+    """asset_codes 非空 → 走 i2i，调 generate_with_reference。"""
+    captured: dict = {}
+
+    async def _fake_fetch(*, project_id, codes):
+        captured["fetched_codes"] = codes
+        captured["fetched_project_id"] = project_id
+        return ([b"PNGREF"] * len(codes), [])
+
+    async def _fake_with_ref(**kwargs):
+        captured.update(kwargs)
+        return _FakeImageResult(success=True, image_data=b"PNG")
+
+    monkeypatch.setattr(
+        "app.core.tools.media_tools._fetch_assets_bytes_by_code", _fake_fetch
+    )
+    monkeypatch.setattr(
+        "app.utils.image_gen.image_gen_client.generate_with_reference", _fake_with_ref
+    )
+    monkeypatch.setattr(
+        "app.utils.oss.oss_client.upload_bytes", lambda *a, **kw: "https://oss/y.png"
+    )
+    _patch_asset_save(monkeypatch, code="char-test-angry", asset_id=20)
+
+    from app.core.tools.media_tools import generate_image
+
+    result = await generate_image(
+        prompt="angry close-up",
+        asset_codes=["char-test-3view"],
+        memory_harness=_FakeMemoryHarness(domain_id=7),
+    )
+
+    assert result["success"] is True
+    assert result["mode"] == "image2image"
+    assert result["asset_code"] == "char-test-angry"
+    assert captured["fetched_codes"] == ["char-test-3view"]
+    assert captured["fetched_project_id"] == 7
+    assert captured["reference_images"] == [b"PNGREF"]
+
+
+@pytest.mark.asyncio
+async def test_generate_image_i2i_all_refs_missing(monkeypatch):
+    """asset_codes 全部查不到 → REFERENCE_ASSETS_NOT_FOUND。"""
+    async def _fake_fetch(*, project_id, codes):
+        return ([], list(codes))
+
+    monkeypatch.setattr(
+        "app.core.tools.media_tools._fetch_assets_bytes_by_code", _fake_fetch
+    )
+
+    from app.core.tools.media_tools import generate_image
+
+    result = await generate_image(
+        prompt="x",
+        asset_codes=["nonexistent-1", "nonexistent-2"],
+        memory_harness=_FakeMemoryHarness(),
+    )
+    assert result.get("ok") is False
+    assert result["error_code"] == "REFERENCE_ASSETS_NOT_FOUND"
 
 
 # --------------------------------------------------------------------- #

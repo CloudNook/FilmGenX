@@ -50,6 +50,8 @@ def _to_event_payload(event: Any) -> Dict[str, Any]:
         "tool_end",
         "interrupt",
         "error",
+        "done",
+        "usage",
     }:
         payload.setdefault("source", "supervisor")
 
@@ -111,7 +113,7 @@ class SupervisorStartRequest(BaseModel):
         description="Legacy alias for content.",
     )
     model: str = Field("gemini-3-flash-preview", description="LLM model")
-    max_loop: int = Field(30, ge=1, le=100, description="Maximum loop count")
+    max_loop: int = Field(50, ge=1, le=100, description="Maximum loop count")
     persist: Optional[str] = Field(
         "db",
         description="Legacy field. Supervisor chat uses database persistence.",
@@ -195,6 +197,7 @@ class SupervisorWorkflowDetail(SupervisorWorkflowSummary):
 
     workflow_snapshot: Optional[Dict[str, Any]] = None
     event_history: List[Dict[str, Any]] = Field(default_factory=list)
+    last_usage: Optional[Dict[str, Any]] = None
 
 
 @router.post(
@@ -372,6 +375,7 @@ async def get_supervisor_workflow(
     detail = SupervisorWorkflowDetail.model_validate(detail_record.workflow)
     detail.workflow_snapshot = detail_record.workflow_snapshot
     detail.event_history = detail_record.event_history
+    detail.last_usage = detail_record.last_usage
     return detail
 
 @router.get(

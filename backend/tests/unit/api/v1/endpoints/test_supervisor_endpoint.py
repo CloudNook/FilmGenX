@@ -556,6 +556,7 @@ async def test_get_supervisor_workflow_returns_detail_response(monkeypatch):
     detail_record = SimpleNamespace(
         workflow=workflow,
         event_history=[],
+        last_usage=None,
         workflow_snapshot=build_workflow_snapshot(
             profile="cinematic_series",
             definitions=[

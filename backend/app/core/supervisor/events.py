@@ -76,6 +76,10 @@ class SubAgentEndEvent(BaseModel):
     session_id: str
     result: Dict[str, Any]
     review_result: Optional[Dict[str, Any]] = None
+    # sub-agent 本次运行的累计 usage（来自其 DoneEvent.result.usage）。
+    # supervisor 流里被前端用于实时 token 计费；后端 runtime 用于累加 workflow.total_tokens。
+    usage: Optional[Dict[str, Any]] = None
+    loop_count: Optional[int] = None
     source: str = "supervisor"
 
 

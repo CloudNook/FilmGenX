@@ -35,19 +35,24 @@ def _should_persist_synthetic_event(event_type: Optional[str]) -> bool:
     }
 
 
-def _extract_usage_metrics(payload: Dict[str, Any]) -> tuple[int, int]:
-    if payload.get("type") != "done":
-        return 0, 0
+def _extract_usage_delta(payload: Dict[str, Any]) -> int:
+    """从 ``usage`` 事件抽这次 LLM 调用的 ``total_tokens`` 增量。"""
+    if payload.get("type") != "usage":
+        return 0
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return 0
+    return int(usage.get("total_tokens") or 0)
 
+
+def _extract_loop_count(payload: Dict[str, Any]) -> int:
+    """从 ``done``（supervisor 自己的最终事件）抽 loop_count。"""
+    if payload.get("type") != "done":
+        return 0
     result = payload.get("result")
     if not isinstance(result, dict):
-        return 0, 0
-
-    usage = result.get("usage")
-    loop_count = result.get("loop_count")
-    total_tokens = usage.get("total_tokens") if isinstance(usage, dict) else 0
-
-    return int(loop_count or 0), int(total_tokens or 0)
+        return 0
+    return int(result.get("loop_count") or 0)
 
 
 def _workflow_definitions(supervisor: Any) -> list[WorkflowNodeDefinition] | None:
@@ -330,17 +335,32 @@ class SupervisorRuntime:
         if _should_persist_synthetic_event(event_type):
             await self.append_event(supervisor_session_id, payload)
 
-        if event_type == "done":
-            loop_count, total_tokens = _extract_usage_metrics(payload)
-            if loop_count > 0 or total_tokens > 0:
+        # 实时 token 计费：每次 LLM call 结束都 fire 一次 ``usage`` 事件（不管是
+        # supervisor 自己还是 sub-agent 内部循环）。每个 delta **累加**到
+        # workflow.total_tokens——这就是项目级累计 token 消耗的唯一来源。
+        if event_type == "usage":
+            total_tokens_delta = _extract_usage_delta(payload)
+            if total_tokens_delta > 0:
                 workflow_record = await self.workflow_store.get_workflow_by_session(
                     supervisor_session_id
                 )
                 if workflow_record is not None:
-                    if loop_count > 0:
-                        workflow_record.loop_count = loop_count
-                    if total_tokens > 0:
-                        workflow_record.total_tokens = total_tokens
+                    workflow_record.total_tokens = (
+                        (workflow_record.total_tokens or 0) + total_tokens_delta
+                    )
+                    await self.db.commit()
+            return
+
+        if event_type == "done":
+            # supervisor 自己的 done 不再累加 total_tokens（usage 事件已经累过了），
+            # 只用来 SET loop_count
+            loop_count = _extract_loop_count(payload)
+            if loop_count > 0:
+                workflow_record = await self.workflow_store.get_workflow_by_session(
+                    supervisor_session_id
+                )
+                if workflow_record is not None:
+                    workflow_record.loop_count = loop_count
                     await self.db.commit()
             return
 

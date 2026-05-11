@@ -429,6 +429,16 @@ export default function WorkspacePage({
                 usage: event.usage,
                 loopCount: event.loop_count,
               };
+            case 'usage': {
+              // 每次 LLM call 实时上报 usage——优先用 accumulated_usage（session 累计）
+              const display = event.accumulated_usage ?? event.usage;
+              if (display) setLastUsage(display);
+              return {
+                ...prev,
+                usage: display ?? prev.usage,
+                loopCount: event.loop_count ?? prev.loopCount,
+              };
+            }
             case 'error':
               return { ...prev, text: prev.text + `\n\n**错误:** ${event.error}` };
             default:
@@ -493,6 +503,11 @@ export default function WorkspacePage({
             case 'done':
               if (event.usage) setLastUsage(event.usage);
               return { ...prev, usage: event.usage, loopCount: event.loop_count };
+            case 'usage': {
+              const display = event.accumulated_usage ?? event.usage;
+              if (display) setLastUsage(display);
+              return { ...prev, usage: display ?? prev.usage, loopCount: event.loop_count ?? prev.loopCount };
+            }
             case 'error':
               return { ...prev, text: prev.text + `\n\n**错误:** ${event.error}` };
             default:

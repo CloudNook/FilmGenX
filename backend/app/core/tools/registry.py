@@ -8,6 +8,7 @@ Tool 注册表 - 装饰器式工具注册。
 
 import inspect
 import logging
+import typing
 from types import UnionType
 from typing import Any, Callable, Dict, Optional, Union, get_args, get_origin
 
@@ -34,7 +35,12 @@ class ToolFunc:
         self.parameters_schema = parameters_schema or self._infer_schema(func)
 
     # 框架运行时注入的参数，不属于工具接口，不暴露给 LLM
-    _INJECTED_PARAMS = frozenset({"db", "supervisor_context", "workflow_store"})
+    _INJECTED_PARAMS = frozenset({
+        "db",
+        "supervisor_context",
+        "workflow_store",
+        "memory_harness",   # MemoryHarness 实例，agent.py 通过 ToolExecutor.extra_kwargs 注入
+    })
 
     def _annotation_to_schema(self, annotation: Any) -> Dict[str, Any]:
         if annotation == inspect.Parameter.empty:
@@ -71,8 +77,21 @@ class ToolFunc:
         return {"type": "string"}
 
     def _infer_schema(self, func: Callable) -> Dict[str, Any]:
-        """从函数签名推断 JSON Schema。"""
+        """从函数签名推断 JSON Schema。
+
+        关键：用 ``typing.get_type_hints`` 而不是 ``inspect.signature.annotation``——
+        启用了 ``from __future__ import annotations`` 的模块里，annotation 是字符串
+        ``"Optional[list[str]]"``，``inspect`` 拿到的是原文，我们的类型 dispatch 全部
+        fallthrough 到 ``{"type": "string"}``。``get_type_hints`` 会把字符串解析回真实
+        泛型对象，list / dict / Union 才能被识别。
+        """
         sig = inspect.signature(func)
+        try:
+            resolved_hints = typing.get_type_hints(func)
+        except Exception:
+            # 解析失败（typing 引用了运行时不可见的符号等）退回原始 annotation
+            resolved_hints = {}
+
         properties = {}
         required = []
         for param_name, param in sig.parameters.items():
@@ -83,7 +102,8 @@ class ToolFunc:
             if param_name in self._INJECTED_PARAMS:
                 continue
 
-            properties[param_name] = self._annotation_to_schema(param.annotation)
+            annotation = resolved_hints.get(param_name, param.annotation)
+            properties[param_name] = self._annotation_to_schema(annotation)
             if param.default == inspect.Parameter.empty:
                 required.append(param_name)
 
@@ -129,9 +149,9 @@ class ToolRegistry:
 
         用法：
             # 装饰器（推荐）
-            @register_tool(name="calculate", description="执行数学计算")
-            def calculate(expression: str) -> str:
-                return str(eval(expression))
+            @register_tool(name="my_tool", description="...")
+            def my_tool(arg: str) -> str:
+                return ...
 
             # 直接注册
             tool_func = ToolFunc(my_func, name="my_tool")
@@ -217,9 +237,9 @@ def register_tool(
     工具注册装饰器。
 
     用法：
-        @register_tool(name="calculate", description="执行数学计算")
-        def calculate(expression: str) -> str:
-            return str(eval(expression))
+        @register_tool(name="my_tool", description="...")
+        def my_tool(arg: str) -> str:
+            return ...
     """
     def decorator(fn: Callable) -> Callable:
         fn._tool_name = name

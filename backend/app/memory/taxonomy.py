@@ -44,10 +44,13 @@ class CharacterValue(BaseModel):
     personality: Optional[str] = Field(None, description="性格描述")
     key_skills: list[str] = Field(default_factory=list, description="招式 / 能力清单")
     backstory: Optional[str] = Field(None, description="背景故事关键节点")
-    three_view_url: Optional[str] = Field(None, description="三视图 OSS URL")
-    reference_image_urls: list[str] = Field(
+    three_view_asset_code: Optional[str] = Field(
+        None,
+        description="三视图 asset_code（由 generate_image 出图后保存到 assets 表，code 是稳定句柄）",
+    )
+    reference_asset_codes: list[str] = Field(
         default_factory=list,
-        description="其它参考图 OSS URL 列表（表情 / 服装变体 / 战斗姿态 等）",
+        description="其它参考图 asset_code 列表（表情 / 服装变体 / 战斗姿态 等）",
     )
 
 
@@ -61,8 +64,8 @@ class SceneValue(BaseModel):
     atmosphere: Optional[str] = Field(None, description="氛围 / 情绪基调")
     lighting: Optional[str] = Field(None, description="光照设定")
     props: list[str] = Field(default_factory=list, description="关键道具")
-    reference_image_urls: list[str] = Field(
-        default_factory=list, description="场景参考图 OSS URL 列表"
+    reference_asset_codes: list[str] = Field(
+        default_factory=list, description="场景参考图 asset_code 列表"
     )
 
 
@@ -229,7 +232,11 @@ def validate_kv(kind: str, key: str, value: dict[str, Any]) -> dict[str, Any]:
 
 
 def taxonomy_prompt_block() -> str:
-    """喂给 LLM 的 taxonomy 描述（extractor / memory_save 工具 prompt 共用）。"""
+    """喂给 LLM 的 taxonomy 描述（extractor / memory_save 工具 prompt 共用）。
+
+    每个 kind 列出：key 规则 + **必填字段** + 可选字段。LLM 拿到这份就该知道
+    哪些字段不能省（漏 required 字段的 memory_save 会被 provider 拒收）。
+    """
     lines = ["## Memory Taxonomy（FilmGenX 闭集，禁止发明新 kind / key）"]
     for spec in KIND_REGISTRY.values():
         line = f"- **{spec.name}** — {spec.description}"
@@ -239,6 +246,16 @@ def taxonomy_prompt_block() -> str:
             line += " key 固定 'main'。"
         else:
             line += " key 是开放的实体名 string。"
-        line += f" value schema 字段: {list(spec.value_schema.model_fields.keys())}"
+
+        required_fields: list[str] = []
+        optional_fields: list[str] = []
+        for field_name, field_info in spec.value_schema.model_fields.items():
+            if field_info.is_required():
+                required_fields.append(field_name)
+            else:
+                optional_fields.append(field_name)
+        line += f" value 必填字段: {required_fields}"
+        if optional_fields:
+            line += f"；可选字段: {optional_fields}"
         lines.append(line)
     return "\n".join(lines)

@@ -180,9 +180,13 @@ def _build_registered_agent(
 def build_default_registry() -> SupervisorAgentRegistry:
     """完整生产链路（plan b）的 8 个 sub-agent。
 
-    frame_prompt_agent 额外挂 ``generate_image``，video_prompt_agent 额外挂
-    ``generate_video``——本期只支持文字驱动，等 project-level memory 落地后再加
-    reference_assets 入参（参见 docs/engineering/TODO.md）。其它 agent 仅有默认 skill 工具。
+    工具分配按"谁产出资产 KV，谁就有出图工具"：
+    - character_ref_agent / scene_ref_agent / frame_prompt_agent 挂 ``generate_image``
+    - video_prompt_agent 挂 ``generate_video``
+    - supervisor 不直接挂图像 / 视频工具，要出图就 ``call_sub_agent``
+
+    出图后由 agent 调 ``memory_save`` 把 OSS URL 回填到对应 KV
+    （character.three_view_url / scene.reference_image_urls / 等）。
     """
     return SupervisorAgentRegistry(
         agents=[
@@ -212,18 +216,20 @@ def build_default_registry() -> SupervisorAgentRegistry:
                 description="Defines global visual anchor (palette / lighting / composition / art style)",
                 node_keys=["visual_style"],
             ),
-            # Layer 3 参考图设计
+            # Layer 3 参考图设计 —— 出三视图 / 场景参考图，回填 KV
             _build_registered_agent(
                 name="character_ref_agent",
                 label="Character Ref Agent",
-                description="Designs character reference image prompts (base + expressions + outfits)",
+                description="Designs character reference image prompts (base + expressions + outfits) and generates three-view / reference images",
                 node_keys=["character_ref"],
+                extra_tool_names=["generate_image"],
             ),
             _build_registered_agent(
                 name="scene_ref_agent",
                 label="Scene Ref Agent",
-                description="Designs scene reference image prompts (deduped by location, with time variants)",
+                description="Designs scene reference image prompts (deduped by location, with time variants) and generates location reference images",
                 node_keys=["scene_ref"],
+                extra_tool_names=["generate_image"],
             ),
             # Layer 4 提示词层
             _build_registered_agent(

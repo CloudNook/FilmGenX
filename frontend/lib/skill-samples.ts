@@ -297,6 +297,1246 @@ author: filmgenx
 慎用。zoom in 强调心理变化（不是物理移动）；zoom out 揭示情境。复古、电视感，剧情片少用。
 `;
 
+const VISUAL_STYLE_ANCHORS = `---
+name: visual-style-anchors
+description: Use when establishing the project's overall visual identity from outline + storyboard, defining art genre, color palette, lighting, composition, and per-element art rules so character_ref / scene_ref / frame_prompt all share one consistent visual prior.
+target_agents: [visual_style_agent]
+tags: [visual-direction, art-genre, color, lighting, composition]
+author: filmgenx
+---
+
+# 视觉锚点设计
+
+视觉锚点不是"挑一个好看的风格"，而是给整片定义一份**全局视觉先验**——色调、光照、构图、角色画风、场景画风、负面提示词——让下游所有出图 / 出视频环节都消费同一份语言，保证全片不"撞风格"。
+
+本 skill 给 visual_style_agent 在 outline + storyboard 完成后输出 \`VisualStyleGuide\` 时的设计原则、决策路径和反例。
+
+## 核心命题
+
+\`visual_style_agent\` 接收：
+- \`outline.main\`（剧情综述 + 主要角色 + 关键情节）
+- 已完成的 storyboard
+- \`preference.*\`（用户对题材 / 时长 / 节奏 / 结构的偏好）
+
+输出一份 \`VisualStyleGuide\`，包含 8 个字段。**字段之间必须互相支撑，不能拼凑**。
+
+## 八字段决策顺序
+
+按这个顺序定，前面定下来后面才有依据，不要倒着想：
+
+1. **art_genre** —— 全片美术大类。先看 outline 题材 + preference.genre：玄幻 → anime / pixar_3d；硬科幻 → photorealistic / cyberpunk；江湖武侠 → ghibli / watercolor；都市悬疑 → noir。
+2. **overall_mood** —— 一句话的整体基调。**和 genre 必须自洽**：cyberpunk 不会"温暖治愈"；ghibli 不会"暗黑战斗"。
+3. **color_palette** —— primary / secondary / accent / desaturation。primary 服务 mood；accent 给特效点睛；desaturation 偏 0.0-0.4，太高会失去画面层次。
+4. **lighting_style** —— key / fill / practical / time_of_day。和 genre 配套：noir 要硬光 + 大反差；watercolor 要柔光 + 高 fill；pixar_3d 要动画感分层光。
+5. **composition_style** —— framing / depth / rule_of_thirds 策略。**和 storyboard 已经给的镜头表对齐**——如果 storyboard 多用 OTS / CU，这里就别选"宏大全景为主"。
+6. **character_art_style** —— proportions / linework / expression。anime 的 proportions ≠ pixar_3d 的；photorealistic 不允许变形夸张。
+7. **scene_art_style** —— architecture / environment_detail / weather_atmosphere。和 outline 的场景设定对齐：玄幻多山门 / 都市多街景。
+8. **negative_anchor** —— 全局负面 prompt。把"不允许出现的风格"写死，挡 SD/Gemini 滑向常见误区：写实风的工程要明确禁止 anime；动画风工程要禁止 photorealistic / overly grainy。
+
+## 决策原则
+
+- **一致性 > 漂亮**：8 个字段必须围绕同一个 mood 彼此印证。出现矛盾立刻改，不要"两个都好看就都留"。
+- **可执行 > 文采**：每个字段的 description 要能直接喂给 SD / Gemini Image。"暗黑、压抑、史诗级"是文学描述；"硬光 key + 低 fill + 高对比 + 蓝绿色环境光"是可执行描述。
+- **复用 > 创造**：80% 的项目都能落到 7 个预设 ArtGenre 里；不要轻易选 \`custom\`，custom 会让下游加载锚定失败。
+- **服务剧情**：如果 outline 是"小人物逆袭"，就别选"史诗级镜头语言"——视觉要服务情绪，不是炫技。
+
+## 反例（出现就要回去重做）
+
+- art_genre=\`pixar_3d\` + lighting=\`noir 高反差硬光\` —— 风格分裂
+- art_genre=\`watercolor\` + character_art_style.linework=\`极细数字硬边\` —— 互相打架
+- color_palette.primary 和 secondary 是同色系（都偏冷蓝）—— 没张力，画面发闷
+- negative_anchor 留空 —— 下游必定会跑偏到常见误区
+- composition_style 和 storyboard 已选的镜头表不一致 —— 浪费上游劳动
+
+## 何时加载附加资料
+
+按需触发工具调用，不要预先全部加载：
+
+- 当你在 art_genre 之间纠结、不确定 cyberpunk 和 noir 的边界时 → 加载 @ref:art-genre-decision-tree
+- 当 color_palette 字段难以落地、不知道 primary/secondary/accent 怎么搭配时 → 加载 @ref:color-palette-recipes
+- 当 lighting_style 不知道 key/fill/practical 怎么写才"可执行"时 → 加载 @ref:lighting-style-cookbook
+
+## 工作流（强调：调工具前先说为什么）
+
+**重要**：每次准备调用 \`load_skill_reference\` / \`load_skill\` / \`memory_save\` / 任何工具前，**先在当前回复里口头说明**：
+
+> "我现在需要加载 @ref:color-palette-recipes，因为剧情是科幻短剧但 art_genre 我打算选 cyberpunk，这个 reference 能给我具体的色彩配方。下一步我就调用这个工具。"
+
+然后**结束当前发言**，等下一轮再发起 tool_call。**不要在同一轮里既宣告又调用**——这是 supervisor 工作流要求的可解释性约定，让人类审阅者能跟上你的判断。
+
+## reference: art-genre-decision-tree
+
+7 个预设 art_genre 的分边界、典型场景、负面提示词模板：
+
+### anime
+- **典型**：玄幻 / 修仙 / 战斗番。中日韩动漫审美。
+- **关键词**：cel shading、saturated colors、dynamic poses、speed lines。
+- **负面**：no realistic skin pores、no photorealistic、no western fantasy。
+- **不要选**：硬科幻、严肃悬疑。
+
+### photorealistic
+- **典型**：现代都市剧、纪实风短片、明星广告。
+- **关键词**：high detail、true-to-life lighting、natural skin texture、35mm grain。
+- **负面**：no anime、no cartoon、no toon shading。
+- **不要选**：玄幻、奇幻。会让"飞剑斗法"看起来像 cosplay 翻车现场。
+
+### pixar_3d
+- **典型**：合家欢、儿童向、温情科幻。
+- **关键词**：subsurface scattering skin、stylized proportions、warm rim light。
+- **负面**：no photorealistic、no horror、no excessive grime。
+- **不要选**：暗黑战斗（出戏）、严肃武侠。
+
+### ghibli
+- **典型**：自然 / 治愈 / 日常奇幻。东方风景 + 慢节奏。
+- **关键词**：painterly background、soft watercolor textures、lush nature、whimsical creatures。
+- **负面**：no harsh shadows、no metallic textures、no cyberpunk neon。
+- **不要选**：高对抗动作戏。
+
+### cyberpunk
+- **典型**：未来都市、AI 反乌托邦、霓虹夜景。
+- **关键词**：neon signs、rain-slick streets、teal-and-orange palette、holographic UI。
+- **负面**：no daylight outdoor、no rural、no warm wood texture。
+- **不要选**：温馨家庭剧、田园风。
+
+### noir
+- **典型**：黑色悬疑、侦探片、高反差对话戏。
+- **关键词**：venetian blind shadows、low-key lighting、monochrome with red accent、smoky interior。
+- **负面**：no bright sunlight、no saturated colors、no anime。
+- **不要选**：动作番、轻喜剧。
+
+### watercolor
+- **典型**：诗意散文、童话、回忆段落。
+- **关键词**：visible brushstrokes、wet edges、soft saturation、paper texture。
+- **负面**：no sharp digital lines、no metallic、no neon。
+- **不要选**：硬科幻、激烈战斗。
+
+### 决策路径
+
+1. outline 题材是现代 / 写实 → photorealistic 或 noir（看是否暗黑）
+2. outline 题材是奇幻 / 玄幻 / 修仙 → anime（动作戏多） / ghibli（治愈） / pixar_3d（合家欢）
+3. outline 题材是科幻 → cyberpunk（未来都市暗调） / photorealistic（硬科幻）/ pixar_3d（轻科幻）
+4. outline 题材是诗意 / 回忆 / 心理 → watercolor / ghibli
+5. 实在不匹配预设 → custom，但必须在 negative_anchor 写得极其详细，否则下游必跑偏
+
+## reference: color-palette-recipes
+
+按 art_genre 给的标准色彩配方（primary / secondary / accent / desaturation）：
+
+| genre | primary | secondary | accent | desaturation |
+| --- | --- | --- | --- | --- |
+| anime（玄幻战斗） | 深红 + 橙黄（斗气） | 冷蓝（冰系阴影） | 金紫（异火 / 异能） | 0.2 |
+| anime（治愈） | 暖粉 + 米白 | 浅蓝 | 樱粉 | 0.3 |
+| photorealistic（都市） | 中性灰 + 棕 | 冷蓝（窗外天空） | 暖橙（人造光源） | 0.3 |
+| pixar_3d | 高饱和暖色（橙 / 黄） | 互补冷色（青 / 紫） | 鲜亮 accent | 0.0 |
+| ghibli | 草绿 + 天蓝 | 米白 + 木棕 | 红屋顶 / 黄花 | 0.4 |
+| cyberpunk | 深蓝 + 紫黑 | 霓虹粉 / 青 | 酸黄 / 电光蓝 | 0.2 |
+| noir | 几乎黑白 | 深棕 / 烟灰 | **单一红** 点睛 | 0.85 |
+| watercolor | 柔米色 + 浅水蓝 | 苔绿 / 暖灰 | 朱砂红 / 藏青 | 0.5 |
+
+### 配方规则
+
+- primary 占画面 60%，secondary 30%，accent 10%。
+- accent 必须是**单一**色：红就只用红，金就只用金。多个 accent 会让画面"脏"。
+- desaturation 0 = 纯饱和（pixar / 童话），0.2-0.4 = 主流叙事，0.5-0.7 = 文艺 / 回忆，0.85+ = noir / 黑白。
+- 同色系不能进 primary + secondary：都冷或都暖会让画面没张力。
+
+## reference: lighting-style-cookbook
+
+把光照写得"可执行"的 4 个维度模板：
+
+### key_light（主光）
+
+- 硬光（hard）：太阳直射 / 顶灯。强阴影边缘。**用于**：noir、cyberpunk 夜戏、戏剧性时刻。
+- 柔光（soft）：散射 / 反射。无明显阴影。**用于**：ghibli、pixar、对话日常戏。
+- 边缘光（rim）：背光勾边。**用于**：anime 战斗 high-key、photorealistic 人物特写。
+
+### fill_light（补光）
+
+- 低 fill（fill ratio 1:8 ~ 1:16）= 高反差，暗部沉。noir / cyberpunk / 严肃戏。
+- 中 fill（1:4 ~ 1:8）= 主流叙事。photorealistic / pixar 日常。
+- 高 fill（1:2 ~ 1:4）= 平光，温馨柔和。ghibli / watercolor / 治愈戏。
+
+### practical_sources（场景灯）
+
+- 实用光源（屏幕 / 灯具 / 蜡烛 / 火焰）必须在 prompt 里**写明位置和颜色**。否则下游 SD 会自动加，但位置不可控。
+- cyberpunk 必须有：霓虹招牌 / 全息屏 / 街灯。
+- noir 必须有：百叶窗光 / 烟雾 / 单点台灯。
+- ghibli 必须有：户外日光 / 室内炉火（暖橙）。
+
+### default_time_of_day
+
+- magic hour（金时刻 / 日落前 1h）：万能选项，最讨巧。
+- noon：硬影子，戏剧性强。
+- night：逼着你思考 practical_sources。
+- 全片**只定一个 default**，例外镜头单独讨论。
+
+### 完整示例（cyberpunk 短剧）
+
+\`\`\`
+key: hard rim light from neon sign, magenta + cyan
+fill: 1:8 ratio, deep shadows in lower half
+practical: rooftop hologram display (cyan), street lamps (warm sodium yellow), wet asphalt reflection
+default_time_of_day: night, post-rain
+\`\`\`
+
+下游 SD / Gemini 拿到这一段直接能吃，不用再脑补。
+`;
+
+const CHARACTER_DESIGN = `---
+name: character-design
+description: Use when designing character reference packs (base appearance + expression set + clothing + accessories) so every downstream shot can render the same character consistently. Provides decision rules for proportion / linework / expression coverage and prompt patterns for image generation.
+target_agents: [character_ref_agent]
+tags: [character-design, reference-image, prompt-engineering]
+author: filmgenx
+---
+
+# 角色形象设计
+
+角色形象设计的目标不是"画一个好看的人"，而是**把每个角色的视觉锚点钉死**——让后续每个镜头看到角色名都能直接复用同一套外观描述，不出现"长不一样"的灾难。
+
+本 skill 给 character_ref_agent 在出 \`\`CharacterRefSet\`\` 时的设计原则、出图 prompt 模板、以及表情 / 服装变体的覆盖规则。
+
+## 一致性的本质
+
+角色"长不一样"通常是因为：
+- **base_prompt 含动作 / 表情** → 每次生成都被动作姿态干扰
+- **关键特征顺序不稳定** → 模型每次抓到的"这个角色是什么"不同
+- **缺少 negative_prompt** → 被生成器的常见误区拉走（女主被画成男主、成人被画成少年）
+- **服装描述跟身体描述混在一起** → 换装时连身体也变了
+
+## base_prompt 的标准结构
+
+按这个固定顺序写，能最大化模型的一致性：
+
+\`\`\`
+{年龄段} + {性别} + {发型 + 发色} + {瞳色} + {体型} + {核心服装} + {核心特征 / 招牌道具} + {风格关键词}
+\`\`\`
+
+例：
+\`\`\`
+青年男子, 黑色长发束起, 黑色瞳孔, 偏瘦修长身形, 玄铁色长袍战服, 背负玄重尺,
+anime cel shading style
+\`\`\`
+
+**禁止**在 base_prompt 出现：表情（皱眉 / 微笑）、动作（站立 / 奔跑）、视角（正面 / 侧面）、特定光照。这些都是变体的工作。
+
+## 三视图 prompt 公式
+
+\`\`\`
+{base_prompt}, three view sheet, front view + side view + back view,
+neutral pose, neutral expression, full body, plain white background, T-pose
+\`\`\`
+
+固定参数：\`\`aspect_ratio="9:16"\`\`（角色竖图标准）、\`\`model="gemini-3-pro-image-preview"\`\`（主角必 pro）。
+
+## 表情变体设计
+
+### 主角必有 4-5 种
+
+按情感弧线挑，不要全是相邻表情：
+
+| 表情 key | 何时用 | prompt 片段示例 |
+| --- | --- | --- |
+| determined | 决心做某事 / 战斗前 | 紧抿嘴角, 瞳孔聚焦, 微皱眉 |
+| angry | 受辱 / 仇恨爆发 | 眉心紧锁, 露出獠牙或咬牙, 瞳孔放大 |
+| sad | 失去 / 悲伤 | 眉尾下垂, 眼神空洞, 唇角下拉 |
+| surprised | 突变 / 意外 | 瞳孔瞪大, 嘴微张, 眉毛抬高 |
+| smile | 胜利 / 释然 | 嘴角上扬, 眼神柔和 |
+
+主角必须有 \`\`determined\`\` + 一种负面情绪（angry / sad）+ 一种正面情绪（smile / surprised）。这是叙事最低覆盖。
+
+### 配角 1-3 种
+
+按"该角色在剧情里只表现哪几种情绪"决定。例如纯反派可能只需要 \`\`angry\`\` + \`\`shocked\`\`。
+
+## 服装与配件
+
+**clothing_detail 与 base_prompt 分开**，让换装可独立替换：
+
+- base_prompt 里只写"核心服装"（角色无论什么场合都穿的——比如玄铁色长袍是萧炎的常服）
+- clothing_detail 字段写"本次场景的具体服装"（战斗服 / 日常服 / 礼服 / 受伤后的破损版）
+
+**accessories 必须独立列**，因为模型很容易遗漏：
+- 武器（玄重尺 / 法剑 / 手枪）
+- 首饰（项链 / 耳环 / 戒指）
+- 标志性道具（眼镜 / 拐杖 / 怀表）
+
+如果不单独列，prompt 一长就被压缩到"忘了"。
+
+## negative_prompt 必含项
+
+按角色性别 / 年龄写防误生成：
+
+| 角色类型 | negative_prompt 必含 |
+| --- | --- |
+| 男主 / 男配 | \`\`female, woman, child, makeup, breasts\`\` |
+| 女主 / 女配 | \`\`male, man, child, beard, muscular\`\` |
+| 成年角色 | \`\`child, kid, baby, teenager\`\` |
+| 少年角色 | \`\`adult, mature, beard\`\` |
+| 凡人角色 | \`\`glowing eyes, magical aura, fantasy effects\`\` |
+
+外加 art_genre 通用负面：anime 加 \`\`photorealistic, realistic skin texture\`\`；photorealistic 加 \`\`anime, cartoon, illustration\`\`。
+
+## 反例
+
+- base_prompt 写"萧炎，黑发，正在挥舞玄重尺"——含动作了
+- 全部 expressions 用同样句式"皱眉 + xxx"——伪变体
+- accessories 漏掉招牌武器——后续战斗镜头武器消失
+- negative_prompt 只写 art_genre 通用项，没写性别——男主被画成女主
+- name 和 outline 不一致（"陆沉"写成"陆沉君"）——下游引用断链
+
+## 工作流（强调先口头说明再调用工具）
+
+每次准备调 \`\`load_skill_reference\`\` / \`\`generate_image\`\` / \`\`memory_save\`\`，都要：
+1. 本轮先口头说明意图 + 理由
+2. 下一轮才调工具
+
+例：
+> "我注意到萧炎是 anime 风格的玄幻男主，需要 4 张表情变体（determined / angry / smile / surprised）。下一步我会先调 \`\`load_skill_reference(skill='character-design', ref_key='expression-prompt-cookbook')\`\` 拿到具体的表情 prompt 片段模板，再回来写 expressions 字段。"
+
+## reference: expression-prompt-cookbook
+
+5 种核心表情的 prompt 片段（中文 + 英文 anime tag），可直接拼到角色变体里：
+
+### determined（决心 / 战斗前）
+
+\`\`\`
+中文: 紧抿嘴角, 瞳孔聚焦, 微皱眉, 下颌微抬, 眼神锐利
+英文 tag: serious face, focused eyes, slight frown, tight lips, intense gaze
+\`\`\`
+
+适用：战斗前夜、做出决定、面对反派。
+
+### angry（愤怒 / 仇恨）
+
+\`\`\`
+中文: 眉心紧锁, 咬牙切齿, 瞳孔放大, 青筋微现, 嘴角下扯
+英文 tag: angry expression, gritted teeth, furrowed brow, dilated pupils, snarling
+\`\`\`
+
+适用：受辱、仇恨爆发、被背叛。
+
+### sad（悲伤 / 失落）
+
+\`\`\`
+中文: 眉尾下垂, 眼神空洞, 唇角下拉, 眼眶微红, 头微低
+英文 tag: sad face, downturned mouth, teary eyes, drooping eyebrows, downward gaze
+\`\`\`
+
+适用：失去亲人、求而不得、回忆旧伤。
+
+### surprised（惊讶 / 震惊）
+
+\`\`\`
+中文: 瞳孔瞪大, 嘴微张, 眉毛抬高, 头部微后仰, 表情僵住
+英文 tag: shocked face, wide eyes, open mouth, raised eyebrows, surprised expression
+\`\`\`
+
+适用：突发事件、意外发现、剧情反转。
+
+### smile（微笑 / 胜利）
+
+\`\`\`
+中文: 嘴角上扬, 眼神柔和, 微眯眼, 下颌微抬, 神情释然
+英文 tag: gentle smile, soft eyes, slight smirk, relaxed face, content expression
+\`\`\`
+
+适用：胜利、释然、温情时刻。
+
+### 反派专用：cold_smile（冷笑 / 优越）
+
+\`\`\`
+中文: 嘴角单边上扬, 眼神锐利, 下巴微抬, 冷漠的笑意
+英文 tag: smirk, cold smile, raised chin, disdainful eyes, condescending expression
+\`\`\`
+
+适用：反派出场、傲慢宣言、阴谋得逞。
+
+## reference: art-genre-character-proportions
+
+不同 art_genre 对角色 proportion / linework 的要求：
+
+### anime（玄幻战斗番）
+
+- proportion: 7-7.5 头身（少年）/ 8-8.5 头身（成年战士）；夸张瞳孔（占脸 1/4）
+- linework: clean cel shading，硬边阴影 2-3 层，无柔光过渡
+- 标准 prompt 关键词: \`\`anime style, cel shaded, sharp linework, large expressive eyes, dynamic poses\`\`
+
+### photorealistic（都市 / 写实）
+
+- proportion: 真人 7.5-8 头身，正常脸部比例
+- linework: 无明显线条，靠光影建模
+- 标准 prompt 关键词: \`\`photorealistic, true-to-life proportions, natural skin texture, 35mm, sharp focus, soft natural lighting\`\`
+- 注意: 慎写"细致 hair strands"，否则容易翻车
+
+### pixar_3d（合家欢 / 温情）
+
+- proportion: 矮胖化（5-6 头身），眼睛 + 头部放大
+- linework: subsurface scattering，rim light 突出
+- 标准 prompt 关键词: \`\`pixar 3d animation style, stylized proportions, large head, expressive face, subsurface scattering, warm lighting\`\`
+
+### ghibli（治愈 / 自然）
+
+- proportion: 7-7.5 头身，柔和五官
+- linework: painterly background + 简洁人物线条，水彩感
+- 标准 prompt 关键词: \`\`ghibli studio style, soft watercolor, painterly, gentle expression, lush environment\`\`
+
+### cyberpunk（未来 / 暗调）
+
+- proportion: 真人比例 + cybernetic 改造件
+- linework: neon rim light，潮湿表面
+- 标准 prompt 关键词: \`\`cyberpunk style, neon rim lighting, cybernetic implants, holographic UI elements, rain-slick reflections\`\`
+
+### noir（黑色悬疑）
+
+- proportion: 真人 8 头身
+- linework: 硬光 + 大面积阴影 + 单一红色 accent
+- 标准 prompt 关键词: \`\`film noir, monochrome with red accent, harsh shadows, low-key lighting, smoky interior, venetian blind shadows\`\`
+
+### watercolor（诗意 / 文艺）
+
+- proportion: 7-7.5 头身，柔化轮廓
+- linework: visible brushstrokes，wet edges
+- 标准 prompt 关键词: \`\`watercolor illustration, visible brushstrokes, soft saturation, paper texture, dreamy atmosphere\`\`
+
+## reference: clothing-and-accessories-checklist
+
+设计 clothing_detail 时检查清单：
+
+### 服装（clothing_detail）
+
+必含：
+1. **衣型**：长袍 / 短打 / 制服 / 战斗服 / 西装 / 校服
+2. **主色**：和 visual_style.color_palette 不冲突
+3. **材质**：玄铁 / 丝绸 / 皮革 / 棉麻 / 金属
+4. **状态**：完整 / 磨损 / 破损 / 染血 / 干净
+
+可选：
+- 装饰：花纹 / 刺绣 / 徽章
+- 层次：内衣 / 外袍 / 披风
+
+### 配件（accessories）
+
+按角色设定逐项列，不要合并：
+
+| 类别 | 例子 |
+| --- | --- |
+| 武器 | 玄重尺、法剑、手枪、十字弓 |
+| 首饰 | 项链、耳环、戒指、手镯 |
+| 道具 | 眼镜、拐杖、怀表、烟斗、剑鞘 |
+| 防具 | 护腕、护肩、面具、头盔 |
+| 标志符号 | 宗门徽章、家族纹样 |
+
+每个配件单独写一行，避免被 prompt 长度压缩"忘记"。
+`;
+
+const SCENE_DESIGN = `---
+name: scene-design
+description: Use when designing scene reference packs (location description + atmosphere + lighting + time variants + props) so every shot in that location renders with consistent environment language. Provides decision rules for atmosphere / lighting / time-of-day handling and prompt templates for environment image generation.
+target_agents: [scene_ref_agent]
+tags: [scene-design, environment, reference-image, prompt-engineering]
+author: filmgenx
+---
+
+# 场景设计
+
+场景设计的目标不是"画一个好看的地方"，而是**把每个 location 的视觉锚点钉死**——让后续每个发生在这里的镜头都共享同一份"这里长什么样"，并按时段 / 天气提供变体。
+
+本 skill 给 scene_ref_agent 在出 \`\`SceneRefSet\`\` 时的设计原则、出图 prompt 模板、以及 time_variants 的覆盖规则。
+
+## 一致性的本质
+
+场景"画得不像同一处"通常是因为：
+- **architecture / atmosphere / lighting 写在一句话里** → 模型抓不住主导特征
+- **缺 negative_prompt** → 室内场景被画到了室外、白天场景被画成了夜晚
+- **时段变体堆在主 prompt 里** → 每次生成天气不可控
+- **props 被压缩** → "云岚宗"少了那口标志性青铜钟，下游看了不认识
+
+## 三段式 prompt 结构
+
+把场景描述拆成三个独立段，模型对每段的注意力更稳定：
+
+\`\`\`
+[architecture]: 建筑 / 地形 / 空间结构（"白玉广场, 高耸古青铜钟, 远处有重重宗门殿宇, 三层石阶")
+[atmosphere]:   情绪 / 氛围（"肃杀压抑, 万人聚集后的死寂, 弥漫沉重战意")
+[lighting]:     光照 / 时段（"清晨薄雾, 顶光散射, 地面反射冷灰光, 远景剪影")
+\`\`\`
+
+合起来给模型：\`\`{architecture}, {atmosphere}, {lighting}, {color_restrictions}\`\`
+
+## time_variants 的边界
+
+每个 location **最多 3 个时段变体**，按以下优先级挑：
+
+1. **剧情明确出现的时段**（如剧本写"日落决斗"）—— 必出
+2. **戏剧反差大的时段**（如同一场地白天 / 夜晚出现两次）—— 必出
+3. **气氛抓手的时段**（cyberpunk 必夜、ghibli 必日）—— 必出
+
+如果剧情里只在一个时段出现，**不要凑变体**——单一变体就够了。
+
+每个 variant 的 value 写**该时段下变化的部分**（光照 / 氛围 / 颜色），不要重复 architecture：
+
+\`\`\`python
+time_variants = {
+    "day":   "顶光强烈, 白玉反光刺眼, 暖橙色调",
+    "night": "月光冷光, 青铜钟反射蓝灰光, 远景灯火点点",
+    "rain": "雨幕笼罩, 地面湿润反光, 雾气朦胧, 整体降饱和"
+}
+\`\`\`
+
+## color_restrictions（喂给 SD 模型的英文标签）
+
+写法用 SD-style 英文标签，不是中文长句：
+
+| 题材 | color_restrictions |
+| --- | --- |
+| anime 玄幻 | \`\`saturated reds and golds with cool blue accents, slightly desaturated\`\` |
+| photorealistic 都市 | \`\`muted greys and browns, cold blue sky, warm orange streetlights\`\` |
+| pixar_3d | \`\`high saturation warm orange and yellow with cool teal accents\`\` |
+| ghibli | \`\`soft greens and blues, cream whites, occasional warm reds\`\` |
+| cyberpunk | \`\`deep blue and magenta neon, teal-and-orange complementary, electric blue accents\`\` |
+| noir | \`\`monochrome black and grey with single red accent, harsh shadows\`\` |
+| watercolor | \`\`soft pastels, watercolor washes, muted palette\`\` |
+
+## mood_keywords（中文短词列表）
+
+中文短词，3-6 个，给下游 frame_prompt 拼镜头描述时复用：
+
+\`\`\`python
+["废墟感", "压抑", "肃杀", "孤立", "庄严"]
+["温馨", "亲密", "怀旧", "柔软", "日常"]
+["冷峻", "未来感", "潮湿", "霓虹", "疏离"]
+\`\`\`
+
+不要写句子（"主角在这里发现真相"是情节，不是 mood）。
+
+## negative_prompt 必含
+
+按场景类型写：
+
+| 场景类型 | negative_prompt 必含 |
+| --- | --- |
+| 室内 | \`\`no outdoor, no sky, no horizon, no daylight from outside\`\` |
+| 室外开阔 | \`\`no ceiling, no walls, no enclosed space\`\` |
+| 室外建筑环绕 | \`\`no isolated structure, no empty plain\`\` |
+| 黑夜 | \`\`no daytime, no bright sunlight, no clear blue sky\`\` |
+| 白天 | \`\`no nighttime, no neon, no artificial bright lights\`\` |
+| 自然环境 | \`\`no concrete buildings, no urban infrastructure\`\` |
+| 城市 | \`\`no rural, no wilderness, no isolated landscape\`\` |
+
+外加 art_genre 通用项（同 character_ref）。
+
+## reference_image_count 分配
+
+**每个 location 最少 2 张**：
+
+- 1 张主 angle（最具代表性的视角，下游引用最多）
+- 1 张副 angle 或副 time_variant（给 frame_prompt 提供构图选择）
+
+最多 3 张。**不要每个 time_variant 都出**——下游 frame_prompt 会按文字提示自己融合时段，参考图给"建筑骨架"就够。
+
+## 反例
+
+- 同一 location 拆成两个 SceneRef（"云岚宗" + "云岚宗大殿"）—— 该合并就合并
+- atmosphere 写"主角在这里第一次见到反派"—— 这是情节
+- time_variants 4 个以上 —— 资源浪费且模型混乱
+- color_restrictions 用中文长句 —— SD 不识别
+- props 漏关键道具 —— 下游镜头里宗门标志性青铜钟消失
+
+## 工作流（强调先口头说明再调用工具）
+
+每次准备调 \`\`load_skill_reference\`\` / \`\`generate_image\`\` / \`\`memory_save\`\`：
+1. 本轮先口头说意图 + 理由
+2. 下一轮才调工具
+
+例：
+> "云岚宗广场是高潮决斗场，需要 2 张参考图：1 张主 angle（白天空荡的全景），1 张副 angle（决斗时的近景仰拍）。下一步我会先调 \`\`load_skill_reference(skill='scene-design', ref_key='environment-prompt-cookbook')\`\` 看一下宗门类场景的标准 prompt 模板，再回来定稿 architecture 字段。"
+
+## reference: environment-prompt-cookbook
+
+按场景类型给的标准 prompt 配方：
+
+### 玄幻宗门（仙侠 / 修仙）
+
+\`\`\`
+architecture: 巨型石阶 / 白玉广场 / 飞檐殿宇 / 古铜钟 / 灵气云雾
+atmosphere: 庄严 / 肃杀 / 上古遗留 / 仙气缭绕
+lighting: 清晨薄雾 + 顶光散射 / 黄昏霞光 / 月华笼罩
+props: 青铜钟 / 古旗帜 / 门派牌匾 / 镇宗石碑
+英文 tag: ancient sect courtyard, white jade plaza, towering stone steps, mountain backdrop, mystical mist
+负面: no modern building, no concrete, no urban
+\`\`\`
+
+### 都市街景（现代 / 都市剧）
+
+\`\`\`
+architecture: 高楼大厦 / 街道 / 红绿灯 / 玻璃幕墙 / 招牌
+atmosphere: 繁忙 / 冷漠 / 都市疏离 / 节奏感
+lighting: 正午硬光 / 夜晚霓虹 / 黄昏街灯
+props: 出租车 / 便利店招牌 / 公交站 / 路人
+英文 tag: modern city street, glass skyscrapers, neon signs, urban realistic, rain-slick asphalt
+负面: no rural, no wilderness, no fantasy elements
+\`\`\`
+
+### 末日 / 废墟
+
+\`\`\`
+architecture: 倒塌建筑 / 锈蚀金属 / 杂草丛生 / 弃车
+atmosphere: 死寂 / 绝望 / 末世 / 寂寥
+lighting: 暗沉灰蓝 / 偶尔斜射光柱 / 黄昏沙尘
+props: 废弃汽车 / 破碎招牌 / 杂草藤蔓 / 残骸
+英文 tag: post-apocalyptic ruins, abandoned cityscape, overgrown vegetation, rusted metal, debris
+负面: no clean modern building, no people, no daily life
+\`\`\`
+
+### 室内对话（家 / 办公室 / 咖啡厅）
+
+\`\`\`
+architecture: 桌椅 / 窗 / 地板 / 墙面装饰
+atmosphere: 私密 / 日常 / 温暖 / 紧绷（视情境而定）
+lighting: 实用光源（台灯 / 窗户日光）+ 柔光
+props: 茶杯 / 笔记本 / 装饰画 / 植物 / 抱枕
+英文 tag: cozy interior, soft natural window light, wooden floor, intimate atmosphere
+负面: no outdoor, no sky, no horizon
+\`\`\`
+
+### 自然 / 田园
+
+\`\`\`
+architecture: 山 / 河 / 树林 / 田野 / 小路
+atmosphere: 宁静 / 治愈 / 自然 / 季节感
+lighting: 清晨薄雾 / 正午斑驳树影 / 黄昏暖光
+props: 野花 / 溪水 / 石头 / 木桥
+英文 tag: lush natural landscape, dappled sunlight through leaves, peaceful atmosphere, painterly
+负面: no urban, no concrete, no neon
+\`\`\`
+
+### 战斗场（决斗台 / 修罗场）
+
+\`\`\`
+architecture: 开阔平台 / 残骸地形 / 围观看台 / 高空场地
+atmosphere: 紧张 / 杀气 / 史诗感 / 万人屏息
+lighting: 戏剧性硬光 / 风沙效果 / 仰角顶光
+props: 武器残骸 / 战旗 / 血迹 / 裂痕
+英文 tag: dramatic battlefield, dust and debris, low-angle shot, cinematic lighting
+负面: no peaceful, no warm, no ordinary daily scene
+\`\`\`
+
+## reference: time-of-day-lighting-recipes
+
+5 种核心时段的光照模板（直接拼到 prompt 里）：
+
+### dawn（黎明）
+
+\`\`\`
+柔和 backlight 从地平线来, 蓝紫色天空过渡到暖粉, 雾气未散, 主体剪影清晰
+英文 tag: soft golden hour backlight, dawn mist, purple-pink sky gradient, silhouettes
+适用: 决心 / 重生 / 新开始的情绪
+\`\`\`
+
+### day（正午）
+
+\`\`\`
+顶光强烈, 短阴影硬, 高对比, 蓝天明亮
+英文 tag: harsh midday sunlight, sharp shadows, high contrast, clear blue sky
+适用: 戏剧性时刻 / 揭示真相 / 公开对峙
+\`\`\`
+
+### golden_hour（黄金时刻 / 日落前 1h）
+
+\`\`\`
+低角度暖橙光, 长阴影, 全场镀金, 浪漫感
+英文 tag: warm golden hour light, long shadows, magic hour glow, romantic atmosphere
+适用: 抒情 / 离别 / 反思 / 万能选项
+\`\`\`
+
+### dusk（黄昏 / 日落后）
+
+\`\`\`
+紫蓝色天空, 实用光源点亮, 远景轮廓模糊, 神秘感
+英文 tag: blue hour twilight, purple-blue sky, practical lights starting to glow, mysterious
+适用: 转折 / 悬疑 / 剧情进入下半段
+\`\`\`
+
+### night（黑夜）
+
+\`\`\`
+月光冷蓝, 实用光源（街灯 / 窗光 / 火光）作主光, 阴影深邃
+英文 tag: moonlit night, cool blue ambient, warm practical lights, deep shadows
+适用: 阴谋 / 战斗高潮 / 内心独白 / cyberpunk 默认
+\`\`\`
+
+### rain（雨景，可叠加在任意时段）
+
+\`\`\`
+雨幕灰白, 地面镜面反光, 雾气朦胧, 降饱和
+英文 tag: rain-soaked atmosphere, wet reflective surfaces, atmospheric fog, desaturated
+适用: 悲伤 / 转折 / 净化 / noir 必备
+\`\`\`
+`;
+
+const FRAME_PROMPT_ENGINEERING = `---
+name: frame-prompt-engineering
+description: Use when translating storyboard shots into ready-to-generate Chinese image prompts for gemini-image. Provides the five-element prompt formula (composition + character + scene + lighting + props), per-shot-size templates, and rules for consuming character / scene / style KV without re-imagining content.
+target_agents: [frame_prompt_agent]
+tags: [image-prompt, frame, gemini-image, prompt-engineering]
+author: filmgenx
+---
+
+# 首帧图 prompt 工程
+
+frame_prompt_agent 的输出会**直接喂给图像模型**，所以 prompt 质量直接决定成片画面。本 skill 给五要素公式、按景别拆分的 prompt 模板、KV 引用规范，以及关键镜头草图验证的工具调用流程。
+
+## 核心原则
+
+下游已经为你准备好了 KV：\`\`character.萧炎.appearance\`\` / \`\`scene.云岚宗广场.atmosphere\`\` / \`\`style.palette.description\`\` ……**直接复制字段值**到 prompt 里，不要"凭印象再描述一遍角色长什么样"——那会和 character_ref 失去一致性。
+
+## 五要素公式
+
+每个 \`\`image_prompt\`\` 必须涵盖五段，按这个顺序写最稳：
+
+\`\`\`
+[1. 构图 / 景别]: 中景, 主角偏右 1/3 位置, 低角度仰拍
+[2. 角色动作 + 表情]: 萧炎 {character.萧炎.appearance}, determined 表情 {character.萧炎.expressions.determined}, 双手紧握玄重尺侧身预备战姿态
+[3. 场景背景]:        云岚宗广场 {scene.云岚宗广场.architecture}, {scene.云岚宗广场.atmosphere}
+[4. 光影色调]:        {style.lighting.description}, {style.palette.description}, 黄昏侧光剪影主角, 远景烟雾扩散
+[5. 关键道具]:        玄重尺(尺端微红), 飞扬战袍下摆
+\`\`\`
+
+总长度约 80-200 字。低于 80 通常细节不够；高于 200 模型注意力会被稀释。
+
+## 按景别选模板
+
+不同 \`\`shot_size\`\` 的 prompt 重心不同：
+
+### ELS / LS（远景）
+
+重心在**场景** + **构图层次**，角色描述简化：
+
+\`\`\`
+[构图]: 远景, 主角占画面 1/4, 居中略偏左
+[角色]: 萧炎 silhouette, determined posture
+[场景]: {scene.location.architecture 完整}, 远景到地平线, 三层纵深
+[光影]: {style.lighting} 全景式, 大气透视
+[道具]: 远处有 {props}
+\`\`\`
+
+不要在远景里堆角色细节——根本看不见。
+
+### MS / MCU（中景 / 中近）
+
+主体是**对话戏 / 互动戏**的标准景别。重心是**角色 + 表情 + 动作**：
+
+\`\`\`
+[构图]: 中景, 双人 OTS 或正反打, 主体占画面 1/2
+[角色]: {character.A.appearance} {character.A.expressions.X}, {character.B.appearance} {character.B.expressions.Y}, 站姿距离 + 视线方向
+[场景]: 简化背景, 局部 {scene.atmosphere}
+[光影]: {style.lighting}, 注意角色面部受光
+[道具]: 桌面 / 手中物
+\`\`\`
+
+### CU / ECU（特写 / 大特写）
+
+重心是**情绪 + 细节**，背景几乎抛弃：
+
+\`\`\`
+[构图]: 特写, 主体占画面 2/3, 中心构图或斜对角线
+[角色]: {character.X.expressions.<情绪>} 详细描述眼神 / 嘴角 / 微表情
+[场景]: 极度虚化背景, 只保留 {scene.atmosphere} 色调氛围
+[光影]: 高对比, 单一光源勾勒轮廓, eye light catchlight
+[道具]: 手部特写时强调 {props 单件}
+\`\`\`
+
+### POV / OTS（主观 / 过肩）
+
+按"用谁的视线看出去"决定：
+
+\`\`\`
+[构图]: OTS, A 的肩头剪影占左 1/3, B 在右 2/3
+[角色]: B 占主体, B 表情 + 动作; A 仅剪影
+[场景]: 适度可见
+[光影]: B 受光, A 暗部剪影
+\`\`\`
+
+## KV 引用规范
+
+下面这些 KV 字段必须**直接复制**到 prompt 里，不重写：
+
+| KV 字段 | 写到 prompt 里时 |
+| --- | --- |
+| \`\`character.<name>.appearance\`\` | 整段拼到角色描述前半 |
+| \`\`character.<name>.expressions.<key>\`\` | 拼到角色描述的表情位 |
+| \`\`scene.<location>.architecture\`\` | 拼到场景段第一句 |
+| \`\`scene.<location>.atmosphere\`\` | 拼到场景段第二句 |
+| \`\`scene.<location>.lighting\`\` 或 \`\`style.lighting\`\` | 拼到光影段，二选一（场景特有 vs 全片统一） |
+| \`\`style.palette.description\`\` | 拼到光影段末尾 |
+| \`\`style.composition.description\`\` | 影响构图段写法 |
+| \`\`style.negative_anchor\`\` | 复制到 negative_prompt 字段开头 |
+
+**character_refs / scene_ref 字段**只是引用 name / location 字符串，**不是把字段值写进去**——下游通过 name 反查 KV 拿完整数据。
+
+## model_hint 选择
+
+| 镜头类型 | model_hint | 理由 |
+| --- | --- | --- |
+| 高潮 / 转折 / 情感顶点 | \`\`gemini-3-pro-image-preview\`\` | 全片记忆点，必出最佳质量 |
+| 角色 close-up / 关键表情 | \`\`gemini-3-pro-image-preview\`\` | 表情精度直接决定情绪传达 |
+| 远景 / 过场 / 镜头连接 | \`\`gemini-3.1-flash-image-preview\`\` | 速度快、成本低、信息密度低 |
+| 草图验证 / 临时确认 | \`\`gemini-3.1-flash-image-preview\`\` | 验证用，不入库 |
+
+短剧（60 秒）建议 30% 用 pro、70% 用 flash。
+
+## negative_prompt 公式
+
+\`\`\`
+{style.negative_anchor} + {本镜特异}
+\`\`\`
+
+本镜特异举例：
+- OTS 镜头：\`\`no front face, no two faces visible\`\`
+- 室内场景：\`\`no outdoor, no sky\`\`
+- 单人镜：\`\`no other characters, no crowd\`\`
+- 远景：\`\`no detailed face, no close-up details\`\`
+
+## 关键镜头草图验证
+
+frame_prompt_agent 可以在产出 \`\`FramePromptSet\`\` 之前 / 之中，对**最关键的 1-2 个镜头**调 \`\`generate_image\`\` 出草图验证。但要严格遵守工具调用协议：
+
+### 流程
+
+1. **本轮口头说明**:
+> "镜头 7 是高潮决斗的关键 image_prompt（萧炎释放佛怒火莲），我担心 prompt 里"双色异火融合"模型理解不到位。下一步我会用 \`\`model="gemini-3.1-flash-image-preview"\`\` 出一张草图验证（flash 省额度、速度快），如果效果偏，会调整 prompt 里"火焰描述"那段再用 pro 出最终首帧。"
+
+2. **下一轮**: 调 \`\`generate_image(prompt=<image_prompt>, model="gemini-3.1-flash-image-preview", aspect_ratio="16:9")\`\`
+
+3. **看结果再说**:
+- 效果到位 → 把 prompt 锁定到最终 FramePromptSet
+- 效果偏 → 本轮口头说"草图里异火没融合，我打算把 prompt 里 'two colors swirling together' 改成 'magenta and emerald flames spiraling and merging at the center'，下一步重新调 generate_image 验证"
+
+### 不要做的
+
+- 不要给所有镜头都调 generate_image（这是下游编排器的工作）
+- 不要直接 call_tool 不解释（违反工具调用协议）
+
+## 反例
+
+- prompt 里漏掉光照 → 出图灰扁，缺氛围
+- 把 character.appearance 自己改写一遍 → 和 character_ref 失去一致性
+- character_refs 引用 character.* 里不存在的 name → 下游断链
+- 一个 image_prompt 描述多个画面 → 违背"首帧"概念
+- 把对白文字塞进 image_prompt → 图像不需要文字
+- aspect_ratio 不统一 → 全片画面比例混乱
+
+## 工作流（强调先口头说明再调用工具）
+
+每次准备调 \`\`load_skill_reference\`\` / \`\`generate_image\`\` / \`\`memory_save\`\`：
+1. 本轮先口头说明意图 + 理由
+2. 下一轮才调工具
+
+例：
+> "Storyboard 给了 24 个镜头，主要分散在 3 个 location。下一步我打算先按 location 分组、按景别从大到小排，一次性产出所有 image_prompt。其中镜头 7 / 12 是高潮，我想先调 \`\`load_skill_reference(skill='frame-prompt-engineering', ref_key='shot-size-prompt-templates')\`\` 拿到 ECU 模板，再回来写。"
+
+## reference: shot-size-prompt-templates
+
+10 种景别的 prompt 起手模板，可直接套用：
+
+### ELS（大远景）
+
+\`\`\`
+极远景, 主体仅占画面 1/8, 大量天空 + 地形, 大气透视, 三层纵深拉满
+"extreme long shot, vast landscape, tiny figure in distance, atmospheric haze, layered depth"
+\`\`\`
+
+### LS（远景）
+
+\`\`\`
+远景, 主体占画面 1/4, 完整环境可见, 主体与周围关系
+"long shot, full body visible, surrounding environment dominant, establishing shot"
+\`\`\`
+
+### FS（全景）
+
+\`\`\`
+全景, 主体占画面 1/3 ~ 1/2 高度, 头到脚清晰, 部分环境
+"full shot, full body, character takes upper third, slight environment context"
+\`\`\`
+
+### MS（中景）
+
+\`\`\`
+中景, 腰部以上, 主体占画面 1/2, 对话戏标准
+"medium shot, waist up, character occupies half frame, standard dialogue framing"
+\`\`\`
+
+### MCU（中近景）
+
+\`\`\`
+中近景, 胸口以上, 主体占画面 2/3
+"medium close-up, chest up, character dominates two-thirds of frame"
+\`\`\`
+
+### CU（特写）
+
+\`\`\`
+特写, 头部 + 部分肩, 主体占画面 3/4, 情绪戏标准
+"close-up, head and shoulders, dominates frame, emotional intensity"
+\`\`\`
+
+### ECU（大特写）
+
+\`\`\`
+大特写, 仅五官某部分（眼 / 嘴 / 手）, 占满画面, 极致情绪 / 关键细节
+"extreme close-up, eyes only / mouth only / hand only, fills entire frame, intense emotion or key detail"
+\`\`\`
+
+### OTS（过肩）
+
+\`\`\`
+过肩镜头, 前景肩剪影占左 1/3, 主体在右 2/3, 双人对话标配
+"over-the-shoulder shot, foreground shoulder silhouette on left third, subject in right two-thirds"
+\`\`\`
+
+### POV（主观）
+
+\`\`\`
+主观镜头, 第一人称视角, 视线引导, 看到的物体充满画面
+"point of view shot, first person perspective, what the character sees fills frame"
+\`\`\`
+
+### INSERT（插入特写）
+
+\`\`\`
+插入特写, 单一道具或细节, 极简背景, 视觉锚点
+"insert shot, isolated prop / detail, minimal background, visual anchor"
+\`\`\`
+
+## reference: lighting-keyword-cookbook
+
+光照关键词速查（可直接拼到 prompt）：
+
+### 主光方向
+
+| key | 中文描述 | 英文 tag |
+| --- | --- | --- |
+| top_light | 顶光（戏剧性 / 严肃） | overhead lighting, harsh top light |
+| side_light | 侧光（雕塑感 / 强对比） | side lighting, dramatic chiaroscuro |
+| back_light | 逆光（剪影 / 神秘） | backlight silhouette, rim light |
+| three_quarter | 3/4 光（人像标准） | three-quarter lighting, classic portrait setup |
+| under_light | 仰光（恐怖 / 反派） | uplight, sinister lighting from below |
+| flat_light | 平光（柔和 / 治愈） | flat lighting, soft diffuse, no shadows |
+
+### 光质
+
+| key | 中文 | 英文 tag |
+| --- | --- | --- |
+| hard | 硬光 | hard light, sharp shadows, high contrast |
+| soft | 柔光 | soft diffuse light, gentle shadows |
+| rim | 边缘光 | rim lighting, edge highlight |
+| volumetric | 体积光（光柱） | volumetric lighting, god rays, light shafts |
+
+### 光色
+
+| key | 中文 | 英文 tag |
+| --- | --- | --- |
+| warm | 暖光 | warm tungsten light, golden tone |
+| cool | 冷光 | cool blue light, daylight tone |
+| mixed | 冷暖对比 | mixed color temperature, teal-and-orange contrast |
+| neon | 霓虹 | neon lighting, magenta and cyan |
+| candlelight | 烛光 | candlelight, flickering warm orange |
+
+### 时段叠加
+
+\`\`\`
+golden_hour: warm golden hour light, low angle, long shadows
+blue_hour: blue hour, dusk, purple-blue sky
+night_practical: moonlit + practical lights (street lamps / windows / fire)
+overcast: overcast diffused lighting, soft shadows, cool grey tone
+\`\`\`
+`;
+
+const VIDEO_PROMPT_ENGINEERING = `---
+name: video-prompt-engineering
+description: Use when translating storyboard shots into Kling-ready text-to-video prompts. Provides the four-element motion formula (camera + character action + rhythm + opening frame), Kling parameter rules (duration 5/10, aspect ratio, quality), and templates for common camera moves and action types.
+target_agents: [video_prompt_agent]
+tags: [video-prompt, kling, text-to-video, prompt-engineering]
+author: filmgenx
+---
+
+# 视频镜头 prompt 工程
+
+video_prompt_agent 的输出会**直接喂给视频模型**（当前 Kling，未来 Seedance）。本期是**纯文字驱动**——没有 seed image，所以 prompt 必须把"画面起手"也写清楚，不然模型自己脑补画面起点会和 frame_prompt 完全不同。
+
+本 skill 给四要素公式、Kling 参数规则、常见运镜与动作类型模板，以及关键运动验证的工具调用流程。
+
+## 四要素公式
+
+每个 \`\`motion_description\`\` 必须涵盖：
+
+\`\`\`
+[1. 画面起手]: 第 0 秒看到什么 (借鉴 frame_prompt.image_prompt 关键描述)
+[2. 运镜]:    pan / dolly / zoom / static, 起止位置, 速度
+[3. 角色动作]: 肢体 / 表情变化, 节奏分段
+[4. 镜头节奏]: 时间分配 (前 X 秒做 A, 中 Y 秒做 B, 末 Z 秒做 C)
+\`\`\`
+
+总长度 80-180 字。低于 80 通常运动不够清晰；高于 180 模型注意力分散。
+
+## 完整模板
+
+\`\`\`
+画面起手: 萧炎背身站立云岚宗广场中央, 玄重尺横置背后, 黄昏侧光剪影; 远景宗门殿宇模糊。
+运镜: 镜头以 dolly in 缓慢推进, 起始 medium shot, 推进到 medium close-up, 停在主角侧脸位置。
+角色动作: 主角缓慢转身, 表情从平静转为 determined, 右手缓慢握紧尺柄。
+节奏: 前 2 秒画面静止建立氛围, 2-4 秒推镜 + 转身同步, 4-5 秒停顿在表情特写。
+
+duration: 5 sec
+aspect_ratio: 16:9
+quality: hq
+\`\`\`
+
+## Kling 参数规则（硬约束）
+
+| 参数 | 允许值 | 备注 |
+| --- | --- | --- |
+| \`\`duration_seconds\`\` | **必须取整 5 或 10** | 其它值 Kling 直接拒绝 |
+| \`\`aspect_ratio\`\` | \`\`16:9\`\` / \`\`9:16\`\` / \`\`1:1\`\` | 必须与对应 frame_prompt 一致 |
+| \`\`quality\`\` | \`\`std\`\` / \`\`hq\`\` | std=720p, hq=1080p; hq 额度贵 |
+| \`\`model_hint\`\` | 当前只有 \`\`kling\`\` | seedance 是占位 |
+
+### duration 选择规则
+
+storyboard 里每个镜头的 \`\`duration_seconds\`\` 是设计意图，**video_prompt 的 duration 是 Kling 实际生成时长**。两者不必完全一致：
+
+| storyboard.duration_seconds | video_prompt.duration_seconds | 理由 |
+| --- | --- | --- |
+| 1-3 秒（快切） | 5 | Kling 最短就 5；剪辑时再裁短 |
+| 4-6 秒 | 5 | 直接对齐 |
+| 7-10 秒 | 10 | 长镜要求 |
+| > 10 秒 | 拆分成多段 5/10 秒 | 单个镜头超过 Kling 限制 |
+
+### quality 分配（额度有限）
+
+短剧（60 秒）按这个比例分配：
+
+| 镜头类型 | quality | 占比 |
+| --- | --- | --- |
+| 高潮 / 转场 / 情感顶点 | hq | 20-30% |
+| 关键叙事 / 角色 close-up 运动 | hq | 视情况 |
+| 常规过场 / 简单运镜 | std | 60-70% |
+
+**不要全 hq**——一个 60 秒短剧 12-15 个 video shot 全 hq 会爆额度。
+
+## 文字驱动的"画面起手"为什么关键
+
+Kling 文字驱动模式没有 seed image，模型完全靠 prompt 起步。如果你的 motion_description 直接写"萧炎转身"——模型不知道萧炎长什么样、站在哪里、什么角度。
+
+正确做法：**前 2-3 句必须复述 frame_prompt.image_prompt 的关键内容**：
+
+\`\`\`
+画面起手: {frame_prompt 的构图 + 角色描述 + 场景描述 + 光影},  ← 这一段是"种子"
+然后镜头 ...                                                   ← 这一段是"运动"
+角色 ...
+节奏 ...
+\`\`\`
+
+下游 frame_prompt 已经为这个 shot 设计好了首帧 prompt，你**直接借用核心描述**作为画面起手，不要重新发明。
+
+## 常见运镜模板
+
+### static（静止 / 标准对话）
+
+\`\`\`
+镜头静止保持 medium shot 不动, 不推不拉不摇.
+适用: 对话戏, 仪式感, 抒情戏长镜.
+\`\`\`
+
+### pan（横摇 / 跟随）
+
+\`\`\`
+镜头以中速 pan {左→右 / 右→左}, 跟随主体平移, 揭示空间.
+适用: 揭示场景, 角色行走, 空间过渡.
+\`\`\`
+
+### tilt（俯仰摇）
+
+\`\`\`
+镜头以缓慢 tilt {上→下 / 下→上}, 揭示高度差.
+适用: 展现建筑高度, 权力关系仰拍, 揭示天空 / 地面.
+\`\`\`
+
+### dolly_in（推进）
+
+\`\`\`
+镜头以中速 dolly in 推进, 从 long shot 推到 medium close-up, 介入角色情绪.
+适用: 情绪升级, 决心时刻, 揭示真相前的预备.
+\`\`\`
+
+### dolly_out（拉远）
+
+\`\`\`
+镜头以缓慢 dolly out 拉远, 从 close-up 拉到 long shot, 角色逐渐渺小.
+适用: 离别, 揭示孤立, 结尾场景.
+\`\`\`
+
+### whip_pan（急摇）
+
+\`\`\`
+镜头以极快 whip pan 切换, 用动作模糊连接两个画面.
+适用: 转场, 时空跳跃, 动作戏过渡.
+\`\`\`
+
+### handheld（手持）
+
+\`\`\`
+镜头以手持轻微抖动跟随主体, 真实感, 紧张感.
+适用: 紧张戏, 第一人称感, 现实主义.
+\`\`\`
+
+### crane（升降）
+
+\`\`\`
+镜头从低位 crane up 升起, 揭示全景或转换视角.
+适用: 开场, 结尾, 仪式感时刻.
+\`\`\`
+
+### zoom_in（变焦推近）
+
+\`\`\`
+镜头 zoom in (不是物理移动), 突出心理变化或细节.
+适用: 心理戏, 特定道具特写, 复古电视感.
+注意: 慎用. 现代电影感少用.
+\`\`\`
+
+## 常见角色动作模板
+
+### 战斗动作
+
+\`\`\`
+主角举武器, 蓄力 1 秒, 挥下时武器尾随光迹, 击中目标产生粒子爆发.
+英文 tag: character raises weapon, charges energy 1 sec, swings down with motion blur trail, particle explosion on impact
+\`\`\`
+
+### 释放招式 / 异能
+
+\`\`\`
+主角双手聚气, 手心光球渐大, 双色异火融合, 释放冲击波.
+英文 tag: character channels energy, palm glows brighter, two-color flames merge, releases shockwave
+\`\`\`
+
+### 转身 / 揭示表情
+
+\`\`\`
+主角缓慢转身, 头先转, 身体跟随, 表情从平静过渡到 determined, 视线锁定.
+英文 tag: character slowly turns around, head first, body follows, expression transitions from calm to determined, locked gaze
+\`\`\`
+
+### 行走 / 离开
+
+\`\`\`
+主角缓慢迈步前进, 步速节奏稳定, 长袍 / 头发飘动.
+英文 tag: character walks forward at steady pace, robes / hair flowing, determined posture
+\`\`\`
+
+### 摔倒 / 受击
+
+\`\`\`
+主角被击中, 身体后仰, 武器脱手飞出, 着地腾起尘土.
+英文 tag: character takes hit, body recoils backward, weapon flies out of grip, dust kicks up on impact
+\`\`\`
+
+### 抒情 / 静默
+
+\`\`\`
+主角静止, 仅风吹动头发 / 衣物, 眼神缓慢眨动, 微表情变化.
+英文 tag: character stands still, hair / clothes drift in wind, slow blink, subtle facial micro-expression shift
+\`\`\`
+
+## 反例
+
+- motion_description 写"角色移动"——通用描述, 模型乱画
+- duration_seconds 取 7（不是 5/10）——Kling 拒绝
+- aspect_ratio 与 frame_prompt 不一致——画面拉伸
+- 漏写画面起手——文字驱动模式下模型完全靠 prompt 起步
+- 全部 quality=hq——额度爆掉
+- 把 frame_prompt 的整段 image_prompt 完整复制——重复信息, 浪费 prompt 长度
+
+## 工作流（强调先口头说明再调用工具）
+
+每次准备调 \`\`load_skill_reference\`\` / \`\`generate_video\`\`：
+1. 本轮先口头说明意图 + 理由
+2. 下一轮才调工具
+
+例：
+> "我打算只对镜头 7（佛怒火莲释放）和镜头 12（决战收尾）做 generate_video 验证。这两镜是高潮 + 收尾, 运动复杂, 担心 prompt 写得不够具体. 下一步先用镜头 7 跑一次（duration=5, quality=hq）, 看异火融合的运动是否到位, 不到位再调整 prompt 重跑."
+
+## reference: kling-camera-motion-cheatsheet
+
+Kling 实测表现较好的运镜关键词（中英对照）：
+
+| 中文 | 英文 prompt 关键词 | Kling 表现 |
+| --- | --- | --- |
+| 静止 | static camera, no movement | 稳定 |
+| 缓慢推进 | slow dolly in, gradual zoom in | 稳定 |
+| 缓慢拉远 | slow dolly out, gradual zoom out | 稳定 |
+| 横移跟随 | smooth pan following the subject | 较稳定 |
+| 仰角推进 | low-angle dolly in, looking up | 稳定 |
+| 俯角拉远 | overhead pull back, bird's eye | 稳定 |
+| 手持跟拍 | handheld camera following, slight shake | 较稳定 |
+| 急速横摇 | whip pan transition | 不稳定（常被忽略） |
+| 360 环绕 | orbit around the subject | 不稳定（容易变形） |
+| 升降镜 | crane up / crane down | 较稳定 |
+
+**避免**：复杂复合运镜（如 dolly + tilt 同时）、超过 2 个动作的串联——Kling 容易"做一半"。
+
+## reference: motion-pacing-templates
+
+5 种常见镜头节奏模板，按 5 秒和 10 秒拆解：
+
+### 5 秒爆发型（动作戏）
+
+\`\`\`
+0-1秒: 静止建立 (起手画面)
+1-3秒: 主动作执行 (挥武器 / 释放招式 / 转身)
+3-5秒: 余波 + 表情 (击中后烟尘 / 表情切换 / 武器停顿)
+\`\`\`
+
+### 5 秒抒情型（情绪戏）
+
+\`\`\`
+0-2秒: 静止微动 (风吹头发 / 缓慢眨眼)
+2-4秒: 表情过渡 (平静→悲伤 / 决心→释然)
+4-5秒: 微表情定格 (眼角泪光 / 嘴角微扬)
+\`\`\`
+
+### 5 秒推镜型（情绪升级）
+
+\`\`\`
+0-1秒: long shot 静止
+1-4秒: 缓慢 dolly in 到 medium close-up
+4-5秒: 停在 close-up 的表情
+\`\`\`
+
+### 10 秒长镜型（仪式感）
+
+\`\`\`
+0-2秒: 起手画面建立
+2-4秒: 角色动作起步
+4-6秒: 主动作展开 (招式 / 对峙 / 行走)
+6-8秒: 高潮点 (击中 / 决断 / 揭示)
+8-10秒: 收尾 (余波 / 镜头停顿 / 转场预备)
+\`\`\`
+
+### 10 秒揭示型（开场 / 结尾）
+
+\`\`\`
+0-2秒: 局部细节特写
+2-5秒: crane / zoom out 揭示更大场景
+5-8秒: 角色出现 / 走入画面
+8-10秒: 全景定格
+\`\`\`
+`;
+
+
 const BLANK_TEMPLATE = `---
 name: my-skill
 description: Use when ... to ...
@@ -340,5 +1580,30 @@ export const SKILL_SAMPLES: SkillSample[] = [
     label: 'cinematic-composition（镜头语言）',
     targetAgent: 'storyboard_agent',
     markdown: CINEMATIC_COMPOSITION,
+  },
+  {
+    label: 'visual-style-anchors（视觉锚点）',
+    targetAgent: 'visual_style_agent',
+    markdown: VISUAL_STYLE_ANCHORS,
+  },
+  {
+    label: 'character-design（角色设计）',
+    targetAgent: 'character_ref_agent',
+    markdown: CHARACTER_DESIGN,
+  },
+  {
+    label: 'scene-design（场景设计）',
+    targetAgent: 'scene_ref_agent',
+    markdown: SCENE_DESIGN,
+  },
+  {
+    label: 'frame-prompt-engineering（首帧 prompt 工程）',
+    targetAgent: 'frame_prompt_agent',
+    markdown: FRAME_PROMPT_ENGINEERING,
+  },
+  {
+    label: 'video-prompt-engineering（视频 prompt 工程）',
+    targetAgent: 'video_prompt_agent',
+    markdown: VIDEO_PROMPT_ENGINEERING,
   },
 ];

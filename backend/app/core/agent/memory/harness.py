@@ -225,6 +225,37 @@ class MemoryHarness:
             extra_metadata=extra_metadata or {},
         )
 
+    async def add_entry(
+        self,
+        *,
+        content: str,
+        kind: str = "fact",
+        confidence: float = 1.0,
+        extra_metadata: dict[str, Any] | None = None,
+    ) -> Optional[str]:
+        """业务工具 / agent 直接写一条 episodic memory_entry（向量表 append-only）。
+
+        provider 需要实现 ``add_entry(content, kind, ...)``。``kind`` 是业务自定义
+        tag（如 ``decision`` / ``user_feedback`` / ``fact`` / ``episode_outcome``），
+        recall 时可按 kind 过滤。不走 taxonomy 校验——free-form。
+        """
+        provider_add_entry = getattr(self.config.provider, "add_entry", None)
+        if not callable(provider_add_entry):
+            logger.warning(
+                "[memory:%s] provider %s does not implement add_entry; ignored",
+                self.agent_name,
+                type(self.config.provider).__name__,
+            )
+            return None
+
+        return await provider_add_entry(
+            content=content,
+            kind=kind,
+            scope_metadata=dict(self.config.scope_metadata),
+            confidence=confidence,
+            extra_metadata=extra_metadata or {},
+        )
+
     # ------------------------------------------------------------------ #
     # Write：三个触发路径的统一管道
     # ------------------------------------------------------------------ #

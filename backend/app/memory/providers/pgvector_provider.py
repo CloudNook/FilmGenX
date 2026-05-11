@@ -29,11 +29,10 @@ domain 的具体含义。
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import and_, func, select, text, update
-from sqlalchemy.dialects.postgresql import JSONB, insert as pg_insert
+from sqlalchemy import and_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
 from app.core.agent.memory.embedding import EmbeddingService
@@ -43,7 +42,7 @@ from app.core.agent.memory.types import (
     RecallQuery,
     RecalledMemory,
 )
-from app.memory.taxonomy import KIND_REGISTRY, validate_kv
+from app.memory.taxonomy import validate_kv
 from app.models.memory_entry import MemoryEntry
 from app.models.memory_extract_cursor import MemoryExtractCursor
 from app.models.memory_profile import MemoryProfile
@@ -201,24 +200,21 @@ class PgvectorMemoryProvider(MemoryProvider):
         candidate: CandidateMemory,
         scope_metadata: dict[str, Any],
     ) -> str:
+        """UPDATE-in-place 语义：(scope, kind, key) 已存在 active 行就直接改字段；
+        不存在才 INSERT。不再保留 superseded 历史版本。"""
         entity_kind, entity_key, value = self._normalize_profile_candidate(candidate)
 
-        # 把当前生效行 superseded
-        stmt = (
-            update(MemoryProfile)
-            .where(
-                and_(
-                    MemoryProfile.scope.op("@>")(scope_metadata),
-                    MemoryProfile.scope.op("<@")(scope_metadata),  # 双向 @> 实现严格相等
-                    MemoryProfile.entity_kind == entity_kind,
-                    MemoryProfile.entity_key == entity_key,
-                    MemoryProfile.superseded_at.is_(None),
-                    MemoryProfile.is_deleted.is_(False),
-                )
-            )
-            .values(superseded_at=datetime.now(timezone.utc))
+        existing_id = await self._update_active_row(
+            session,
+            scope_metadata=scope_metadata,
+            entity_kind=entity_kind,
+            entity_key=entity_key,
+            value=value,
+            confidence=float(candidate.confidence),
+            extra_metadata=dict(candidate.extraction_metadata),
         )
-        await session.execute(stmt)
+        if existing_id is not None:
+            return f"profile:{existing_id}"
 
         row = MemoryProfile(
             scope=dict(scope_metadata),
@@ -229,8 +225,42 @@ class PgvectorMemoryProvider(MemoryProvider):
             extra_metadata=dict(candidate.extraction_metadata),
         )
         session.add(row)
-        await session.flush()  # 让 row.id 在不 commit 的情况下可读
+        await session.flush()
         return f"profile:{row.id}"
+
+    async def _update_active_row(
+        self,
+        session: AsyncSession,
+        *,
+        scope_metadata: dict[str, Any],
+        entity_kind: str,
+        entity_key: str,
+        value: dict[str, Any],
+        confidence: float,
+        extra_metadata: dict[str, Any],
+    ) -> Optional[int]:
+        """对已存在的 active (scope, kind, key) 行做 UPDATE；命中返回 id，没命中返回 None。"""
+        stmt = (
+            update(MemoryProfile)
+            .where(
+                and_(
+                    MemoryProfile.scope.op("@>")(scope_metadata),
+                    MemoryProfile.scope.op("<@")(scope_metadata),
+                    MemoryProfile.entity_kind == entity_kind,
+                    MemoryProfile.entity_key == entity_key,
+                    MemoryProfile.superseded_at.is_(None),
+                    MemoryProfile.is_deleted.is_(False),
+                )
+            )
+            .values(
+                value=value,
+                confidence=confidence,
+                extra_metadata=extra_metadata,
+            )
+            .returning(MemoryProfile.id)
+        )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
 
     async def _insert_memory_entry_in_session(
         self,
@@ -277,21 +307,17 @@ class PgvectorMemoryProvider(MemoryProvider):
 
         async with self._session_factory() as session:
             async with session.begin():
-                stmt = (
-                    update(MemoryProfile)
-                    .where(
-                        and_(
-                            MemoryProfile.scope.op("@>")(scope),
-                            MemoryProfile.scope.op("<@")(scope),
-                            MemoryProfile.entity_kind == kind,
-                            MemoryProfile.entity_key == key,
-                            MemoryProfile.superseded_at.is_(None),
-                            MemoryProfile.is_deleted.is_(False),
-                        )
-                    )
-                    .values(superseded_at=datetime.now(timezone.utc))
+                existing_id = await self._update_active_row(
+                    session,
+                    scope_metadata=scope,
+                    entity_kind=kind,
+                    entity_key=key,
+                    value=validated_value,
+                    confidence=float(confidence),
+                    extra_metadata=dict(extra_metadata or {}),
                 )
-                await session.execute(stmt)
+                if existing_id is not None:
+                    return f"profile:{existing_id}"
 
                 row = MemoryProfile(
                     scope=dict(scope),
@@ -306,6 +332,56 @@ class PgvectorMemoryProvider(MemoryProvider):
                 new_id = row.id
 
         return f"profile:{new_id}"
+
+    async def add_entry(
+        self,
+        content: str,
+        *,
+        kind: str = "fact",
+        scope_metadata: Optional[dict[str, Any]] = None,
+        confidence: float = 1.0,
+        extra_metadata: Optional[dict[str, Any]] = None,
+    ) -> str:
+        """**确定性写入向量表**：append-only，每次都 INSERT 新行，自动算 embedding。
+
+        给 episodic / 自由格式记忆用——不走 taxonomy 校验。``kind`` 是业务自定义 tag
+        （如 "decision" / "user_feedback" / "fact" / "episode_outcome"），仅做
+        recall 时分类过滤用。
+        """
+        if not content:
+            raise ValueError("content must be a non-empty string")
+
+        clean_scope = _scope_metadata_for_filter(scope_metadata or {})
+        scope = self._enforce_domain_scope(clean_scope)
+
+        # embedding 算在事务外（外部 RPC 慢）
+        embedding: Optional[list[float]] = None
+        if self._embedding is not None:
+            try:
+                vecs = await self._embedding.embed([content])
+                embedding = vecs[0] if vecs else None
+            except Exception:
+                logger.exception(
+                    "[pgvector] embedding failed for add_entry; "
+                    "row will be written without vector"
+                )
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = MemoryEntry(
+                    scope=dict(scope),
+                    kind=kind,
+                    content=content,
+                    embedding=embedding,
+                    source=(extra_metadata or {}).get("source", "memory_save_tool"),
+                    confidence=float(confidence),
+                    extra_metadata=dict(extra_metadata or {}),
+                )
+                session.add(row)
+                await session.flush()
+                new_id = row.id
+
+        return f"entry:{new_id}"
 
     async def list_active(
         self,

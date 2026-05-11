@@ -680,6 +680,12 @@ export type AgentSSEEvent =
   | { type: 'tool_start'; tool_call_id: string; tool_name: string; arguments: Record<string, unknown> }
   | { type: 'tool_end'; tool_call_id: string; tool_name: string; result: unknown; is_error: boolean }
   | { type: 'done'; usage: { prompt_tokens?: number | null; completion_tokens?: number | null; thinking_tokens?: number | null; total_tokens?: number | null } | null; loop_count: number; finished: boolean }
+  | {
+      type: 'usage';
+      usage: { prompt_tokens?: number | null; completion_tokens?: number | null; thinking_tokens?: number | null; total_tokens?: number | null };
+      accumulated_usage: { prompt_tokens?: number | null; completion_tokens?: number | null; thinking_tokens?: number | null; total_tokens?: number | null } | null;
+      loop_count: number;
+    }
   | { type: 'error'; error: string }
   | { type: 'interrupt'; session_id: string; tool_name: string; tool_call_id: string; arguments: Record<string, unknown>; available_actions: string[]; context: Record<string, unknown> }
   | { type: 'review_start'; review_round: number; candidate_preview: string }
@@ -844,6 +850,12 @@ export interface SupervisorWorkflowSummaryResponse {
 export interface SupervisorWorkflowDetailResponse extends SupervisorWorkflowSummaryResponse {
   workflow_snapshot: Record<string, unknown> | null;
   event_history: SupervisorSSEEvent[];
+  last_usage: {
+    prompt_tokens?: number | null;
+    completion_tokens?: number | null;
+    thinking_tokens?: number | null;
+    total_tokens?: number | null;
+  } | null;
 }
 
 export interface SupervisorInterruptStateResponse {
@@ -907,6 +919,13 @@ export type SupervisorSSEEvent =
       session_id: string;
       result: Record<string, unknown>;
       review_result?: Record<string, unknown> | null;
+      usage?: {
+        prompt_tokens?: number | null;
+        completion_tokens?: number | null;
+        thinking_tokens?: number | null;
+        total_tokens?: number | null;
+      } | null;
+      loop_count?: number | null;
       source?: string;
     }
   | {
@@ -930,6 +949,37 @@ export type SupervisorSSEEvent =
       workflow: Record<string, unknown>;
       final_result: string;
       source?: string;
+    }
+  | {
+      type: 'done';
+      usage: {
+        prompt_tokens?: number | null;
+        completion_tokens?: number | null;
+        thinking_tokens?: number | null;
+        total_tokens?: number | null;
+      } | null;
+      loop_count: number;
+      finished: boolean;
+      source?: string;
+      session_id?: string;
+    }
+  | {
+      type: 'usage';
+      usage: {
+        prompt_tokens?: number | null;
+        completion_tokens?: number | null;
+        thinking_tokens?: number | null;
+        total_tokens?: number | null;
+      };
+      accumulated_usage?: {
+        prompt_tokens?: number | null;
+        completion_tokens?: number | null;
+        thinking_tokens?: number | null;
+        total_tokens?: number | null;
+      } | null;
+      loop_count: number;
+      source?: string;
+      session_id?: string;
     }
   | { type: 'user_message'; content: string; timestamp?: string | null }
   | { type: 'error'; error: string; source?: string; session_id?: string };

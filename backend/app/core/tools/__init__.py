@@ -5,9 +5,9 @@ Tools 系统 - 装饰器式工具注册与调用。
 
     from app.core.tools import register_tool, ToolRegistry
 
-    @register_tool(name="calculate", description="执行数学计算")
-    def calculate(expression: str) -> str:
-        return str(eval(expression))
+    @register_tool(name="my_tool", description="...")
+    def my_tool(arg: str) -> str:
+        return ...
 
 内置工具::
 
@@ -16,7 +16,6 @@ Tools 系统 - 装饰器式工具注册与调用。
 
 from app.core.tools.builtin import load_skill, load_skill_reference
 from app.core.tools.registry import ToolRegistry, get_tool_registry, register_tool
-from app.core.tools import examples as _examples  # noqa: F401 — 触发示例工具注册
 from app.core.tools import media_tools as _media_tools  # noqa: F401 — 触发图像/视频工具注册
 
 

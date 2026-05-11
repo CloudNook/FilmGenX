@@ -140,10 +140,10 @@ class HumanInTheLoopMiddleware(AgentMiddleware):
     使用方式：
         agent = create_agent(
             ...,
-            middlewares=[HumanInTheLoopMiddleware(auto_tool_list=["get_weather", "get_time"])]
+            middlewares=[HumanInTheLoopMiddleware(auto_tool_list=["load_skill", "load_skill_reference"])]
         )
-        # get_weather / get_time 直接执行
-        # 其他所有工具（call_sub_agent 等）都需要人工确认
+        # load_skill / load_skill_reference 直接执行
+        # 其他所有工具（call_sub_agent / generate_image / memory_save 等）都需要人工确认
     """
 
     name = "hitl"

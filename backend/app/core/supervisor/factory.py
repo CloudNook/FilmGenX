@@ -49,20 +49,47 @@ def _resolve_persist(
 def _resolve_middlewares(
     middlewares: Optional[List[AgentMiddleware]],
     *,
+    auto_run: bool,
     hitl_enabled: bool,
     review_nodes: Optional[List[str]],
 ) -> List[AgentMiddleware]:
+    """决定 supervisor 是否挂载 HITL 中间件 + 白名单粒度。
+
+    两个独立维度：
+    - ``auto_run=False`` → ``call_sub_agent`` 必须经过人工确认；其它工具
+      （memory_save / load_skill / get_workflow_state）放行
+    - ``hitl_enabled=True`` → 严格模式，所有工具（除了只读的 get_workflow_state）
+      都触发人工确认
+
+    两个都没开 → 不挂中间件，全自动。
+    两个都开 → 严格模式取并集（更严的 hitl_enabled 生效）。
+    """
     resolved = list(middlewares or [])
-    if hitl_enabled and not any(
-        isinstance(middleware, HumanInTheLoopMiddleware)
-        for middleware in resolved
-    ):
-        resolved.append(
-            HumanInTheLoopMiddleware(
-                auto_tool_list=["get_workflow_state"],
-                context={"review_sub_agents": review_nodes or []},
-            )
+
+    needs_hitl = hitl_enabled or (not auto_run)
+    if not needs_hitl:
+        return resolved
+    if any(isinstance(m, HumanInTheLoopMiddleware) for m in resolved):
+        return resolved
+
+    if hitl_enabled:
+        # 严格：只放行只读状态查询
+        auto_list = ["get_workflow_state"]
+    else:
+        # auto_run=False 单独触发：只 gate call_sub_agent，其它放行
+        auto_list = [
+            "get_workflow_state",
+            "memory_save",
+            "load_skill",
+            "load_skill_reference",
+        ]
+
+    resolved.append(
+        HumanInTheLoopMiddleware(
+            auto_tool_list=auto_list,
+            context={"review_sub_agents": review_nodes or []},
         )
+    )
     return resolved
 
 
@@ -71,7 +98,7 @@ def create_supervisor(
     *,
     supervisor_session_id: Optional[str] = None,
     model: str = "gemini-3-flash-preview",
-    max_loop: int = 30,
+    max_loop: int = 50,
     persist: PersistArg = "redis",
     middlewares: Optional[List[AgentMiddleware]] = None,
     sub_agent_configs: Optional[Dict[str, Any]] = None,
@@ -107,6 +134,7 @@ def create_supervisor(
     )
     resolved_middlewares = _resolve_middlewares(
         middlewares,
+        auto_run=auto_run,
         hitl_enabled=hitl_enabled,
         review_nodes=review_nodes,
     )

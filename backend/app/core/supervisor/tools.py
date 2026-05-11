@@ -15,6 +15,7 @@ from app.core.agent.base import (
     ThinkingEvent,
     TextEvent,
     DoneEvent,
+    UsageEvent,
     ReviewStartEvent as AgentReviewStartEvent,
     ReviewEndEvent as AgentReviewEndEvent,
 )
@@ -304,6 +305,8 @@ async def call_sub_agent(
 
     # Memory：跟 supervisor 共享同一个 domain_id，sub-agent 之间也共享 memory 池。
     # 没传 domain_id 或全局 memory_enabled=False 时 sub-agent 不挂 memory。
+    # 关键：sub-agent **不挂 memory_save 工具**——它们都被 response_schema 锁死成
+    # JSON-only 输出，根本调不了工具；KV 写入由 supervisor 在 sub-agent 返回后统一做。
     sub_agent_memory = None
     if supervisor_context.memory_enabled and supervisor_context.domain_id is not None:
         # 延迟 import：core/supervisor 不应永远依赖 app/memory（极端业务可能不需要）
@@ -311,6 +314,7 @@ async def call_sub_agent(
 
         sub_agent_memory = build_domain_memory_config(
             domain_id=supervisor_context.domain_id,
+            save_tool_enabled=False,
         )
 
     sub_agent = create_agent(
@@ -328,6 +332,8 @@ async def call_sub_agent(
     )
 
     accumulated_result = {}
+    sub_agent_usage: Optional[Dict[str, Any]] = None
+    sub_agent_loop_count: Optional[int] = None
 
     try:
         async with await limiter.acquire(sub_agent_name):
@@ -397,11 +403,27 @@ async def call_sub_agent(
                         suggestions=event.review.suggestions,
                         source=sub_agent_name,
                     )
+                elif isinstance(event, UsageEvent):
+                    # sub-agent 每次 LLM 调用结束都 fire UsageEvent；这里转发到 supervisor 流，
+                    # 标上 source=<sub_agent_name> 让前端 / runtime 知道是谁产生的
+                    forwarded = event.model_copy()
+                    # Pydantic 模型默认禁止额外字段；model_copy(update=) 也只改已声明字段。
+                    # 我们通过设置属性的方式带上 source / session_id，让 endpoint 的
+                    # ``_to_event_payload`` 的 ``getattr(event, "source", None)`` 能取到。
+                    object.__setattr__(forwarded, "source", sub_agent_name)
+                    object.__setattr__(forwarded, "session_id", sub_session_id)
+                    yield forwarded
                 elif isinstance(event, DoneEvent):
                     accumulated_result = {
                         "output": event.result.raw_output or "",
                         "sub_agent_name": sub_agent_name,
                     }
+                    # 把 sub-agent 的 usage / loop_count 暴露出去，让 supervisor 流 + runtime
+                    # 能做实时 token 累计计费
+                    sub_agent_usage = event.result.usage if event.result else None
+                    sub_agent_loop_count = (
+                        event.result.loop_count if event.result else None
+                    )
                     if supervisor_context.workflow is not None:
                         for node_key in registered.node_keys:
                             if node_key in supervisor_context.workflow.nodes:
@@ -434,6 +456,8 @@ async def call_sub_agent(
         sub_agent_name=sub_agent_name,
         session_id=sub_session_id,
         result=accumulated_result,
+        usage=sub_agent_usage,
+        loop_count=sub_agent_loop_count,
     )
 
 

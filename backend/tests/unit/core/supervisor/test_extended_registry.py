@@ -45,12 +45,25 @@ EXPECTED_DEPENDENCIES = {
     "video_prompt": ["frame_prompt"],
 }
 
-NEW_AGENTS = [
+SCHEMA_LOCKED_AGENTS = [
+    "outline_agent",
+    "script_agent",
+    "storyboard_agent",
     "visual_style_agent",
+]
+
+# 资产产出 agent：要调 generate_image / generate_video，所以**不挂 response_schema**，
+# 否则 Gemini 的结构化输出会把 function calling 通道关掉
+SCHEMA_FREE_ASSET_AGENTS = [
     "character_ref_agent",
     "scene_ref_agent",
     "frame_prompt_agent",
     "video_prompt_agent",
+]
+
+NEW_AGENTS = [
+    "visual_style_agent",
+    *SCHEMA_FREE_ASSET_AGENTS,
 ]
 
 ALL_AGENTS = [
@@ -78,17 +91,13 @@ def test_default_registry_contains_eight_agents():
 
 
 @pytest.mark.parametrize("name", NEW_AGENTS)
-def test_new_agent_has_domain_prompt_schema_reviewer(name: str):
+def test_new_agent_has_domain_prompt_and_reviewer(name: str):
     registry = build_default_registry()
     agent = registry.get(name)
     assert agent is not None
 
     assert agent.prompt == SUB_AGENT_PROMPT[name]
     assert len(agent.prompt) > 200, f"{name} prompt 太短，可能退化成占位"
-
-    assert agent.response_schema is not None
-    assert agent.response_schema == SUB_AGENT_RESPONSE_SCHEMA[name]
-    assert "properties" in agent.response_schema
 
     assert agent.reviewer is not None
     assert agent.reviewer.agent.config.prompt == REVIEWER_PROMPT[name]
@@ -97,12 +106,41 @@ def test_new_agent_has_domain_prompt_schema_reviewer(name: str):
     assert agent.reviewer.on_exhausted == "accept_last"
 
 
+@pytest.mark.parametrize("name", SCHEMA_LOCKED_AGENTS)
+def test_schema_locked_agent_has_response_schema(name: str):
+    """纯设计 agent 必须挂 response_schema 强约束 JSON 输出。"""
+    registry = build_default_registry()
+    agent = registry.get(name)
+    assert agent.response_schema is not None
+    assert agent.response_schema == SUB_AGENT_RESPONSE_SCHEMA[name]
+    assert "properties" in agent.response_schema
+
+
+@pytest.mark.parametrize("name", SCHEMA_FREE_ASSET_AGENTS)
+def test_asset_agent_has_no_response_schema(name: str):
+    """资产产出 agent **不能挂** response_schema，否则 Gemini 关掉 function calling。"""
+    registry = build_default_registry()
+    agent = registry.get(name)
+    assert agent.response_schema is None
+    assert SUB_AGENT_RESPONSE_SCHEMA[name] is None
+
+
 def _tool_names(agent) -> list[str]:
     return [t.get("name") for t in agent.tools]
 
 
-def test_frame_prompt_agent_has_image_tool():
-    agent = build_default_registry().get("frame_prompt_agent")
+@pytest.mark.parametrize(
+    "name",
+    [
+        "character_ref_agent",
+        "scene_ref_agent",
+        "frame_prompt_agent",
+    ],
+)
+def test_image_producing_agents_have_generate_image(name: str):
+    """character / scene / frame 三个出图角色都需要 generate_image，用于
+    出三视图 / 场景参考图 / 关键镜头草图。"""
+    agent = build_default_registry().get(name)
     names = _tool_names(agent)
     assert "load_skill" in names
     assert "load_skill_reference" in names
@@ -131,11 +169,11 @@ def test_video_prompt_agent_has_video_tool():
         "script_agent",
         "storyboard_agent",
         "visual_style_agent",
-        "character_ref_agent",
-        "scene_ref_agent",
     ],
 )
-def test_other_agents_only_have_default_skill_tools(name: str):
+def test_non_asset_agents_only_have_default_skill_tools(name: str):
+    """outline / script / storyboard / visual_style 不产出图像 / 视频资产，
+    不应挂 media 工具。"""
     agent = build_default_registry().get(name)
     names = _tool_names(agent)
     assert names == ["load_skill", "load_skill_reference"], (

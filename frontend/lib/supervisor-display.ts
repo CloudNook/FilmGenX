@@ -108,6 +108,22 @@ type AppendableEvent =
       source?: string;
     }
   | { type: 'supervisor_done'; final_result: string; source?: string }
+  | {
+      type: 'done';
+      usage: Record<string, unknown> | null;
+      loop_count: number;
+      finished: boolean;
+      source?: string;
+      session_id?: string;
+    }
+  | {
+      type: 'usage';
+      usage: Record<string, unknown>;
+      accumulated_usage?: Record<string, unknown> | null;
+      loop_count: number;
+      source?: string;
+      session_id?: string;
+    }
   | { type: 'error'; error: string; source?: string; session_id?: string };
 
 export function resolveInitialSupervisorRunId(
@@ -424,6 +440,11 @@ export function appendSupervisorDisplayEvent(
 
   if (event.type === 'supervisor_done') {
     return completeLatestThinking(entries, event.source);
+  }
+
+  // 'done' / 'usage' 都只承载 token 计费数据，timeline 不展示
+  if (event.type === 'done' || event.type === 'usage') {
+    return entries;
   }
 
   const nextEntries = completeLatestThinking(entries, event.source, event.session_id);

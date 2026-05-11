@@ -183,22 +183,27 @@ class Agent:
             prev_msg_count = len(messages)
             await self._chain.on_loop_end(ctx)
 
-            # Memory 兜底 compact：每 N 轮抓最近一段 messages 走写入管道
-            if self.memory is not None and self.memory.tick_loop():
-                from app.core.agent.memory.types import WriteTrigger
-                window = self.memory.fallback_message_window
-                recent = list(messages)[-window:]
-                try:
-                    await self.memory.write(
-                        messages=recent,
-                        trigger=WriteTrigger.FALLBACK_COMPACT,
-                        loop_count=loop.loop_count,
-                    )
-                except Exception:
-                    logger.exception(
-                        "[Agent:%s] fallback memory compact failed",
-                        self.config.agent_name,
-                    )
+            # 已停用：每 N 轮跑 extractor 兜底 compact 的路径。FilmGenX 业务约定
+            # 所有 KV 写入都由 supervisor 在 call_sub_agent 返回后显式调 memory_save 完成；
+            # extractor 路径会把每轮对话重新抽一遍，产生大量"略不同的同 key 重写"，
+            # 即便改成 UPDATE-in-place 也仍然在每个 loop 浪费一次 LLM extractor 调用。
+            # 留接口（``self.memory.write`` 和 ``tick_loop()``）以便业务自行重启该路径。
+            #
+            # if self.memory is not None and self.memory.tick_loop():
+            #     from app.core.agent.memory.types import WriteTrigger
+            #     window = self.memory.fallback_message_window
+            #     recent = list(messages)[-window:]
+            #     try:
+            #         await self.memory.write(
+            #             messages=recent,
+            #             trigger=WriteTrigger.FALLBACK_COMPACT,
+            #             loop_count=loop.loop_count,
+            #         )
+            #     except Exception:
+            #         logger.exception(
+            #             "[Agent:%s] fallback memory compact failed",
+            #             self.config.agent_name,
+            #         )
 
         loop = AgentLoop(
             config=self.config,

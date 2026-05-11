@@ -233,6 +233,29 @@ class ToolEndEvent(BaseModel):
     is_error: bool = False
 
 
+class UsageEvent(BaseModel):
+    """单次 LLM 调用结束后的 usage 上报事件。
+
+    每个 AgentLoop 迭代（一次 think→act→observe）末尾都会 fire 一次，
+    携带这次 LLM 调用消耗的 token 数（``usage``）以及到这一刻为止本 session
+    的累积消耗（``accumulated_usage``）。
+
+    用于：
+    - 前端实时 token 计费展示
+    - supervisor 流水线把所有 agent（自己 + sub-agent）的 LLM call 累加到 workflow.total_tokens
+    """
+    type: Literal["usage"] = "usage"
+    usage: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="本次 LLM 调用的 usage（prompt_tokens / completion_tokens / thinking_tokens / total_tokens）",
+    )
+    accumulated_usage: Optional[Dict[str, Any]] = Field(
+        None,
+        description="到这一刻为止本 agent session 的累积 usage",
+    )
+    loop_count: int = Field(default=0, description="当前 loop 迭代次数")
+
+
 class DoneEvent(BaseModel):
     """
     流结束事件，携带完整 AgentResult。

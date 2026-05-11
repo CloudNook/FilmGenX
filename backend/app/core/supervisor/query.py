@@ -20,6 +20,7 @@ class SupervisorWorkflowDetailRecord:
     workflow: Any
     workflow_snapshot: dict | None
     event_history: list[dict]
+    last_usage: dict | None = None
 
 
 @dataclass
@@ -69,13 +70,46 @@ class SupervisorQuery:
         event_history = await self.workflow_store.load_event_history(
             workflow.supervisor_session_id
         )
+        last_usage = await self._fetch_last_assistant_usage(
+            workflow.supervisor_session_id
+        )
         return SupervisorWorkflowDetailRecord(
             workflow=workflow,
             workflow_snapshot=(
                 workflow_state.model_dump() if workflow_state is not None else None
             ),
             event_history=event_history,
+            last_usage=last_usage,
         )
+
+    async def _fetch_last_assistant_usage(
+        self, supervisor_session_id: str
+    ) -> Optional[dict]:
+        """从 agent_messages 表里捞 supervisor session 最后一条 assistant 消息的
+        ``extra_metadata.accumulated_usage``。给前端 hydrate "上次 token" 用——
+        历史 run 打开时也能立刻看到累计 usage。"""
+        from sqlalchemy import select
+
+        from app.core.agent.persist.models import AgentMessageRecord
+
+        stmt = (
+            select(AgentMessageRecord.extra_metadata)
+            .where(
+                AgentMessageRecord.session_id == supervisor_session_id,
+                AgentMessageRecord.role == "assistant",
+                AgentMessageRecord.is_deleted.is_(False),
+            )
+            .order_by(AgentMessageRecord.seq.desc())
+            .limit(10)
+        )
+        rows = (await self.workflow_store.db.execute(stmt)).scalars().all()
+        for meta in rows:
+            if not isinstance(meta, dict):
+                continue
+            usage = meta.get("accumulated_usage")
+            if isinstance(usage, dict) and usage:
+                return usage
+        return None
 
     async def get_interrupt_state(
         self,

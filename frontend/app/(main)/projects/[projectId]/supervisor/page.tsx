@@ -165,6 +165,11 @@ function AutoCollapseDetails({
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(!autoCollapse);
+  // 当 autoCollapse 翻转（如 thinking 从 in-progress → complete）时，把 open 同步过去。
+  // 用户手动展开 / 收起后 autoCollapse 不再变，effect 不会再触发，用户选择得以保留。
+  useEffect(() => {
+    setOpen(!autoCollapse);
+  }, [autoCollapse]);
 
   return (
     <Collapsible
@@ -219,7 +224,7 @@ export default function SupervisorPage({
   const [isStreaming, setIsStreaming] = useState(false);
   const [isResuming, setIsResuming] = useState(false);
   const [model, setModel] = useState('gemini-3-flash-preview');
-  const [maxLoop, setMaxLoop] = useState(30);
+  const [maxLoop, setMaxLoop] = useState(50);
   const [workflowProfile, setWorkflowProfile] = useState('default');
   const [autoRun, setAutoRun] = useState(true);
   const [humanReview, setHumanReview] = useState(false);
@@ -228,6 +233,13 @@ export default function SupervisorPage({
   const [liveEntries, setLiveEntries] = useState<SupervisorDisplayEntry[]>([]);
   const [liveWorkflow, setLiveWorkflow] = useState<Record<string, unknown> | null>(null);
   const [hitl, setHitl] = useState<HitlState | null>(null);
+  const [lastUsage, setLastUsage] = useState<{
+    prompt_tokens?: number | null;
+    completion_tokens?: number | null;
+    thinking_tokens?: number | null;
+    total_tokens?: number | null;
+  } | null>(null);
+  const [liveLoopCount, setLiveLoopCount] = useState(0);
 
   const messageScrollAreaRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -337,6 +349,25 @@ export default function SupervisorPage({
     () => visibleEntries.some((entry) => entry.kind !== 'user'),
     [visibleEntries],
   );
+  // 当前轮次（最后一条 user 之后）是否已经有 assistant 反馈。
+  // 多轮对话时，整体 hasAssistantEntries 会因历史 assistant 内容长期为 true，导致
+  // "AI 正在思考"的 loading dots 不再出现。这里专门只看本轮，给用户一个"已收到、
+  // 正在处理"的视觉反馈。
+  const hasAssistantEntriesSinceLastUser = useMemo(() => {
+    let lastUserIndex = -1;
+    for (let i = visibleEntries.length - 1; i >= 0; i -= 1) {
+      if (visibleEntries[i].kind === 'user') {
+        lastUserIndex = i;
+        break;
+      }
+    }
+    if (lastUserIndex === -1) {
+      return visibleEntries.some((entry) => entry.kind !== 'user');
+    }
+    return visibleEntries
+      .slice(lastUserIndex + 1)
+      .some((entry) => entry.kind !== 'user');
+  }, [visibleEntries]);
   const lastEntrySignature = useMemo(() => {
     const lastEntry = visibleEntries[visibleEntries.length - 1];
     if (!lastEntry) {
@@ -436,6 +467,13 @@ export default function SupervisorPage({
         setAutoRun(detail.auto_run);
         setHumanReview(detail.hitl_enabled);
         setMemoryEnabled(detail.memory_enabled ?? true);
+        // 历史 run hydrate "上次 usage"：从 agent_messages 最新 assistant 消息里取
+        // accumulated_usage（后端 SupervisorQuery._fetch_last_assistant_usage 已做查询）
+        if (detail.last_usage) {
+          setLastUsage(detail.last_usage);
+        } else {
+          setLastUsage(null);
+        }
       })
       .catch(() => {
         setSelectedRunDetail(null);
@@ -533,6 +571,8 @@ export default function SupervisorPage({
     setLiveEntries([]);
     setLiveWorkflow(null);
     setHitl(null);
+    setLastUsage(null);
+    setLiveLoopCount(0);
   }, []);
 
   const upsertRunSummary = useCallback(
@@ -722,6 +762,21 @@ export default function SupervisorPage({
           }
         }
 
+        if (event.type === 'usage') {
+          // 每次 LLM call 结束都 fire 一次 usage（supervisor 自己和 sub-agent 内部循环
+          // 都有）。优先用 accumulated_usage 显示"该 agent session 累计"——更直观；
+          // 没有就用本次 delta
+          const display = event.accumulated_usage ?? event.usage;
+          if (display) setLastUsage(display);
+          if (typeof event.loop_count === 'number') {
+            setLiveLoopCount(event.loop_count);
+          }
+        }
+        if (event.type === 'done' && typeof event.loop_count === 'number') {
+          // supervisor 自己的 done 用来 SET 最终 loop_count（usage 已经累过了）
+          setLiveLoopCount(event.loop_count);
+        }
+
         if (event.type === 'error' && startedWorkflowId && startedSessionId) {
           receivedError = true;
           upsertRunSummary(
@@ -847,6 +902,17 @@ export default function SupervisorPage({
               'completed',
               event.final_result,
             );
+          }
+
+          if (event.type === 'usage') {
+            const display = event.accumulated_usage ?? event.usage;
+            if (display) setLastUsage(display);
+            if (typeof event.loop_count === 'number') {
+              setLiveLoopCount(event.loop_count);
+            }
+          }
+          if (event.type === 'done' && typeof event.loop_count === 'number') {
+            setLiveLoopCount(event.loop_count);
           }
 
           if (event.type === 'error') {
@@ -1124,17 +1190,23 @@ export default function SupervisorPage({
                   </div>
                 )}
 
-                {isStreaming && !hasAssistantEntries && (
+                {(isStreaming || isResuming) && !hasAssistantEntriesSinceLastUser && (
                   <div className="flex gap-4">
                     <Avatar className="h-8 w-8 shrink-0">
                       <AvatarFallback className="bg-primary/10 text-primary">
                         <Brain className="h-4 w-4" />
                       </AvatarFallback>
                     </Avatar>
-                    <div className="flex items-center gap-1 bg-card border border-border rounded-2xl rounded-tl-sm px-4 py-3">
-                      <div className="h-2 w-2 rounded-full bg-primary/60 animate-bounce" style={{ animationDelay: '0ms' }} />
-                      <div className="h-2 w-2 rounded-full bg-primary/60 animate-bounce" style={{ animationDelay: '150ms' }} />
-                      <div className="h-2 w-2 rounded-full bg-primary/60 animate-bounce" style={{ animationDelay: '300ms' }} />
+                    <div className="inline-flex flex-col gap-1.5 bg-card border border-border rounded-2xl rounded-tl-sm px-4 py-3">
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        AI 正在思考...
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <div className="h-2 w-2 rounded-full bg-primary/60 animate-bounce" style={{ animationDelay: '0ms' }} />
+                        <div className="h-2 w-2 rounded-full bg-primary/60 animate-bounce" style={{ animationDelay: '150ms' }} />
+                        <div className="h-2 w-2 rounded-full bg-primary/60 animate-bounce" style={{ animationDelay: '300ms' }} />
+                      </div>
                     </div>
                   </div>
                 )}
@@ -1253,7 +1325,7 @@ export default function SupervisorPage({
                         min={1}
                         max={100}
                         value={maxLoop}
-                        onChange={(event) => setMaxLoop(Number(event.target.value || 30))}
+                        onChange={(event) => setMaxLoop(Number(event.target.value || 50))}
                         disabled={isStreaming}
                         className="h-8 text-xs"
                       />
@@ -1294,13 +1366,59 @@ export default function SupervisorPage({
                         </span>
                       </div>
                       <div className="flex justify-between text-xs">
-                        <span className="text-muted-foreground">Tokens</span>
-                        <span className="font-medium text-foreground">{formatTokens(selectedRun.total_tokens)}</span>
-                      </div>
-                      <div className="flex justify-between text-xs">
                         <span className="text-muted-foreground">Active Node</span>
                         <span className="font-medium text-foreground">{selectedRun.active_node_key || '-'}</span>
                       </div>
+                    </div>
+                  </div>
+                )}
+
+                {selectedRun && (
+                  <div className="space-y-2">
+                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Token 消耗</p>
+                    <div className="bg-secondary/50 rounded-lg p-3 space-y-1">
+                      <div className="flex justify-between text-sm">
+                        <span className="text-muted-foreground">累计</span>
+                        <span className="font-medium text-foreground">{formatTokens(selectedRun.total_tokens)}</span>
+                      </div>
+                      {lastUsage && (
+                        <>
+                          <div className="border-t border-border/50 my-1" />
+                          <div className="flex justify-between text-xs text-muted-foreground">
+                            <span>上次 prompt</span>
+                            <span>{lastUsage.prompt_tokens != null ? String(lastUsage.prompt_tokens) : '-'}</span>
+                          </div>
+                          <div className="flex justify-between text-xs text-muted-foreground">
+                            <span>上次 completion</span>
+                            <span>{lastUsage.completion_tokens != null ? String(lastUsage.completion_tokens) : '-'}</span>
+                          </div>
+                          {lastUsage.thinking_tokens != null && lastUsage.thinking_tokens > 0 && (
+                            <div className="flex justify-between text-xs text-muted-foreground">
+                              <span>上次 thinking</span>
+                              <span>{String(lastUsage.thinking_tokens)}</span>
+                            </div>
+                          )}
+                          <div className="flex justify-between text-xs font-medium text-foreground">
+                            <span>上次合计</span>
+                            <span>{lastUsage.total_tokens != null ? String(lastUsage.total_tokens) : '-'}</span>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {(isStreaming || liveLoopCount > 0) && (
+                  <div className="space-y-2">
+                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">循环次数</p>
+                    <div className="bg-secondary/50 rounded-lg p-3">
+                      <span className="text-sm font-medium text-foreground">{liveLoopCount}</span>
+                      <span className="text-xs text-muted-foreground ml-1">轮</span>
+                      {selectedRun && (
+                        <span className="text-xs text-muted-foreground ml-2">
+                          / 已完成 {selectedRun.loop_count} 轮
+                        </span>
+                      )}
                     </div>
                   </div>
                 )}
@@ -1865,30 +1983,15 @@ function SupervisorEntryCard({
             )}
             {entry.source || 'supervisor'} {entry.isComplete ? '思考完成' : '思考中'}
           </div>
-          <div className="rounded-xl px-4 py-3 bg-muted/50 border border-border text-sm text-muted-foreground italic whitespace-pre-wrap">
-            {entry.content}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (entry.kind === 'thinking') {
-    return (
-      <div className="flex gap-4">
-        <Avatar className="h-8 w-8 shrink-0">
-          <AvatarFallback className="bg-muted text-muted-foreground">
-            <Bot className="h-4 w-4" />
-          </AvatarFallback>
-        </Avatar>
-        <div className="max-w-[80%]">
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
-            <Loader2 className="h-3 w-3 animate-spin" />
-            {entry.source || 'supervisor'} 思考中
-          </div>
-          <div className="rounded-xl px-4 py-3 bg-muted/50 border border-border text-sm text-muted-foreground italic whitespace-pre-wrap">
-            {entry.content}
-          </div>
+          <AutoCollapseDetails
+            entryId={entry.id}
+            autoCollapse
+            summary="思考内容已折叠"
+          >
+            <div className="rounded-xl px-4 py-3 bg-muted/50 border border-border text-sm text-muted-foreground italic whitespace-pre-wrap">
+              {entry.content}
+            </div>
+          </AutoCollapseDetails>
         </div>
       </div>
     );
@@ -1936,14 +2039,9 @@ function SupervisorEntryCard({
         : entry.isError
           ? 'error'
           : 'completed';
-    const autoCollapse =
-      entry.kind === 'tool_end' &&
-      !entry.pendingApproval &&
-      !entry.isError;
-    const autoCollapse =
-      entry.kind === 'tool_end' &&
-      !entry.pendingApproval &&
-      !entry.isError;
+    // 默认收起：streaming 中（tool_start）和已完成（tool_end）都收起；
+    // 只有等待审批 / 出错时才展开，让用户立刻看到关键信息
+    const autoCollapse = !entry.pendingApproval && !entry.isError;
     const toolStatusLabel = entry.pendingApproval
       ? '等待审批'
       : entry.kind === 'tool_start'
@@ -2327,11 +2425,7 @@ function SupervisorTimelineEntryCard({
           </div>
           <AutoCollapseDetails
             entryId={entry.id}
-            autoCollapse={
-              entry.kind === 'tool_end' &&
-              !entry.pendingApproval &&
-              !entry.isError
-            }
+            autoCollapse
             summary="思考内容已折叠"
           >
             <div className="rounded-xl border border-border bg-muted/50 px-4 py-3 text-sm italic text-muted-foreground whitespace-pre-wrap">
@@ -2416,11 +2510,7 @@ function SupervisorTimelineEntryCard({
           </div>
           <AutoCollapseDetails
             entryId={entry.id}
-            autoCollapse={
-              entry.kind === 'tool_end' &&
-              !entry.pendingApproval &&
-              !entry.isError
-            }
+            autoCollapse={!entry.pendingApproval && !entry.isError}
             summary="参数与结果已折叠"
           >
             {entry.toolArguments && Object.keys(entry.toolArguments).length > 0 && (
