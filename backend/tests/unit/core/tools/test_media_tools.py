@@ -93,214 +93,136 @@ def _patch_asset_save(monkeypatch, *, code: str = "img-test", asset_id: int = 1)
 
 
 # --------------------------------------------------------------------- #
-# generate_image 成功路径
+# generate_image（Evolink GPT-Image-2）
+#
+# 历史：之前有一份 Gemini 原生 generate_image，已经删除——现在 generate_image 就是
+# 走 Evolink 的实现。本组覆盖 t2i 成功 / i2i 成功 / 校验失败 / 引用缺失。
 # --------------------------------------------------------------------- #
 
 
+class _FakeEvolinkImageTask:
+    """模拟 evolink_client.image_generation / wait_for_completion 的 EvolinkTask 返值。"""
+
+    def __init__(
+        self,
+        *,
+        id: str = "task-1",
+        status: str = "completed",
+        results: list[str] | None = None,
+    ):
+        self.id = id
+        self.status = status
+        self.results = results if results is not None else ["https://oss/img.png"]
+
+
+def _patch_evolink_image_pipeline(
+    monkeypatch,
+    *,
+    submit_capture: dict | None = None,
+    result_urls: list[str] | None = None,
+):
+    """同时 patch image_generation + wait_for_completion + _save_image_asset + asset_url_lookup。"""
+    captured = submit_capture if submit_capture is not None else {}
+
+    async def _fake_submit(**kwargs):
+        captured.update(kwargs)
+        return _FakeEvolinkImageTask(id="task-x", status="processing", results=[])
+
+    async def _fake_wait(task_id, *args, **kwargs):
+        return _FakeEvolinkImageTask(
+            id=task_id, status="completed",
+            results=result_urls or ["https://oss/img.png"],
+        )
+
+    monkeypatch.setattr("app.utils.evolink.evolink_client.image_generation", _fake_submit)
+    monkeypatch.setattr("app.utils.evolink.evolink_client.wait_for_completion", _fake_wait)
+    return captured
+
+
 @pytest.mark.asyncio
-async def test_generate_image_default_model_is_pro(monkeypatch):
-    """t2i 默认走 pro 模型，自动落 OSS + 落 Asset 表分配 asset_code。"""
-    captured_gen: dict = {}
-    captured_oss: dict = {}
-
-    async def _fake_generate(**kwargs):
-        captured_gen.update(kwargs)
-        return _FakeImageResult(success=True, image_data=b"\x89PNG-fake", mime_type="image/png")
-
-    def _fake_upload(data, filename, *, directory=None, unique=True):
-        captured_oss["data"] = data
-        captured_oss["filename"] = filename
-        captured_oss["directory"] = directory
-        return "https://oss/test/image.png"
-
-    monkeypatch.setattr("app.utils.image_gen.image_gen_client.generate", _fake_generate)
-    monkeypatch.setattr("app.utils.oss.oss_client.upload_bytes", _fake_upload)
-    _patch_asset_save(monkeypatch, code="char-test-3view", asset_id=10)
+async def test_generate_image_t2i_success(monkeypatch):
+    """asset_codes 不传 → t2i：直接 submit Evolink，落 assets 表。"""
+    captured = _patch_evolink_image_pipeline(monkeypatch, result_urls=["https://oss/a.png"])
+    _patch_asset_save(monkeypatch, code="img-aaa", asset_id=42)
 
     from app.core.tools.media_tools import generate_image
 
     result = await generate_image(
         prompt="一个少年站在悬崖边",
-        name="test-asset",
+        name="萧炎",
         aspect_ratio="9:16",
-        image_size="2K",
+        resolution="2K",
+        quality="high",
         memory_harness=_FakeMemoryHarness(domain_id=1),
     )
 
     assert result["success"] is True
-    assert result["asset_code"] == "char-test-3view"  # 来自 _patch_asset_save 的 mock
-    assert result["asset_id"] == 10
     assert result["mode"] == "text2image"
-    assert result["model"] == "gemini-3-pro-image-preview"
-    assert result["aspect_ratio"] == "9:16"
-    assert "url" not in result, "agent 不应看到 URL，只看 asset_code"
-    assert captured_gen["prompt"] == "一个少年站在悬崖边"
-    assert captured_gen["model"] == "gemini-3-pro-image-preview"
-    assert captured_oss["directory"] == "supervisor/images"
+    assert result["model"] == "gpt-image-2"
+    assert result["asset_code"] == "img-aaa"
+    assert result["asset_id"] == 42
+    assert result["url"] == "https://oss/a.png"
+
+    # 入参透传到 Evolink
+    assert captured["prompt"] == "一个少年站在悬崖边"
+    assert captured["size"] == "9:16"
+    assert captured["resolution"] == "2K"
+    assert captured["quality"] == "high"
+    assert captured["n"] == 1
+    assert captured.get("image_urls") is None, "t2i 不该传 image_urls"
 
 
 @pytest.mark.asyncio
-async def test_generate_image_explicit_flash_model(monkeypatch):
-    seen_models: list[str] = []
+async def test_generate_image_i2i_passes_image_urls(monkeypatch):
+    """asset_codes 非空 → 解析为 URL → 喂给 Evolink image_urls 字段。"""
+    captured = _patch_evolink_image_pipeline(monkeypatch, result_urls=["https://oss/i2i.png"])
+    _patch_asset_save(monkeypatch, code="img-bbb", asset_id=99)
 
-    async def _fake_generate(**kwargs):
-        seen_models.append(kwargs["model"])
-        return _FakeImageResult(success=True, image_data=b"PNG")
-
-    monkeypatch.setattr("app.utils.image_gen.image_gen_client.generate", _fake_generate)
+    # mock asset_code → URL 解析
+    async def _fake_resolve(*, project_id, codes):
+        return (["https://oss/ref1.png", "https://oss/ref2.png"], [])
     monkeypatch.setattr(
-        "app.utils.oss.oss_client.upload_bytes",
-        lambda *a, **kw: "https://oss/x.png",
+        "app.core.tools.media_tools._resolve_asset_urls_by_code", _fake_resolve,
     )
-    _patch_asset_save(monkeypatch)
 
     from app.core.tools.media_tools import generate_image
 
     result = await generate_image(
-        prompt="quick sketch",
-        name="test-asset",
-        model="gemini-3.1-flash-image-preview",
+        prompt="把场景改成雨夜",
+        name="云岚宗-雨夜",
+        asset_codes=["img-base-1", "img-base-2"],
         memory_harness=_FakeMemoryHarness(),
     )
+
     assert result["success"] is True
-    assert result["model"] == "gemini-3.1-flash-image-preview"
-    assert seen_models == ["gemini-3.1-flash-image-preview"]
-
-
-# --------------------------------------------------------------------- #
-# generate_image 失败路径
-# --------------------------------------------------------------------- #
+    assert result["mode"] == "image2image"
+    assert result["asset_code"] == "img-bbb"
+    # image_urls 是 GPT-Image-2 接受的字段名，按 asset_codes 顺序解析
+    assert captured["image_urls"] == ["https://oss/ref1.png", "https://oss/ref2.png"]
 
 
 @pytest.mark.asyncio
-async def test_generate_image_unknown_model_returns_tool_error(monkeypatch):
-    """非法 model 应在调 utils 之前就拒绝。"""
-    def _no_generate(**kwargs):
-        raise AssertionError("非法 model 不应触达 utils")
-
-    monkeypatch.setattr("app.utils.image_gen.image_gen_client.generate", _no_generate)
-
-    from app.core.tools.media_tools import generate_image
-
-    result = await generate_image(name="test-asset", prompt="x", model="dall-e-3")
-    assert result.get("ok") is False
-    assert result["error_code"] == "IMAGE_MODEL_NOT_AVAILABLE"
-
-
-@pytest.mark.asyncio
-async def test_generate_image_tool_error_when_gen_fails(monkeypatch):
-    async def _fake_generate(**kwargs):
-        return _FakeImageResult(success=False, error_message="RAI blocked")
-
-    monkeypatch.setattr("app.utils.image_gen.image_gen_client.generate", _fake_generate)
-
-    def _no_upload(*a, **kw):
-        raise AssertionError("失败时不应该再调 OSS")
-
-    monkeypatch.setattr("app.utils.oss.oss_client.upload_bytes", _no_upload)
-
-    from app.core.tools.media_tools import generate_image
-
-    result = await generate_image(name="test-asset", prompt="bad prompt", memory_harness=_FakeMemoryHarness())
-    assert result.get("ok") is False
-    assert result["error_code"] == "IMAGE_GEN_FAILED"
-    assert "RAI blocked" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_generate_image_handles_gen_exception(monkeypatch):
-    async def _raises(**kwargs):
-        raise RuntimeError("network down")
-
-    monkeypatch.setattr("app.utils.image_gen.image_gen_client.generate", _raises)
-
-    from app.core.tools.media_tools import generate_image
-
-    result = await generate_image(name="test-asset", prompt="anything", memory_harness=_FakeMemoryHarness())
-    assert result.get("ok") is False
-    assert result["error_code"] == "IMAGE_GEN_EXCEPTION"
-    assert "network down" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_generate_image_handles_oss_failure(monkeypatch):
-    async def _fake_generate(**kwargs):
-        return _FakeImageResult(success=True, image_data=b"PNG")
-
-    def _bad_upload(*a, **kw):
-        raise RuntimeError("oss 503")
-
-    monkeypatch.setattr("app.utils.image_gen.image_gen_client.generate", _fake_generate)
-    monkeypatch.setattr("app.utils.oss.oss_client.upload_bytes", _bad_upload)
-
-    from app.core.tools.media_tools import generate_image
-
-    result = await generate_image(name="test-asset", prompt="x", memory_harness=_FakeMemoryHarness())
-    assert result.get("ok") is False
-    assert result["error_code"] == "OSS_UPLOAD_FAILED"
-
-
-@pytest.mark.asyncio
-async def test_generate_image_missing_project_id(monkeypatch):
+async def test_generate_image_missing_project_id():
     """没传 memory_harness → 无法解析 project_id，应早早返错。"""
     from app.core.tools.media_tools import generate_image
 
-    result = await generate_image(name="test-asset", prompt="x")
+    result = await generate_image(prompt="x", name="test-asset")
     assert result.get("ok") is False
     assert result["error_code"] == "PROJECT_ID_MISSING"
 
 
 @pytest.mark.asyncio
-async def test_generate_image_i2i_mode(monkeypatch):
-    """asset_codes 非空 → 走 i2i，调 generate_with_reference。"""
-    captured: dict = {}
-
-    async def _fake_fetch(*, project_id, codes):
-        captured["fetched_codes"] = codes
-        captured["fetched_project_id"] = project_id
-        return ([b"PNGREF"] * len(codes), [])
-
-    async def _fake_with_ref(**kwargs):
-        captured.update(kwargs)
-        return _FakeImageResult(success=True, image_data=b"PNG")
-
-    monkeypatch.setattr(
-        "app.core.tools.media_tools._fetch_assets_bytes_by_code", _fake_fetch
-    )
-    monkeypatch.setattr(
-        "app.utils.image_gen.image_gen_client.generate_with_reference", _fake_with_ref
-    )
-    monkeypatch.setattr(
-        "app.utils.oss.oss_client.upload_bytes", lambda *a, **kw: "https://oss/y.png"
-    )
-    _patch_asset_save(monkeypatch, code="char-test-angry", asset_id=20)
-
-    from app.core.tools.media_tools import generate_image
-
-    result = await generate_image(
-        prompt="angry close-up",
-        name="test-asset",
-        asset_codes=["char-test-3view"],
-        memory_harness=_FakeMemoryHarness(domain_id=7),
-    )
-
-    assert result["success"] is True
-    assert result["mode"] == "image2image"
-    assert result["asset_code"] == "char-test-angry"
-    assert captured["fetched_codes"] == ["char-test-3view"]
-    assert captured["fetched_project_id"] == 7
-    assert captured["reference_images"] == [b"PNGREF"]
-
-
-@pytest.mark.asyncio
 async def test_generate_image_i2i_all_refs_missing(monkeypatch):
-    """asset_codes 全部查不到 → REFERENCE_ASSETS_NOT_FOUND。"""
-    async def _fake_fetch(*, project_id, codes):
+    """asset_codes 全部查不到 → REFERENCE_ASSETS_NOT_FOUND，不打 Evolink。"""
+    async def _fake_resolve(*, project_id, codes):
         return ([], list(codes))
-
     monkeypatch.setattr(
-        "app.core.tools.media_tools._fetch_assets_bytes_by_code", _fake_fetch
+        "app.core.tools.media_tools._resolve_asset_urls_by_code", _fake_resolve,
     )
+
+    async def _no_submit(**kwargs):
+        raise AssertionError("references 全缺失时不应触达 Evolink")
+    monkeypatch.setattr("app.utils.evolink.evolink_client.image_generation", _no_submit)
 
     from app.core.tools.media_tools import generate_image
 
@@ -312,6 +234,18 @@ async def test_generate_image_i2i_all_refs_missing(monkeypatch):
     )
     assert result.get("ok") is False
     assert result["error_code"] == "REFERENCE_ASSETS_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_generate_image_n_out_of_range():
+    """n=6 超过单次上限 5 → 早 fail-fast。"""
+    from app.core.tools.media_tools import generate_image
+
+    result = await generate_image(
+        prompt="x", name="test-asset", n=6, memory_harness=_FakeMemoryHarness(),
+    )
+    assert result.get("ok") is False
+    assert result["error_code"] == "N_OUT_OF_RANGE"
 
 
 # --------------------------------------------------------------------- #

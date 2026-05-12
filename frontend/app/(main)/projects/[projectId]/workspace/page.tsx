@@ -323,59 +323,32 @@ export default function WorkspacePage({
   );
 
   // Send message
-  const handleSendMessage = useCallback(async () => {
-    if (!inputValue.trim() || isStreaming || !selectedWsId) return;
-
-    const userContent = inputValue.trim();
-    setInputValue('');
-    setIsStreaming(true);
-    setStreaming({ thinking: '', text: '', toolCalls: [], reviews: [], usage: null, loopCount: 0 });
-
-    // Optimistic user message
-    const tempUserMsg: AgentMessageResponse = {
-      role: 'user',
-      content: userContent,
-      seq: messages.length,
-      tool_call_id: null,
-      tool_name: null,
-      usage: null,
-      extra_metadata: null,
-      created_at: new Date().toISOString(),
-    };
-    setMessages((prev) => [...prev, tempUserMsg]);
-
-    try {
-      const response = await workspacesApi.chat(
-        projectIdNum,
-        selectedWsId,
-        userContent,
-        { model, temperature, hitlAutoTools: hitlEnabled ? [] : undefined, enableReview: reviewEnabled },
-      );
-
-      if (!response.ok) throw new Error(`Chat request failed: ${response.status}`);
-
-      await readAgentSSEStream(response, (event: AgentSSEEvent) => {
-        if (event.type === 'interrupt') {
-          setHitl({
-            sessionId: event.session_id,
-            toolName: event.tool_name,
-            toolCallId: event.tool_call_id,
-            arguments: event.arguments,
-            availableActions: event.available_actions,
-            context: event.context,
-          });
-          return;
-        }
-        setStreaming((prev) => {
-          switch (event.type) {
-            case 'thinking':
-              return { ...prev, thinking: prev.thinking + event.content };
-            case 'text':
-              return { ...prev, text: prev.text + event.content };
-            case 'tool_start':
-              return {
-                ...prev,
-                toolCalls: [
+  /**
+   * 通用 agent SSE 事件 handler——给 chat / resume / tail 共用。
+   * 每个事件按 type 分发，更新 streaming / hitl / lastUsage 状态。
+   */
+  const handleAgentEvent = useCallback((event: AgentSSEEvent) => {
+    if (event.type === 'interrupt') {
+      setHitl({
+        sessionId: event.session_id,
+        toolName: event.tool_name,
+        toolCallId: event.tool_call_id,
+        arguments: event.arguments,
+        availableActions: event.available_actions,
+        context: event.context,
+      });
+      return;
+    }
+    setStreaming((prev) => {
+      switch (event.type) {
+        case 'thinking':
+          return { ...prev, thinking: prev.thinking + event.content };
+        case 'text':
+          return { ...prev, text: prev.text + event.content };
+        case 'tool_start':
+          return {
+            ...prev,
+            toolCalls: [
               ...prev.toolCalls,
               {
                 id: event.tool_call_id,
@@ -408,44 +381,121 @@ export default function WorkspacePage({
                 : tc
             ),
           };
-            case 'review_start':
-              return {
-                ...prev,
-                reviews: [...prev.reviews, { round: event.review_round, status: 'evaluating' }],
-              };
-            case 'review_end':
-              return {
-                ...prev,
-                reviews: prev.reviews.map((r) =>
-                  r.round === event.review_round
-                    ? { ...r, status: 'done', score: event.score, passed: event.passed, feedback: event.feedback, suggestions: event.suggestions }
-                    : r
-                ),
-              };
-            case 'done':
-              if (event.usage) setLastUsage(event.usage);
-              return {
-                ...prev,
-                usage: event.usage,
-                loopCount: event.loop_count,
-              };
-            case 'usage': {
-              // 每次 LLM call 实时上报 usage——优先用 accumulated_usage（session 累计）
-              const display = event.accumulated_usage ?? event.usage;
-              if (display) setLastUsage(display);
-              return {
-                ...prev,
-                usage: display ?? prev.usage,
-                loopCount: event.loop_count ?? prev.loopCount,
-              };
-            }
-            case 'error':
-              return { ...prev, text: prev.text + `\n\n**错误:** ${event.error}` };
-            default:
-              return prev;
-          }
+        case 'review_start':
+          return {
+            ...prev,
+            reviews: [...prev.reviews, { round: event.review_round, status: 'evaluating' }],
+          };
+        case 'review_end':
+          return {
+            ...prev,
+            reviews: prev.reviews.map((r) =>
+              r.round === event.review_round
+                ? { ...r, status: 'done', score: event.score, passed: event.passed, feedback: event.feedback, suggestions: event.suggestions }
+                : r
+            ),
+          };
+        case 'done':
+          if (event.usage) setLastUsage(event.usage);
+          return {
+            ...prev,
+            usage: event.usage,
+            loopCount: event.loop_count,
+          };
+        case 'usage': {
+          const display = event.accumulated_usage ?? event.usage;
+          if (display) setLastUsage(display);
+          return {
+            ...prev,
+            usage: display ?? prev.usage,
+            loopCount: event.loop_count ?? prev.loopCount,
+          };
+        }
+        case 'error':
+          return { ...prev, text: prev.text + `\n\n**错误:** ${event.error}` };
+        default:
+          return prev;
+      }
+    });
+  }, []);
+
+  /**
+   * 切换 workspace 后，自动 attach tail SSE：
+   * - 若 bg task 在跑 → 回放已有事件 + live tail 新事件
+   * - 若没在跑（或 grace 期已过）→ 立刻 [DONE]，本 effect 空跑
+   * 注意：不在 isStreaming 期间 attach——chat SSE 已经在拉同一个 stream，
+   * 两条订阅会重复触发 setStreaming 副作用（broadcast bus 给每个订阅者推一份）。
+   */
+  useEffect(() => {
+    if (!selectedWsId || isNaN(projectIdNum) || isStreaming) return;
+
+    const controller = new AbortController();
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const resp = await workspacesApi.tail(projectIdNum, selectedWsId, 0, controller.signal);
+        if (!resp.ok || !resp.body) return;
+        // 进入 streaming 视觉态——agent 还在跑，让用户看到 "AI 思考中" 加载效果
+        setIsStreaming(true);
+        setStreaming({ thinking: '', text: '', toolCalls: [], reviews: [], usage: null, loopCount: 0 });
+        await readAgentSSEStream(resp, (event) => {
+          if (cancelled) return;
+          handleAgentEvent(event);
         });
-      });
+        if (!cancelled) {
+          // tail 走完——bg task 结束。reload detail 把 finalized 消息合并进 messages 视图。
+          await reloadWs();
+        }
+      } catch (err) {
+        if (!cancelled) console.warn('[workspace tail] error:', err);
+      } finally {
+        if (!cancelled) {
+          setIsStreaming(false);
+          setStreaming({ thinking: '', text: '', toolCalls: [], reviews: [], usage: null, loopCount: 0 });
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedWsId, projectIdNum]);
+
+  const handleSendMessage = useCallback(async () => {
+    if (!inputValue.trim() || isStreaming || !selectedWsId) return;
+
+    const userContent = inputValue.trim();
+    setInputValue('');
+    setIsStreaming(true);
+    setStreaming({ thinking: '', text: '', toolCalls: [], reviews: [], usage: null, loopCount: 0 });
+
+    // Optimistic user message
+    const tempUserMsg: AgentMessageResponse = {
+      role: 'user',
+      content: userContent,
+      seq: messages.length,
+      tool_call_id: null,
+      tool_name: null,
+      usage: null,
+      extra_metadata: null,
+      created_at: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, tempUserMsg]);
+
+    try {
+      const response = await workspacesApi.chat(
+        projectIdNum,
+        selectedWsId,
+        userContent,
+        { model, temperature, hitlAutoTools: hitlEnabled ? [] : undefined, enableReview: reviewEnabled },
+      );
+
+      if (!response.ok) throw new Error(`Chat request failed: ${response.status}`);
+
+      await readAgentSSEStream(response, handleAgentEvent);
 
       await reloadWs();
     } catch (err) {
@@ -467,7 +517,7 @@ export default function WorkspacePage({
       setIsStreaming(false);
       setStreaming({ thinking: '', text: '', toolCalls: [], reviews: [], usage: null, loopCount: 0 });
     }
-  }, [inputValue, isStreaming, selectedWsId, projectIdNum, messages.length, reloadWs, model, temperature, hitlEnabled, reviewEnabled]);
+  }, [inputValue, isStreaming, selectedWsId, projectIdNum, messages.length, reloadWs, model, temperature, hitlEnabled, reviewEnabled, handleAgentEvent]);
 
   const handleResume = useCallback(async (action: 'approve' | 'reject') => {
     if (!selectedWsId || isResuming) return;
@@ -480,41 +530,7 @@ export default function WorkspacePage({
       const response = await workspacesApi.resume(projectIdNum, selectedWsId, action);
       if (!response.ok) throw new Error(`Resume request failed: ${response.status}`);
 
-      await readAgentSSEStream(response, (event: AgentSSEEvent) => {
-        if (event.type === 'interrupt') {
-          setHitl({
-            sessionId: event.session_id,
-            toolName: event.tool_name,
-            toolCallId: event.tool_call_id,
-            arguments: event.arguments,
-            availableActions: event.available_actions,
-            context: event.context,
-          });
-          return;
-        }
-        setStreaming((prev) => {
-          switch (event.type) {
-            case 'thinking':
-              return { ...prev, thinking: prev.thinking + event.content };
-            case 'text':
-              return { ...prev, text: prev.text + event.content };
-            // resume 流里 tool_start/tool_end 不加入 streaming state，
-            // 工具结果会在 reloadWs() 后从历史消息展示，避免重复
-            case 'done':
-              if (event.usage) setLastUsage(event.usage);
-              return { ...prev, usage: event.usage, loopCount: event.loop_count };
-            case 'usage': {
-              const display = event.accumulated_usage ?? event.usage;
-              if (display) setLastUsage(display);
-              return { ...prev, usage: display ?? prev.usage, loopCount: event.loop_count ?? prev.loopCount };
-            }
-            case 'error':
-              return { ...prev, text: prev.text + `\n\n**错误:** ${event.error}` };
-            default:
-              return prev;
-          }
-        });
-      });
+      await readAgentSSEStream(response, handleAgentEvent);
 
       await reloadWs();
     } catch (err) {
@@ -524,7 +540,7 @@ export default function WorkspacePage({
       setIsStreaming(false);
       setStreaming({ thinking: '', text: '', toolCalls: [], reviews: [], usage: null, loopCount: 0 });
     }
-  }, [selectedWsId, projectIdNum, isResuming, reloadWs]);
+  }, [selectedWsId, projectIdNum, isResuming, reloadWs, handleAgentEvent]);
 
   const formatTime = (timestamp: string | null | undefined) => {
     if (!timestamp) return '';

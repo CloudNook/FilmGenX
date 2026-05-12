@@ -765,6 +765,22 @@ export const workspacesApi = {
     );
   },
 
+  /**
+   * Tail SSE：刷新 / 跨 tab 时附到 workspace 的 in-flight bg task 事件流。
+   * 后端有 in-flight bg task → 先回放 buffer 中 _seq > fromSeq 的事件，再 live tail；
+   * 没有 → 立刻 emit [DONE]。
+   * 前端拿到事件里的 _seq 字段，作为下次断线重连的 fromSeq 游标。
+   */
+  tail(projectId: number, workspaceId: number, fromSeq: number = 0, signal?: AbortSignal) {
+    const token = getToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    return fetch(
+      buildStreamingUrl(`/projects/${projectId}/workspaces/${workspaceId}/stream?from_seq=${fromSeq}`),
+      { method: 'GET', headers, signal },
+    );
+  },
+
   /** HITL Resume：复用 /chat 端点，传 resume 字段，content 为空 */
   resume(projectId: number, workspaceId: number, action: 'approve' | 'reject') {
     const token = getToken();
