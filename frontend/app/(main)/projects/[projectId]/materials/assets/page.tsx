@@ -20,6 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Image as ImageIcon,
   Video,
@@ -32,23 +33,22 @@ import {
   List,
   Loader2,
   Trash2,
-  Download,
   ExternalLink,
-  Filter,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { ImageUploadDialog } from '@/components/assets/ImageUploadDialog';
 
-type AssetType = 'image' | 'video' | 'audio' | 'reference';
 type ViewMode = 'grid' | 'list';
 
-const ASSET_TYPE_OPTIONS = [
-  { value: 'all', label: '全部类型' },
+// 顶部 Tab 顺序：全部在第一位，其余按"图 → 视频 → 音频 → 参考图"语义顺序。
+// value 跟 Asset.asset_type 列对齐，filter 直接 ===。
+const ASSET_TYPE_TABS = [
+  { value: 'all', label: '全部' },
   { value: 'image', label: '图片' },
   { value: 'video', label: '视频' },
   { value: 'audio', label: '音频' },
   { value: 'reference', label: '参考图' },
-];
+] as const;
 
 const SOURCE_OPTIONS = [
   { value: 'all', label: '全部来源' },
@@ -182,6 +182,15 @@ export default function AssetsPage({
     return `${size.toFixed(1)} ${units[unitIndex]}`;
   };
 
+  // mm:ss 风格的时长展示，给视频缩略图角标用
+  const formatDuration = (sec: number | null): string | null => {
+    if (sec == null || sec <= 0) return null;
+    const total = Math.round(sec);
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  };
+
   if (loading) {
     return (
       <AppLayout projectId={projectId}>
@@ -265,7 +274,29 @@ export default function AssetsPage({
           )}
         </div>
 
-        {/* Filters */}
+        {/* 类型分类 Tabs。比起隐式下拉，tab 把分类做成第一视觉层级 +
+            每个 tab 携带数量，让用户对素材构成一眼有数。
+            'all' 的数量是 assets 全集；其余取 stats[type] || 0。 */}
+        <Tabs value={typeFilter} onValueChange={setTypeFilter}>
+          <TabsList>
+            {ASSET_TYPE_TABS.map((tab) => {
+              const count =
+                tab.value === 'all'
+                  ? assets.length
+                  : stats[tab.value] || 0;
+              return (
+                <TabsTrigger key={tab.value} value={tab.value}>
+                  {tab.label}
+                  <Badge variant="outline" className="ml-2 text-[10px] font-normal">
+                    {count}
+                  </Badge>
+                </TabsTrigger>
+              );
+            })}
+          </TabsList>
+        </Tabs>
+
+        {/* 搜索 + 来源 + 视图切换 */}
         <div className="flex flex-wrap items-center gap-4">
           <div className="relative flex-1 min-w-[200px] max-w-md">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
@@ -276,20 +307,6 @@ export default function AssetsPage({
               className="pl-10"
             />
           </div>
-
-          <Select value={typeFilter} onValueChange={setTypeFilter}>
-            <SelectTrigger className="w-[140px]">
-              <Filter className="h-4 w-4 mr-2" />
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {ASSET_TYPE_OPTIONS.map((opt) => (
-                <SelectItem key={opt.value} value={opt.value}>
-                  {opt.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
 
           <Select value={sourceFilter} onValueChange={setSourceFilter}>
             <SelectTrigger className="w-[140px]">
@@ -345,15 +362,35 @@ export default function AssetsPage({
                   onClick={() => setSelectedAsset(asset)}
                 >
                   <div className="aspect-[4/3] relative bg-secondary/30 overflow-hidden">
-                    {asset.asset_type === 'image' ? (
+                    {asset.asset_type === 'image' || asset.asset_type === 'reference' ? (
                       <img
                         src={asset.file_url}
                         alt={asset.asset_code}
                         className="w-full h-full object-cover transition-transform group-hover:scale-105"
                       />
+                    ) : asset.asset_type === 'video' ? (
+                      // preload="metadata" 让浏览器只拉首帧作为缩略图，不下载整个视频。
+                      // muted + playsInline 是为移动端默认行为友好；要播放走详情弹窗。
+                      <video
+                        src={asset.file_url}
+                        preload="metadata"
+                        muted
+                        playsInline
+                        className="w-full h-full object-cover"
+                      />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center">
                         <Icon className="h-12 w-12 text-muted-foreground" />
+                      </div>
+                    )}
+                    {asset.asset_type === 'video' && (
+                      // 视频缩略图右下角加一个时长 badge（如果有 duration_sec），
+                      // 同时叠一个播放图标提示这是可播放素材。
+                      <div className="absolute bottom-2 right-2 flex items-center gap-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-white">
+                        <Video className="h-3 w-3" />
+                        {formatDuration(asset.duration_sec) && (
+                          <span>{formatDuration(asset.duration_sec)}</span>
+                        )}
                       </div>
                     )}
                     <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
@@ -447,10 +484,18 @@ export default function AssetsPage({
                         >
                           <td className="p-3">
                             <div className="h-12 w-12 rounded bg-secondary/50 flex items-center justify-center overflow-hidden">
-                              {asset.asset_type === 'image' ? (
+                              {asset.asset_type === 'image' || asset.asset_type === 'reference' ? (
                                 <img
                                   src={asset.file_url}
                                   alt=""
+                                  className="w-full h-full object-cover"
+                                />
+                              ) : asset.asset_type === 'video' ? (
+                                <video
+                                  src={asset.file_url}
+                                  preload="metadata"
+                                  muted
+                                  playsInline
                                   className="w-full h-full object-cover"
                                 />
                               ) : (
@@ -533,13 +578,41 @@ export default function AssetsPage({
                 </Button>
               </CardHeader>
               <CardContent className="space-y-4">
-                {selectedAsset.asset_type === 'image' && (
+                {(selectedAsset.asset_type === 'image' ||
+                  selectedAsset.asset_type === 'reference') && (
                   <div className="aspect-video relative bg-secondary/30 rounded-lg overflow-hidden">
                     <img
                       src={selectedAsset.file_url}
                       alt={selectedAsset.asset_code}
                       className="w-full h-full object-contain"
                     />
+                  </div>
+                )}
+                {selectedAsset.asset_type === 'video' && (
+                  // controls + 不 autoPlay：让用户主动播。aspect-video 容器配合
+                  // object-contain 保留视频原始比例，不裁切。
+                  <div className="aspect-video relative bg-black rounded-lg overflow-hidden">
+                    <video
+                      src={selectedAsset.file_url}
+                      controls
+                      preload="metadata"
+                      playsInline
+                      className="w-full h-full object-contain"
+                    >
+                      您的浏览器不支持视频播放。
+                    </video>
+                  </div>
+                )}
+                {selectedAsset.asset_type === 'audio' && (
+                  <div className="rounded-lg bg-secondary/30 p-4">
+                    <audio
+                      src={selectedAsset.file_url}
+                      controls
+                      preload="metadata"
+                      className="w-full"
+                    >
+                      您的浏览器不支持音频播放。
+                    </audio>
                   </div>
                 )}
                 <div className="grid grid-cols-2 gap-4 text-sm">
@@ -595,7 +668,7 @@ export default function AssetsPage({
                     onClick={() => window.open(selectedAsset.file_url, '_blank')}
                   >
                     <ExternalLink className="h-4 w-4 mr-2" />
-                    查看原图
+                    在新窗口打开
                   </Button>
                   <Button
                     variant="destructive"
