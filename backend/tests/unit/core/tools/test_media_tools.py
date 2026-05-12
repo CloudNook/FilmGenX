@@ -311,120 +311,147 @@ async def test_generate_image_i2i_all_refs_missing(monkeypatch):
 
 
 # --------------------------------------------------------------------- #
+# generate_video helpers
+# --------------------------------------------------------------------- #
+
+
+def _patch_video_asset_lookup(monkeypatch, urls: list[str], missing: list[str] | None = None):
+    """绕过 assets 表查询：asset_code → file_url 解析。"""
+    async def _fake_resolve(*, project_id, codes):
+        return (urls, missing or [])
+    monkeypatch.setattr(
+        "app.core.tools.media_tools._resolve_asset_urls_by_code",
+        _fake_resolve,
+    )
+
+
+def _patch_video_asset_save(monkeypatch, *, code: str = "vid-test", asset_id: int = 99):
+    """绕过 Asset 表写入：直接 mock _save_video_asset 返 (code, id)。"""
+    async def _fake_save(**kwargs):
+        return (code, asset_id)
+    monkeypatch.setattr(
+        "app.core.tools.media_tools._save_video_asset",
+        _fake_save,
+    )
+
+
+# --------------------------------------------------------------------- #
 # generate_video 成功路径
 # --------------------------------------------------------------------- #
 
 
 @pytest.mark.asyncio
-async def test_generate_video_default_model_is_kling(monkeypatch):
-    captured_t2v: dict = {}
+async def test_generate_video_success_with_asset_codes(monkeypatch):
+    """成功路径：参考 asset_codes → Seedance 出片 → 自动入 assets 表分配 vid-xxx。"""
+    captured_i2v: dict = {}
     captured_wait: dict = {}
 
-    async def _fake_t2v(**kwargs):
-        captured_t2v.update(kwargs)
-        return _FakeVideoTask(id="t-100", status="processing", video_url=None)
+    async def _fake_i2v(**kwargs):
+        captured_i2v.update(kwargs)
+        return _FakeVideoTask(id="seed-1", status="processing", video_url=None)
 
     async def _fake_wait(task_id, *args, **kwargs):
         captured_wait["task_id"] = task_id
         captured_wait["upload_to_oss"] = kwargs.get("upload_to_oss")
         captured_wait["oss_directory"] = kwargs.get("oss_directory")
         return _FakeVideoTask(
-            id=task_id,
-            status="completed",
-            video_url="https://oss/v.mp4",
-            video_duration=5.0,
+            id=task_id, status="completed",
+            video_url="https://oss/v.mp4", video_duration=8.0,
         )
 
-    monkeypatch.setattr("app.utils.evolink.evolink_client.text_to_video", _fake_t2v)
+    monkeypatch.setattr("app.utils.seedance.seedance_client.image_to_video", _fake_i2v)
     monkeypatch.setattr(
-        "app.utils.evolink.evolink_client.wait_for_completion",
-        _fake_wait,
+        "app.utils.seedance.seedance_client.wait_for_completion", _fake_wait,
     )
+    _patch_video_asset_lookup(monkeypatch, urls=["https://oss/ref-1.png", "https://oss/ref-2.png"])
+    _patch_video_asset_save(monkeypatch, code="vid-abc1234567", asset_id=42)
 
     from app.core.tools.media_tools import generate_video
 
     result = await generate_video(
-        prompt="一辆车驶过雨夜街道",
-        duration=10,
+        prompt="角色冲入云海，参考图 1 服装、参考图 2 场景",
+        asset_codes=["img-aaa", "img-bbb"],
+        duration=8,
         aspect_ratio="9:16",
-        quality="hq",
+        generate_audio=False,
+        description="第一幕 镜头 3",
+        tags=["shot_3"],
+        memory_harness=_FakeMemoryHarness(domain_id=1),
     )
 
     assert result["success"] is True
+    assert result["asset_code"] == "vid-abc1234567"
+    assert result["asset_id"] == 42
     assert result["url"] == "https://oss/v.mp4"
-    assert result["task_id"] == "t-100"
-    assert result["model"] == "kling"
-    assert result["quality"] == "1080p"  # hq → 1080p
-    assert captured_t2v["prompt"] == "一辆车驶过雨夜街道"
-    assert captured_t2v["duration"] == 10
-    assert captured_t2v["aspect_ratio"] == "9:16"
-    assert captured_t2v["quality"] == "1080p"
-    assert captured_wait["task_id"] == "t-100"
+    assert result["task_id"] == "seed-1"
+    assert result["model"] == "seedance-2.0-reference-to-video"
+    assert result["duration"] == 8.0
+    assert result["aspect_ratio"] == "9:16"
+    assert result["generate_audio"] is False
+    assert result["reference_codes"] == ["img-aaa", "img-bbb"]
+
+    # 入参透传校验
+    assert captured_i2v["prompt"].startswith("角色冲入云海")
+    assert captured_i2v["image_urls"] == ["https://oss/ref-1.png", "https://oss/ref-2.png"]
+    assert captured_i2v["duration"] == 8
+    assert captured_i2v["aspect_ratio"] == "9:16"
+    assert captured_i2v["generate_audio"] is False
+    assert captured_wait["task_id"] == "seed-1"
     assert captured_wait["upload_to_oss"] is True
     assert captured_wait["oss_directory"] == "supervisor/videos"
 
 
-@pytest.mark.asyncio
-async def test_generate_video_std_maps_to_720p(monkeypatch):
-    seen: dict = {}
-
-    async def _fake_t2v(**kwargs):
-        seen["quality"] = kwargs["quality"]
-        return _FakeVideoTask(id="t-1")
-
-    async def _fake_wait(task_id, *args, **kwargs):
-        return _FakeVideoTask(id=task_id)
-
-    monkeypatch.setattr("app.utils.evolink.evolink_client.text_to_video", _fake_t2v)
-    monkeypatch.setattr(
-        "app.utils.evolink.evolink_client.wait_for_completion", _fake_wait
-    )
-
-    from app.core.tools.media_tools import generate_video
-
-    await generate_video(prompt="x")  # 默认 quality="std"
-    assert seen["quality"] == "720p"
-
-
 # --------------------------------------------------------------------- #
-# generate_video model 路径
+# generate_video 校验路径
 # --------------------------------------------------------------------- #
 
 
 @pytest.mark.asyncio
-async def test_generate_video_seedance_returns_model_not_available(monkeypatch):
-    """seedance 占位模型不应触发 evolink，直接返回 MODEL_NOT_AVAILABLE。"""
-    async def _no_t2v(**kwargs):
-        raise AssertionError("seedance 路径不应调 evolink")
-
-    async def _no_wait(*args, **kwargs):
-        raise AssertionError("seedance 路径不应等待 evolink 任务")
-
-    monkeypatch.setattr("app.utils.evolink.evolink_client.text_to_video", _no_t2v)
-    monkeypatch.setattr(
-        "app.utils.evolink.evolink_client.wait_for_completion", _no_wait
-    )
-
+async def test_generate_video_missing_project_id_returns_error():
     from app.core.tools.media_tools import generate_video
 
-    result = await generate_video(prompt="anything", model="seedance")
+    result = await generate_video(prompt="x", asset_codes=["img-aaa"])  # 没 memory_harness
     assert result.get("ok") is False
-    assert result["error_code"] == "MODEL_NOT_AVAILABLE"
+    assert result["error_code"] == "PROJECT_ID_MISSING"
 
 
 @pytest.mark.asyncio
-async def test_generate_video_unknown_model_returns_video_model_not_available(monkeypatch):
-    """完全未知的 model 应在 supported set 检查时拒绝。"""
-    async def _no_t2v(**kwargs):
-        raise AssertionError("未知 model 不应触达 evolink")
+async def test_generate_video_missing_asset_codes_returns_error(monkeypatch):
+    """Seedance reference-to-video 不支持纯文生视频；空 asset_codes 应 fail-fast。"""
+    async def _no_i2v(**kwargs):
+        raise AssertionError("空 asset_codes 不应触达 seedance")
 
-    monkeypatch.setattr("app.utils.evolink.evolink_client.text_to_video", _no_t2v)
+    monkeypatch.setattr("app.utils.seedance.seedance_client.image_to_video", _no_i2v)
 
     from app.core.tools.media_tools import generate_video
 
-    result = await generate_video(prompt="x", model="sora")
+    result = await generate_video(
+        prompt="x",
+        asset_codes=None,
+        memory_harness=_FakeMemoryHarness(),
+    )
     assert result.get("ok") is False
-    assert result["error_code"] == "VIDEO_MODEL_NOT_AVAILABLE"
+    assert result["error_code"] == "ASSET_CODES_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_generate_video_reference_assets_not_found(monkeypatch):
+    """asset_codes 在 assets 表都查不到 → 不打 Seedance。"""
+    async def _no_i2v(**kwargs):
+        raise AssertionError("references 缺失时不应触达 seedance")
+
+    monkeypatch.setattr("app.utils.seedance.seedance_client.image_to_video", _no_i2v)
+    _patch_video_asset_lookup(monkeypatch, urls=[], missing=["img-nope"])
+
+    from app.core.tools.media_tools import generate_video
+
+    result = await generate_video(
+        prompt="x",
+        asset_codes=["img-nope"],
+        memory_harness=_FakeMemoryHarness(),
+    )
+    assert result.get("ok") is False
+    assert result["error_code"] == "REFERENCE_ASSETS_NOT_FOUND"
 
 
 # --------------------------------------------------------------------- #
@@ -434,33 +461,119 @@ async def test_generate_video_unknown_model_returns_video_model_not_available(mo
 
 @pytest.mark.asyncio
 async def test_generate_video_returns_error_on_submit_exception(monkeypatch):
-    async def _raise_t2v(**kwargs):
-        raise RuntimeError("evolink 400")
+    async def _raise_i2v(**kwargs):
+        raise RuntimeError("seedance 500")
 
-    monkeypatch.setattr("app.utils.evolink.evolink_client.text_to_video", _raise_t2v)
+    monkeypatch.setattr("app.utils.seedance.seedance_client.image_to_video", _raise_i2v)
+    _patch_video_asset_lookup(monkeypatch, urls=["https://oss/ref.png"])
 
     from app.core.tools.media_tools import generate_video
 
-    result = await generate_video(prompt="bad")
+    result = await generate_video(
+        prompt="x",
+        asset_codes=["img-aaa"],
+        memory_harness=_FakeMemoryHarness(),
+    )
     assert result.get("ok") is False
     assert result["error_code"] == "VIDEO_SUBMIT_FAILED"
 
 
 @pytest.mark.asyncio
-async def test_generate_video_returns_error_when_kling_fails(monkeypatch):
-    async def _fake_t2v(**kwargs):
+async def test_generate_video_returns_error_on_params_invalid(monkeypatch):
+    """seedance 抛 ValueError（duration 越界等）→ VIDEO_PARAMS_INVALID。"""
+    async def _bad_i2v(**kwargs):
+        raise ValueError("duration 必须在 4-15 秒（当前 20）")
+
+    monkeypatch.setattr("app.utils.seedance.seedance_client.image_to_video", _bad_i2v)
+    _patch_video_asset_lookup(monkeypatch, urls=["https://oss/ref.png"])
+
+    from app.core.tools.media_tools import generate_video
+
+    result = await generate_video(
+        prompt="x",
+        asset_codes=["img-aaa"],
+        duration=20,
+        memory_harness=_FakeMemoryHarness(),
+    )
+    assert result.get("ok") is False
+    assert result["error_code"] == "VIDEO_PARAMS_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_generate_video_returns_error_when_seedance_fails(monkeypatch):
+    async def _fake_i2v(**kwargs):
         return _FakeVideoTask(id="t-2")
 
     async def _fail_wait(task_id, *args, **kwargs):
-        raise RuntimeError("kling task failed")
+        raise RuntimeError("seedance task failed")
 
-    monkeypatch.setattr("app.utils.evolink.evolink_client.text_to_video", _fake_t2v)
+    monkeypatch.setattr("app.utils.seedance.seedance_client.image_to_video", _fake_i2v)
     monkeypatch.setattr(
-        "app.utils.evolink.evolink_client.wait_for_completion", _fail_wait
+        "app.utils.seedance.seedance_client.wait_for_completion", _fail_wait,
+    )
+    _patch_video_asset_lookup(monkeypatch, urls=["https://oss/ref.png"])
+
+    from app.core.tools.media_tools import generate_video
+
+    result = await generate_video(
+        prompt="x",
+        asset_codes=["img-aaa"],
+        memory_harness=_FakeMemoryHarness(),
+    )
+    assert result.get("ok") is False
+    assert result["error_code"] == "VIDEO_GEN_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_generate_video_propagates_seedance_internal_timeout(monkeypatch):
+    """seedance.wait_for_completion 自己抛 TimeoutError → VIDEO_GEN_TIMEOUT。"""
+    async def _fake_i2v(**kwargs):
+        return _FakeVideoTask(id="t-3")
+
+    async def _timeout_wait(task_id, *args, **kwargs):
+        raise TimeoutError(f"Seedance 任务 {task_id} 超过 1200s 未完成")
+
+    monkeypatch.setattr("app.utils.seedance.seedance_client.image_to_video", _fake_i2v)
+    monkeypatch.setattr(
+        "app.utils.seedance.seedance_client.wait_for_completion", _timeout_wait,
+    )
+    _patch_video_asset_lookup(monkeypatch, urls=["https://oss/ref.png"])
+
+    from app.core.tools.media_tools import generate_video
+
+    result = await generate_video(
+        prompt="x",
+        asset_codes=["img-aaa"],
+        memory_harness=_FakeMemoryHarness(),
+    )
+    assert result.get("ok") is False
+    assert result["error_code"] == "VIDEO_GEN_TIMEOUT"
+
+
+@pytest.mark.asyncio
+async def test_generate_video_outer_timeout_kills_hung_subtask(monkeypatch):
+    """外层 asyncio.wait_for 兜底：哪怕 seedance 自己不超时，20 分钟硬上限也要把工具杀掉。
+
+    用 monkeypatch 把 ``_VIDEO_TOOL_TIMEOUT_SECONDS`` 暂时改为极短值，再让内部 hang。
+    """
+    async def _hang_i2v(**kwargs):
+        import asyncio as _aio
+        await _aio.sleep(10)  # 永远跑不完
+        return _FakeVideoTask(id="never")
+
+    monkeypatch.setattr("app.utils.seedance.seedance_client.image_to_video", _hang_i2v)
+    _patch_video_asset_lookup(monkeypatch, urls=["https://oss/ref.png"])
+    monkeypatch.setattr(
+        "app.core.tools.media_tools._VIDEO_TOOL_TIMEOUT_SECONDS",
+        0.1,
     )
 
     from app.core.tools.media_tools import generate_video
 
-    result = await generate_video(prompt="x")
+    result = await generate_video(
+        prompt="x",
+        asset_codes=["img-aaa"],
+        memory_harness=_FakeMemoryHarness(),
+    )
     assert result.get("ok") is False
-    assert result["error_code"] == "VIDEO_GEN_FAILED"
+    assert result["error_code"] == "VIDEO_TOOL_TIMEOUT"

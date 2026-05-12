@@ -247,8 +247,13 @@ export default function SupervisorPage({
 
   const selectedRun =
     runs.find((run) => run.id === selectedRunId) || null;
+  // 显示 live 数据的条件放宽：只要 liveEntries 非空就用它。三种来源都会填 liveEntries：
+  // 1) 主动 send chat → SSE 持续推
+  // 2) HITL resume → SSE 持续推
+  // 3) 刷新后 tail SSE attach（status running / waiting_review）→ replay + tail 持续推
+  // 任一情况下 liveEntries 都比 persistedEntries 新（tail 也会先 replay 全部历史）。
+  // 切换到另一个 run 时由 selectedRunId 变更的 useEffect 重置 liveEntries 回空。
   const shouldUseLiveState =
-    (isStreaming || isResuming) &&
     liveEntries.length > 0 &&
     (
       activeRunId == null ||
@@ -272,10 +277,7 @@ export default function SupervisorPage({
       ...entries,
     ];
   }, [selectedRunDetail]);
-  const displayedEntries =
-    shouldUseLiveState && liveEntries.length > 0
-      ? liveEntries
-      : persistedEntries;
+  const displayedEntries = shouldUseLiveState ? liveEntries : persistedEntries;
   const visibleEntries = useMemo(() => {
     if (selectedRunDetail?.status === 'waiting_review') {
       if (hitl) {
@@ -459,6 +461,15 @@ export default function SupervisorPage({
       return;
     }
 
+    // 切换到另一个 run / 刷新后选中的 run：重置所有 live 状态。
+    // tail SSE 会从 from_seq=0 重新 replay；persistedEntries 也会按新 detail 重建。
+    // 保留 activeRunId 不动（它标识当前主动 send 那条流）。
+    if (selectedRunId !== activeRunId) {
+      setLiveEntries([]);
+      setLiveWorkflow(null);
+      setLiveLoopCount(0);
+    }
+
     supervisorApi
       .get(projectIdNum, selectedRunId)
       .then((detail) => {
@@ -478,8 +489,10 @@ export default function SupervisorPage({
       .catch(() => {
         setSelectedRunDetail(null);
       });
-  }, [selectedRunId, projectIdNum]);
+  }, [selectedRunId, projectIdNum, activeRunId]);
 
+  // 刷新页面 / 跨 tab 时，对未结束的 run 用 SSE tail attach 到 supervisor 流，
+  // 而不是轮询。后端会先 replay supervisor_events 表里的历史事件，再 hold 住推新事件。
   useEffect(() => {
     if (!selectedRunId || isStreaming || isResuming) return;
     if (activeRunId != null && selectedRunId === activeRunId) return;
@@ -490,12 +503,96 @@ export default function SupervisorPage({
       return;
     }
 
-    const timer = window.setInterval(() => {
-      void reloadRuns();
-      void reloadSelectedRun(selectedRunId);
-    }, 3000);
+    const sessionId = selectedRunDetail.supervisor_session_id;
+    if (!sessionId) return;
 
-    return () => window.clearInterval(timer);
+    // tail 从 from_seq=0 重新 replay 所有事件；如果 liveEntries 已有内容（比如刚发完
+    // 一次 chat 进入 HITL 等待），不重置就会重复追加 → React duplicate key。
+    // 重置后由 replay 重建。HITL 状态（``hitl`` state）单独保存，不受影响。
+    // 注意：framework 约定首条 user 消息存在 workflow.user_request 列，不进 event_history，
+    // 所以 tail replay 看不到它；这里用 user_request 合成一条 user entry 放到 liveEntries
+    // 头部，与 persistedEntries 行为对齐，避免刷新后丢首条用户消息。
+    const initialUserEntry = selectedRunDetail.user_request
+      ? [
+          buildSupervisorUserEntry(selectedRunDetail.user_request, {
+            id: `initial-user-${selectedRunDetail.id}`,
+            timestamp: selectedRunDetail.created_at,
+          }),
+        ]
+      : [];
+    setLiveEntries(initialUserEntry);
+    setLiveWorkflow(null);
+
+    const abortController = new AbortController();
+    let cancelled = false;
+    // 用 _seq 字段做下次断线重连的游标，避免重复 replay
+    let lastSeq = 0;
+
+    (async () => {
+      try {
+        const response = await supervisorApi.tail(sessionId, lastSeq, abortController.signal);
+        if (!response.ok || !response.body) {
+          if (response.status !== 401 && response.status !== 404) {
+            // 静默；轮询 fallback 已不存在，让用户手动刷新
+          }
+          return;
+        }
+        await readSupervisorSSEStream(response, (event: SupervisorSSEEvent) => {
+          if (cancelled) return;
+          // 后端附加的 _seq 字段用于潜在的断线重连，前端类型里不显式声明；强转读取
+          const seq = (event as { _seq?: number })._seq;
+          if (typeof seq === 'number' && seq > lastSeq) {
+            lastSeq = seq;
+          }
+
+          // 把 replay / tail 收到的事件按现有 timeline reducer 加入
+          if (event.type !== 'supervisor_started') {
+            setLiveEntries((prev) => appendSupervisorDisplayEvent(prev, event));
+          }
+
+          // 同步刷新 token 卡片 + loop count + status / workflow
+          if (event.type === 'usage') {
+            const display = event.accumulated_usage ?? event.usage;
+            if (display) setLastUsage(display);
+            if (typeof event.loop_count === 'number') {
+              setLiveLoopCount(event.loop_count);
+            }
+          }
+          if (event.type === 'done' && typeof event.loop_count === 'number') {
+            setLiveLoopCount(event.loop_count);
+          }
+          if (event.type === 'supervisor_done') {
+            setLiveWorkflow(event.workflow);
+            void reloadSelectedRun(selectedRunId);
+          }
+          if (event.type === 'interrupt') {
+            setHitl({
+              sessionId: event.session_id,
+              toolName: event.tool_name,
+              toolCallId: event.tool_call_id,
+              arguments: event.arguments,
+              availableActions: event.available_actions,
+              context: event.context,
+            });
+          }
+        });
+      } catch (err) {
+        if (!cancelled) {
+          console.warn('[supervisor tail] stream error:', err);
+        }
+      } finally {
+        // 流结束（terminal / idle 超时 / 网络断）→ 拉一次最新 detail 兜底状态
+        if (!cancelled) {
+          void reloadSelectedRun(selectedRunId);
+          void reloadRuns();
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      abortController.abort();
+    };
   }, [
     activeRunId,
     isResuming,
@@ -503,6 +600,7 @@ export default function SupervisorPage({
     reloadRuns,
     reloadSelectedRun,
     selectedRunDetail?.status,
+    selectedRunDetail?.supervisor_session_id,
     selectedRunId,
   ]);
 
@@ -1726,11 +1824,18 @@ function SubAgentDrawerTrigger({
           <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
         </button>
       </SheetTrigger>
+      {/*
+        SheetContent 用 grid 而不是 flex：在 Sheet 这种 portal + fixed-position 的链路
+        里，``flex-1 min-h-0`` + Radix ScrollArea 内部的 ``size-full`` 经常算不出定值，
+        Viewport 直接被内容撑到溢出 SheetContent。改成 ``grid-rows-[auto_1fr]`` 让
+        滚动区显式拿到剩余高度，再用原生 ``overflow-y-auto`` 滚动，绕开 Radix 嵌套问题。
+        ``min-h-0`` 是 grid 1fr 行的常规配套——没有它子元素会按内容撑开。
+      */}
       <SheetContent
         side="right"
-        className="w-[min(640px,90vw)] sm:max-w-none flex flex-col gap-0 p-0"
+        className="w-[min(640px,90vw)] sm:max-w-none grid grid-rows-[auto_1fr] gap-0 p-0"
       >
-        <SheetHeader className="shrink-0 border-b border-border px-5 py-4">
+        <SheetHeader className="border-b border-border px-5 py-4">
           <SheetTitle>Sub-Agent 活动</SheetTitle>
           <SheetDescription>
             {sessions.length} 个会话 ·{' '}
@@ -1739,7 +1844,7 @@ function SubAgentDrawerTrigger({
               : '全部完成'}
           </SheetDescription>
         </SheetHeader>
-        <ScrollArea className="flex-1 min-h-0">
+        <div className="min-h-0 overflow-y-auto">
           <div className="space-y-4 p-5">
             {sessions.map((s) => (
               <SubAgentSessionCard
@@ -1752,7 +1857,7 @@ function SubAgentDrawerTrigger({
               />
             ))}
           </div>
-        </ScrollArea>
+        </div>
       </SheetContent>
     </Sheet>
   );

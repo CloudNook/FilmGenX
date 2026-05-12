@@ -257,8 +257,10 @@ class GeminiAdapter(ProviderAdapter):
 
                     # 保存原始 part 对象，用于下一轮请求还原 thought_signature
                     # Gemini thinking 模型要求 functionCall parts 必须原样带回
+                    # 注意：不要用 id(fc) 当 tool_call_id —— CPython 的 id() 是内存地址，
+                    # 同一 run 内先后两个 function_call part 可能落在同一地址，
+                    # 导致前端 React key 撞车。让 StructuredToolCall 自动生成 UUID。
                     tool_calls.append(StructuredToolCall(
-                        id=str(id(fc)),
                         name=name,
                         arguments=args,
                         raw={"gemini_part": part},
@@ -363,8 +365,8 @@ class GeminiAdapter(ProviderAdapter):
                             args = {"_raw": args}
                     elif not isinstance(args, dict):
                         args = {"_raw": str(args)}
+                    # 见非流式分支注释：不要用 id(fc) 当 tool_call_id。
                     tc = StructuredToolCall(
-                        id=str(id(fc)),
                         name=name,
                         arguments=args,
                         raw={"gemini_part": part},

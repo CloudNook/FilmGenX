@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, Optional
 
@@ -29,17 +30,15 @@ logger = logging.getLogger(__name__)
 _DEFAULT_IMAGE_DIR = "supervisor/images"
 _DEFAULT_VIDEO_DIR = "supervisor/videos"
 
-# video_prompt schema 的 quality 是 std/hq；evolink 那边是 720p/1080p
-_VIDEO_QUALITY_MAP = {"std": "720p", "hq": "1080p"}
+# 视频生成超时硬上限：Seedance 单条视频通常要 20 分钟左右才出片，所以这里就按
+# 20 分钟兜底；超过即放弃，避免 supervisor 卡死等单个工具。
+_VIDEO_TOOL_TIMEOUT_SECONDS = 1200.0
 
 # 受支持的图像模型（其它值会落 IMAGE_MODEL_NOT_AVAILABLE）
 _SUPPORTED_IMAGE_MODELS = {
     "gemini-3-pro-image-preview",
     "gemini-3.1-flash-image-preview",
 }
-
-# 受支持的视频模型——seedance 已声明但 utils 未真接入；调到时返回结构化错误
-_SUPPORTED_VIDEO_MODELS = {"kling", "seedance"}
 
 
 @register_tool(
@@ -363,73 +362,171 @@ async def _save_image_asset(
 @register_tool(
     name="generate_video",
     description=(
-        "文字驱动视频生成。模型由参数选择，产物自动落 OSS 返回永久 URL。\n"
+        "视频生成（Seedance 2.0 reference-to-video）。基于参考素材出片，产物自动落 OSS "
+        "并写入 ``assets`` 表，自动分配 ``vid-<uuid>`` 作为 asset_code。\n\n"
+        "**Agent 永远只看 asset_code，不看 URL**。把返回的 code 写进 JSON / 后续 i2v 调用即可。\n\n"
         "Args:\n"
-        "  prompt: 中文运动 prompt（运镜 + 角色动作 + 节奏）\n"
-        "  duration: 时长秒，3-15，默认 5\n"
-        "  aspect_ratio: '16:9' / '9:16' / '1:1'，默认 '16:9'\n"
-        "  quality: 'std' (720p) / 'hq' (1080p)，默认 'std'\n"
-        "  model: 'kling'（默认，已就绪）；'seedance'（占位，调用会返回 MODEL_NOT_AVAILABLE）\n"
-        "  oss_directory: OSS 目录，默认 'supervisor/videos'\n"
+        "  prompt:         中文运动 prompt（运镜 + 角色动作 + 节奏；≤500 字符）\n"
+        "  asset_codes:    参考素材 asset_code 列表（最多 9 个，必填）。**至少要传一项**——\n"
+        "                  Seedance reference-to-video 不支持纯文生视频。prompt 里用\n"
+        "                  '参考图 1' / 'reference image 2' 这种自然语言指代各路素材的用途。\n"
+        "  duration:       时长秒，4-15，默认 5\n"
+        "  aspect_ratio:   '16:9' / '9:16' / '1:1' / '4:3' / '3:4' / '21:9' / 'adaptive'，默认 '16:9'\n"
+        "  generate_audio: 是否生成同步音频，默认 True\n"
+        "  description:    给新视频 asset 的人话描述（如 '萧炎冲入云海·第一幕镜头 3'）\n"
+        "  tags:           新 asset 的 tags（如 ['video', 'shot_3', '萧炎']）\n"
         "Returns:\n"
-        "  {success: True, url, task_id, model, duration, ...}；失败返回 tool_error 结构。\n"
-        "本期不接受 image_start / end_frame 等参考图入参；等 memory 落地后会加。"
+        "  {success: True, asset_code: <自动分配的 vid-xxx>, asset_id, url, task_id, "
+        "duration, aspect_ratio, generate_audio}；失败返回 tool_error。\n"
+        "Note: Seedance 单条视频通常 20 分钟左右出片，工具内部硬限制 20 分钟超时。"
     ),
 )
 async def generate_video(
     prompt: str,
+    asset_codes: Optional[list[str]] = None,
     duration: int = 5,
     aspect_ratio: str = "16:9",
-    quality: str = "std",
-    model: str = "kling",
-    oss_directory: str = _DEFAULT_VIDEO_DIR,
+    generate_audio: bool = True,
+    description: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    *,
+    memory_harness: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    if model not in _SUPPORTED_VIDEO_MODELS:
+    project_id = _resolve_project_id(memory_harness)
+    if project_id is None:
         return tool_error(
-            error_code="VIDEO_MODEL_NOT_AVAILABLE",
-            message=f"视频模型 {model!r} 暂不支持",
-            hint="可选值：'kling' (默认)；'seedance' 后续接入",
-            context={"requested_model": model},
+            error_code="PROJECT_ID_MISSING",
+            message="无法解析 project_id —— memory_harness 未挂载或 scope_metadata 缺 domain_id",
+            hint="确保 supervisor / sub-agent 是带 memory 启动的（memory_enabled=True 且 domain_id 已注入）",
         )
 
-    if model == "seedance":
+    ref_codes = _normalize_str_list(asset_codes)
+    if ref_codes is _BAD_TYPE_SENTINEL:
         return tool_error(
-            error_code="MODEL_NOT_AVAILABLE",
-            message="Seedance 适配器未真实接入，请先用 model='kling'",
-            hint="待 app/utils/seedance.py 真实化后此路径解禁",
-            context={"requested_model": model},
+            error_code="ASSET_CODES_BAD_TYPE",
+            message=f"asset_codes 必须是 string 数组，收到 {type(asset_codes).__name__}: {asset_codes!r}",
+            hint="例如 asset_codes=['img-abc123', 'img-def456']",
+        )
+    if not ref_codes:
+        return tool_error(
+            error_code="ASSET_CODES_REQUIRED",
+            message="Seedance reference-to-video 不支持纯文生视频，必须至少传一个 asset_code",
+            hint="先用 generate_image 出基础图（角色三视图 / 场景首图），再把它的 asset_code 作为参考传进来",
         )
 
-    kling_quality = _VIDEO_QUALITY_MAP.get(quality, "720p")
+    normalized_tags = _normalize_str_list(tags)
+    if normalized_tags is _BAD_TYPE_SENTINEL:
+        normalized_tags = []
 
-    from app.utils.evolink import evolink_client
-
+    # asset_code → file_url
     try:
-        task = await evolink_client.text_to_video(
+        ref_urls, missing_codes = await _resolve_asset_urls_by_code(
+            project_id=project_id, codes=ref_codes
+        )
+    except Exception as exc:
+        logger.exception("[media_tools] 解析参考 asset URL 异常")
+        return tool_error(
+            error_code="REFERENCE_FETCH_EXCEPTION",
+            message=f"解析参考 asset 异常：{exc}",
+            context={"asset_codes": ref_codes},
+        )
+    if not ref_urls:
+        return tool_error(
+            error_code="REFERENCE_ASSETS_NOT_FOUND",
+            message=f"asset_codes {ref_codes} 在 project_id={project_id} 下都查不到",
+            hint="检查 code 是否正确；或先用 generate_image 产出再用其 code",
+            context={"asset_codes": ref_codes, "missing": missing_codes},
+        )
+
+    from app.utils.seedance import seedance_client
+
+    # 整个视频生成 + OSS + 入库流程包在 20 分钟硬上限里。Seedance 内部
+    # ``wait_for_completion`` 自己也有 max_wait_seconds=1200；这里再裹一层是防御
+    # OSS 下载 / DB 写入卡死的极端场景，让 supervisor 不会被单个 tool call 拖死。
+    try:
+        return await asyncio.wait_for(
+            _run_seedance_image_to_video(
+                seedance_client=seedance_client,
+                project_id=project_id,
+                prompt=prompt,
+                image_urls=ref_urls,
+                duration=duration,
+                aspect_ratio=aspect_ratio,
+                generate_audio=generate_audio,
+                description=description,
+                tags=normalized_tags,
+                ref_codes=ref_codes,
+            ),
+            timeout=_VIDEO_TOOL_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        return tool_error(
+            error_code="VIDEO_TOOL_TIMEOUT",
+            message=f"视频生成超过 {_VIDEO_TOOL_TIMEOUT_SECONDS:.0f}s 仍未完成",
+            hint="可能是 Seedance 端排队或 OSS 上传卡住；稍后重试，或减短 duration",
+        )
+
+
+async def _run_seedance_image_to_video(
+    *,
+    seedance_client: Any,
+    project_id: int,
+    prompt: str,
+    image_urls: list[str],
+    duration: int,
+    aspect_ratio: str,
+    generate_audio: bool,
+    description: Optional[str],
+    tags: list[str],
+    ref_codes: list[str],
+) -> Dict[str, Any]:
+    """generate_video 主流程的实际执行体。从 ``generate_video`` 拆出来是为了让外层
+    用 ``asyncio.wait_for`` 整体加超时；超时分支可以干净地杀掉整个流程而不留
+    halfway state。
+    """
+    # 1) 提交 Seedance 任务
+    try:
+        task = await seedance_client.image_to_video(
             prompt=prompt,
+            image_urls=image_urls,
             duration=duration,
             aspect_ratio=aspect_ratio,
-            quality=kling_quality,
+            generate_audio=generate_audio,
+        )
+    except ValueError as exc:
+        # 入参校验失败（quality / aspect_ratio / duration 越界等）
+        return tool_error(
+            error_code="VIDEO_PARAMS_INVALID",
+            message=f"Seedance 入参不合法：{exc}",
+            hint="检查 duration（4-15）/ aspect_ratio 等是否在允许范围",
         )
     except Exception as exc:
-        logger.exception("[media_tools] kling text_to_video 提交异常")
+        logger.exception("[media_tools] seedance image_to_video 提交异常")
         return tool_error(
             error_code="VIDEO_SUBMIT_FAILED",
-            message=f"Kling 任务提交失败：{exc}",
-            hint="检查 prompt 是否合规，或稍后重试",
+            message=f"Seedance 任务提交失败：{exc}",
+            hint="检查 prompt 是否合规 / 参考图是否可下载，或稍后重试",
         )
 
+    # 2) 轮询完成 + OSS 上传（拿永久 URL，Seedance 自带链接 24h 失效）
     try:
-        finished = await evolink_client.wait_for_completion(
+        finished = await seedance_client.wait_for_completion(
             task.id,
             upload_to_oss=True,
-            oss_directory=oss_directory,
+            oss_directory=_DEFAULT_VIDEO_DIR,
+        )
+    except TimeoutError as exc:
+        return tool_error(
+            error_code="VIDEO_GEN_TIMEOUT",
+            message=str(exc),
+            hint="Seedance 服务端可能在排队；稍后用同样参数重试",
+            context={"task_id": task.id},
         )
     except Exception as exc:
-        logger.exception("[media_tools] kling 任务等待异常 task_id=%s", task.id)
+        logger.exception("[media_tools] seedance 任务等待异常 task_id=%s", task.id)
         return tool_error(
             error_code="VIDEO_GEN_FAILED",
-            message=f"Kling 任务执行失败：{exc}",
+            message=f"Seedance 任务执行失败：{exc}",
             hint="检查任务详情或调整 prompt 后重试",
             context={"task_id": task.id},
         )
@@ -437,16 +534,114 @@ async def generate_video(
     if finished.status != "completed" or not finished.video_url:
         return tool_error(
             error_code="VIDEO_GEN_FAILED",
-            message=f"Kling 任务结束但未拿到视频 URL（status={finished.status}）",
+            message=f"Seedance 任务结束但未拿到视频 URL（status={finished.status}）",
             context={"task_id": finished.id, "status": finished.status},
+        )
+
+    # 3) 落 Asset 表，自动分配 vid-<uuid> code
+    final_duration = finished.video_duration or float(duration)
+    try:
+        final_code, asset_id = await _save_video_asset(
+            project_id=project_id,
+            file_url=finished.video_url,
+            duration_sec=final_duration,
+            aspect_ratio=aspect_ratio,
+            generator="seedance-2.0-reference-to-video",
+            description=description,
+            tags=tags,
+        )
+    except Exception as exc:
+        logger.exception("[media_tools] 保存视频 asset 异常")
+        return tool_error(
+            error_code="ASSET_SAVE_FAILED",
+            message=f"视频已生成并落 OSS 但 Asset 表写入失败：{exc}",
+            hint="基础设施异常；URL 已生成（见 context）但不会被未来 i2v 引用到",
+            context={"orphan_url": finished.video_url, "task_id": finished.id},
         )
 
     return {
         "success": True,
+        "asset_code": final_code,
+        "asset_id": asset_id,
         "url": finished.video_url,
         "task_id": finished.id,
-        "model": "kling",
-        "duration": finished.video_duration or duration,
+        "duration": final_duration,
         "aspect_ratio": aspect_ratio,
-        "quality": kling_quality,
+        "generate_audio": generate_audio,
+        "model": "seedance-2.0-reference-to-video",
+        "reference_codes": ref_codes,
     }
+
+
+async def _resolve_asset_urls_by_code(
+    *, project_id: int, codes: list[str]
+) -> tuple[list[str], list[str]]:
+    """按 ``asset_code`` 在 assets 表查 ``file_url``。
+
+    返回 ``(urls, missing_codes)``；urls 顺序按输入 codes，查不到的进 missing。
+    Seedance 接受的是 URL（参考图通过 https 让对端下载），所以这里只取 URL 而不像
+    image i2i 那样把字节拉下来。
+    """
+    from app.db.session import AsyncSessionFactory
+    from app.models.asset import Asset
+    from sqlalchemy import select
+
+    async with AsyncSessionFactory() as session:
+        stmt = select(Asset).where(
+            Asset.project_id == project_id,
+            Asset.asset_code.in_(codes),
+            Asset.is_deleted.is_(False),
+        )
+        rows = (await session.execute(stmt)).scalars().all()
+
+    by_code = {row.asset_code: row for row in rows}
+
+    urls: list[str] = []
+    missing: list[str] = []
+    for code in codes:
+        asset = by_code.get(code)
+        if asset is None or not asset.file_url:
+            missing.append(code)
+            continue
+        urls.append(asset.file_url)
+
+    return urls, missing
+
+
+async def _save_video_asset(
+    *,
+    project_id: int,
+    file_url: str,
+    duration_sec: float,
+    aspect_ratio: str,
+    generator: str,
+    description: Optional[str],
+    tags: list[str],
+) -> tuple[str, int]:
+    """把生成的视频插入 assets 表，自动分配 ``vid-<uuid_short>`` 为 asset_code。"""
+    from uuid import uuid4
+
+    from app.db.session import AsyncSessionFactory
+    from app.models.asset import Asset
+
+    code = f"vid-{uuid4().hex[:10]}"
+
+    async with AsyncSessionFactory() as session:
+        async with session.begin():
+            row = Asset(
+                project_id=project_id,
+                asset_code=code,
+                asset_type="video",
+                file_url=file_url,
+                file_format="mp4",
+                duration_sec=duration_sec,
+                source="generated",
+                generator=generator,
+                description=description,
+                tags=[*tags, f"aspect_ratio:{aspect_ratio}"],
+            )
+            session.add(row)
+            await session.flush()
+            new_id = row.id
+
+    return code, new_id

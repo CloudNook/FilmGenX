@@ -196,6 +196,30 @@ class SupervisorEventStore:
         )
         return list(result.scalars().all())
 
+    async def list_events_after(
+        self,
+        supervisor_session_id: str,
+        after_id: int,
+        *,
+        limit: int = 500,
+    ) -> List[SupervisorEvent]:
+        """按 ``id`` 增量取 ``after_id`` 之后的事件。给 SSE tail 端点的 replay + poll 用。
+
+        ``id`` 是 BIGINT auto-increment，单调递增，比 ``created_at`` 更适合做增量游标
+        （并发写入时间戳可能并列）。
+        """
+        result = await self.db.execute(
+            select(SupervisorEvent)
+            .where(
+                SupervisorEvent.supervisor_session_id == supervisor_session_id,
+                SupervisorEvent.is_deleted.is_(False),
+                SupervisorEvent.id > after_id,
+            )
+            .order_by(SupervisorEvent.id.asc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
     @staticmethod
     def _source_session_id(payload: Dict[str, Any]) -> str | None:
         session_id = payload.get("session_id")

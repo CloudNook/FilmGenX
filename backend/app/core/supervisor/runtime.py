@@ -23,6 +23,11 @@ if TYPE_CHECKING:
 
 
 def _should_persist_synthetic_event(event_type: Optional[str]) -> bool:
+    """直接持久化（非聚合）的事件类型。
+
+    ``thinking`` / ``text`` 走聚合路径——在 ``usage`` 事件时把本次 LLM 调用
+    累积的 chunks 合成一条完整事件后再写表，避免 per-chunk INSERT 写放大。
+    """
     return event_type in {
         "supervisor_started",
         "interrupt",
@@ -32,6 +37,9 @@ def _should_persist_synthetic_event(event_type: Optional[str]) -> bool:
         "review_end",
         "supervisor_done",
         "error",
+        "tool_start",
+        "tool_end",
+        "usage",
     }
 
 
@@ -93,6 +101,11 @@ class SupervisorRuntime:
         self.workflow_store = workflow_store
         self.db = workflow_store.db
         self.event_store = event_store or SupervisorEventStore(self.db)
+        # 流式聚合 buffer：per-(source, session_id) 累积本次 LLM 调用内的
+        # thinking / text chunks。在 ``usage`` 事件（= LLM call 结束）时 flush
+        # 成一条完整事件持久化，避免 per-chunk INSERT 的写放大。
+        self._thinking_buffer: Dict[tuple, str] = {}
+        self._text_buffer: Dict[tuple, str] = {}
 
     async def _create_workflow_record(
         self,
@@ -331,6 +344,54 @@ class SupervisorRuntime:
     ) -> None:
         event_type = payload.get("type")
         supervisor_session_id = supervisor.supervisor_session_id
+
+        # ── thinking / text 聚合 ─────────────────────────────────────────
+        # per-chunk 直接持久化会写放大；改为按 (source, session_id) 累积，
+        # usage 事件时 flush 一次完整事件，频率从"每 chunk 一次"降到"每 LLM call 一次"。
+        if event_type in ("thinking", "text"):
+            buffer_key = (
+                payload.get("source") or "supervisor",
+                payload.get("session_id"),
+            )
+            chunk = payload.get("content") or ""
+            if event_type == "thinking":
+                self._thinking_buffer[buffer_key] = (
+                    self._thinking_buffer.get(buffer_key, "") + chunk
+                )
+            else:
+                self._text_buffer[buffer_key] = (
+                    self._text_buffer.get(buffer_key, "") + chunk
+                )
+            return
+
+        # usage 事件 = LLM call 完成 → 把这次调用累积的 thinking / text flush 进表
+        if event_type == "usage":
+            buffer_key = (
+                payload.get("source") or "supervisor",
+                payload.get("session_id"),
+            )
+            thinking_full = self._thinking_buffer.pop(buffer_key, "")
+            text_full = self._text_buffer.pop(buffer_key, "")
+            if thinking_full:
+                await self.append_event(
+                    supervisor_session_id,
+                    {
+                        "type": "thinking",
+                        "content": thinking_full,
+                        "source": payload.get("source") or "supervisor",
+                        "session_id": payload.get("session_id"),
+                    },
+                )
+            if text_full:
+                await self.append_event(
+                    supervisor_session_id,
+                    {
+                        "type": "text",
+                        "content": text_full,
+                        "source": payload.get("source") or "supervisor",
+                        "session_id": payload.get("session_id"),
+                    },
+                )
 
         if _should_persist_synthetic_event(event_type):
             await self.append_event(supervisor_session_id, payload)

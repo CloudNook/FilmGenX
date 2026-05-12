@@ -1045,6 +1045,21 @@ export const supervisorApi = {
     );
   },
 
+  /** SSE tail：从 supervisor_events 表 replay 然后 hold 住等新事件；用于刷新 / 跨 tab 同步。 */
+  tail(sessionId: string, fromSeq: number = 0, signal?: AbortSignal) {
+    const token = getToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    return fetch(
+      buildStreamingUrl(`/supervisor/${sessionId}/stream?from_seq=${fromSeq}`),
+      {
+        method: 'GET',
+        headers,
+        signal,
+      },
+    );
+  },
+
   resume(
     projectId: number,
     sessionId: string,

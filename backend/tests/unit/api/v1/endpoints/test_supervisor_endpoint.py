@@ -18,6 +18,44 @@ from app.core.supervisor.events import SupervisorStartedEvent
 from app.core.supervisor.workflow import WorkflowNodeDefinition, build_workflow_snapshot
 
 
+class _FakeBgSessionCM:
+    """Async context manager that returns a caller-supplied session."""
+
+    def __init__(self, session):
+        self._session = session
+
+    async def __aenter__(self):
+        return self._session
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+
+@pytest.fixture
+def patch_bg_session_factory(monkeypatch):
+    """Patch supervisor endpoint's bg session factory to yield a caller-controlled db.
+
+    /chat 现在用 ``asyncio.create_task`` 把 supervisor 跑在独立 ``AsyncSessionFactory``
+    会话上，HTTP 断开不影响后台任务。单测里没真实 DB，所以把这个 factory 重定向到
+    测试传入的 MagicMock，让 bg task 顺利进入 supervisor.stream 循环。
+
+    同时清理模块级 ``_BG_SUPERVISOR_TASKS``：跨测试残留的 task 会让相同 session_id
+    的下个用例命中 409 Conflict 分支。
+    """
+    from app.api.v1.endpoints.supervisor import _BG_SUPERVISOR_TASKS
+
+    _BG_SUPERVISOR_TASKS.clear()
+
+    def _apply(db):
+        monkeypatch.setattr(
+            "app.api.v1.endpoints.supervisor._bg_session_factory",
+            lambda: _FakeBgSessionCM(db),
+        )
+        return db
+
+    return _apply
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("body", "expected_request"),
@@ -103,10 +141,13 @@ async def test_chat_supervisor_routes_all_requests_through_stream_entry(
 
 
 @pytest.mark.asyncio
-async def test_chat_supervisor_resume_restores_workflow_runtime_config(monkeypatch):
+async def test_chat_supervisor_resume_restores_workflow_runtime_config(
+    monkeypatch, patch_bg_session_factory
+):
     captured_kwargs = {}
     db = MagicMock()
     db.commit = AsyncMock()
+    patch_bg_session_factory(db)
 
     def fake_create_supervisor(**kwargs):
         captured_kwargs.update(kwargs)
@@ -134,14 +175,22 @@ async def test_chat_supervisor_resume_restores_workflow_runtime_config(monkeypat
         db=db,
     )
 
+    # 触发后台 task：必须真正 anext 一次，bg task 才会被调度并跑进 create_supervisor。
+    # 没有事件 → 直接拿到 [DONE]。
+    first_chunk = await anext(response.body_iterator)
+    decoded = first_chunk.decode() if isinstance(first_chunk, bytes) else first_chunk
+    assert decoded == "data: [DONE]\n\n"
+
     assert response.media_type == "text/event-stream"
+    # bg task 用 _bg_session_factory() 拿 db，我们 patch 成测试的 MagicMock，所以
+    # create_supervisor 收到的就是同一个对象。
     assert captured_kwargs["db"] is db
     assert "workflow_store" not in captured_kwargs
     assert "event_appender" not in captured_kwargs
 
 
 @pytest.mark.asyncio
-async def test_chat_supervisor_resume_uses_stream_api(monkeypatch):
+async def test_chat_supervisor_resume_uses_stream_api(monkeypatch, patch_bg_session_factory):
     workflow_snapshot = build_workflow_snapshot(
         profile="cinematic_series",
         definitions=[
@@ -167,6 +216,7 @@ async def test_chat_supervisor_resume_uses_stream_api(monkeypatch):
     )
     db = MagicMock()
     db.commit = AsyncMock()
+    patch_bg_session_factory(db)
 
     monkeypatch.setattr(
         "app.core.supervisor.persist.SupervisorWorkflowStore.get_workflow_by_session",
@@ -239,7 +289,7 @@ async def test_chat_supervisor_resume_requires_session_id():
 
 
 @pytest.mark.asyncio
-async def test_chat_supervisor_emits_started_event(monkeypatch):
+async def test_chat_supervisor_emits_started_event(monkeypatch, patch_bg_session_factory):
     workflow = SimpleNamespace(
         id=7,
         status="running",
@@ -248,6 +298,7 @@ async def test_chat_supervisor_emits_started_event(monkeypatch):
     )
     db = MagicMock()
     db.commit = AsyncMock()
+    patch_bg_session_factory(db)
 
     service_get = AsyncMock(return_value=workflow)
     monkeypatch.setattr(
@@ -300,8 +351,13 @@ async def test_chat_supervisor_emits_started_event(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_chat_supervisor_human_review_uses_core_factory_defaults(monkeypatch):
+async def test_chat_supervisor_human_review_uses_core_factory_defaults(
+    monkeypatch, patch_bg_session_factory
+):
     captured_kwargs = {}
+    db = MagicMock()
+    db.commit = AsyncMock()
+    patch_bg_session_factory(db)
 
     def fake_create_supervisor(**kwargs):
         captured_kwargs.update(kwargs)
@@ -329,8 +385,11 @@ async def test_chat_supervisor_human_review_uses_core_factory_defaults(monkeypat
             review_nodes=["outline"],
         ),
         user_id=1,
-        db=MagicMock(),
+        db=db,
     )
+
+    # 触发 bg task：必须 anext 一次
+    await anext(response.body_iterator)
 
     assert response.media_type == "text/event-stream"
     assert captured_kwargs["hitl_enabled"] is True
@@ -340,7 +399,9 @@ async def test_chat_supervisor_human_review_uses_core_factory_defaults(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_chat_supervisor_serializes_datetime_event_payload(monkeypatch):
+async def test_chat_supervisor_serializes_datetime_event_payload(
+    monkeypatch, patch_bg_session_factory
+):
     workflow = SimpleNamespace(
         id=9,
         status="running",
@@ -349,6 +410,7 @@ async def test_chat_supervisor_serializes_datetime_event_payload(monkeypatch):
     )
     db = MagicMock()
     db.commit = AsyncMock()
+    patch_bg_session_factory(db)
 
     monkeypatch.setattr(
         "app.core.supervisor.persist.SupervisorWorkflowStore.create_workflow",
@@ -405,7 +467,9 @@ async def test_chat_supervisor_serializes_datetime_event_payload(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_chat_supervisor_continues_existing_session_instead_of_creating_new_run(monkeypatch):
+async def test_chat_supervisor_continues_existing_session_instead_of_creating_new_run(
+    monkeypatch, patch_bg_session_factory
+):
     workflow_snapshot = build_workflow_snapshot(
         profile="default",
         definitions=[
@@ -437,6 +501,7 @@ async def test_chat_supervisor_continues_existing_session_instead_of_creating_ne
     db = MagicMock()
     db.commit = AsyncMock()
     db.refresh = AsyncMock()
+    patch_bg_session_factory(db)
 
     monkeypatch.setattr(
         "app.core.supervisor.persist.SupervisorWorkflowStore.get_workflow_by_session",

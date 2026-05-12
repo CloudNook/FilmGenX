@@ -267,10 +267,15 @@ export function appendSupervisorDisplayEvent(
 
   if (event.type === 'tool_start') {
     const nextEntries = completeLatestThinking(entries, event.source, event.session_id);
+    // 历史上有 provider（早期 Gemini 适配器）用 Python id() 当 tool_call_id，
+    // 不同轮次的 function_call 对象内存地址会被回收复用，导致 persisted event_history
+    // 里出现重复 tool_call_id。这里用 nextEntries.length 当 React-key 后缀做兜底，
+    // 即便 tool_call_id 重复也保持每条 entry 的 React 身份唯一。配对仍走 toolCallId
+    // 字段，不依赖这个 id 字符串。
     return [
       ...nextEntries,
       {
-        id: `tool-start-${event.tool_call_id}-${event.session_id || 'root'}`,
+        id: `tool-start-${event.tool_call_id}-${event.session_id || 'root'}-${nextEntries.length}`,
         kind: 'tool_start',
         source: event.source || 'supervisor',
         sessionId: event.session_id,
@@ -290,7 +295,9 @@ export function appendSupervisorDisplayEvent(
       event.session_id,
     );
     const nextEntry: SupervisorDisplayEntry = {
-      id: `tool-start-${event.tool_call_id}-${event.session_id || 'root'}`,
+      // 仅在 orphan 分支（找不到匹配的 tool_start）使用；带 length 后缀避免与
+      // 既有 entry 撞 key。命中匹配时下面会保留 existingEntry.id。
+      id: `tool-end-${event.tool_call_id}-${event.session_id || 'root'}-${baseEntries.length}`,
       kind: 'tool_end',
       source: event.source || 'supervisor',
       sessionId: event.session_id,
@@ -311,6 +318,7 @@ export function appendSupervisorDisplayEvent(
       {
         ...existingEntry,
         ...nextEntry,
+        id: existingEntry.id,
         toolArguments: existingEntry.toolArguments,
       },
       ...baseEntries.slice(existingIndex + 1),
@@ -329,8 +337,14 @@ export function appendSupervisorDisplayEvent(
         entry.kind === 'sub_agent_start',
     );
     const matchingStart = existingIndex !== -1 ? baseEntries[existingIndex] : null;
+    // Orphan end：framework 在 sub-agent 没真正启动就早期失败时（unknown agent /
+    // workflow guard 等）emit 没 session_id 的 sub_agent_end。带 length 后缀保证
+    // 同一会话出现多次此类失败时 React key 唯一。匹配逻辑走 sessionId + kind，
+    // 不依赖此 id 字符串。
     const nextEntry: SupervisorDisplayEntry = {
-      id: matchingStart?.id || `sub-agent-${event.session_id}-orphan-end`,
+      id:
+        matchingStart?.id ||
+        `sub-agent-${event.session_id || 'root'}-orphan-end-${baseEntries.length}`,
       kind: 'sub_agent_end',
       source: event.source || 'supervisor',
       subAgentName: event.sub_agent_name,
