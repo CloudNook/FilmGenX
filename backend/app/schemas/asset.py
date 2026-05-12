@@ -9,6 +9,11 @@ class AssetCreate(BaseModel):
     """Create asset request."""
 
     asset_code: str = Field(..., max_length=100, description="Asset code")
+    name: Optional[str] = Field(
+        None,
+        max_length=120,
+        description="Human-readable name (character/scene name, etc).",
+    )
     asset_type: str = Field(
         ...,
         pattern="^(image|video|audio|reference)$",
@@ -31,6 +36,7 @@ class AssetResponse(BaseResponse):
 
     project_id: int
     asset_code: str
+    name: Optional[str]
     asset_type: str
     file_url: str
     file_format: Optional[str]

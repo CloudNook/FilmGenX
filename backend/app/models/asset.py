@@ -27,6 +27,11 @@ class Asset(Base):
         unique=True,
         comment="Business asset code",
     )
+    name: Mapped[Optional[str]] = mapped_column(
+        String(120),
+        nullable=True,
+        comment="Human-readable name (character/scene name, etc). Used as @图N alias in prompts.",
+    )
     asset_type: Mapped[str] = mapped_column(
         String(20),
         nullable=False,

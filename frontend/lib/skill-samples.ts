@@ -1391,6 +1391,75 @@ generate_video(
 
 参考图最多 9 张；通常 1-3 张够用：1 张主角三视图 + 1 张场景主 angle。
 
+### Seedance 官方参考图引用语法：\`\`@图片N\`\`
+
+**在 prompt 里精确指代某张参考图，用 \`\`@图片N\`\`**（N = 1, 2, ..., 9）。
+编号按 \`\`asset_codes\`\` 数组顺序，**1-indexed**：
+
+| asset_codes 位置 | prompt 中的引用 |
+| --- | --- |
+| asset_codes[0] | \`\`@图片1\`\` |
+| asset_codes[1] | \`\`@图片2\`\` |
+| ... | ... |
+| asset_codes[8] | \`\`@图片9\`\` |
+
+**示例**（主角 + 场景两张参考图）：
+
+\`\`\`
+generate_video(
+  prompt="@图片1 持剑立于 @图片2 描绘的悬崖边背身远眺，山风吹动战袍下摆。
+          0-2 秒：static long shot；2-4 秒：缓慢 dolly in 推到 medium close-up，
+          @图片1 缓慢转身，表情从平静转为 determined。
+          光影：黄昏侧逆光，金红色调。",
+  asset_codes=["img-xiaoyan-3view", "img-yunlan-cliff"],   # ← img-xiaoyan-3view 是 @图片1
+  duration=5,
+  aspect_ratio="16:9",
+)
+\`\`\`
+
+工具会**预校验**：prompt 里 \`\`@图片N\`\` 编号必须在 \`\`1..len(asset_codes)\`\` 范围内，
+越界（如只传 2 张但写 \`\`@图片3\`\`）直接 fail-fast 返 \`\`VIDEO_PROMPT_REF_OUT_OF_RANGE\`\`，
+不会浪费配额打 Seedance。
+
+工具返回的 \`\`image_refs\`\` 字段会回显当前映射：
+\`\`{"@图片1": "img-xiaoyan-3view", "@图片2": "img-yunlan-cliff"}\`\`，
+你可以复核 Seedance 看到的编号与你的意图是否一致。
+
+**何时该用 \`\`@图片N\`\` vs 自然语言**：
+
+- 多张参考图 + 需要精确指明"哪个角色做什么动作 / 哪个场景作背景" → 用 \`\`@图片N\`\`
+- 单张参考图，prompt 不会混淆 → 自然语言描述即可
+- 参考图职责本身就含糊（如纯风格参考）→ 不用引用，让模型自行融合
+
+### 自动别名注入：你写中文名，工具帮你桥接到 @图片N
+
+工具会在内部反查 memory KV——如果某个 \`\`asset_code\`\` 在 \`\`character.<name>\`\` 或
+\`\`scene.<name>\`\` 的 KV 里出现过，**工具会自动在 prompt 头部前置一行别名表**：
+
+\`\`\`
+素材引用：萧炎=@图片1，云岚宗广场=@图片2
+
+(你写的 prompt 原文)
+\`\`\`
+
+这样你 prompt 正文里直接用中文名就行（\`\`萧炎冲向云岚宗广场\`\`），Seedance 看到别名行后
+就知道"萧炎"对应 @图片1。返回值的 \`\`name_refs\`\` 字段会回显反查到的映射，方便核对。
+
+**两种写法可以混用**：
+
+\`\`\`
+generate_video(
+  prompt="萧炎在云岚宗广场中央，缓推到 @图片1 侧脸特写。光影：黄昏侧逆光。",
+  asset_codes=["img-xy", "img-yl"],   # img-xy 在 character.萧炎 KV 里
+  ...
+)
+# 实际送到 Seedance 的 prompt:
+# "素材引用：萧炎=@图片1，云岚宗广场=@图片2\n\n萧炎在云岚宗广场中央，缓推到 @图片1 侧脸特写。..."
+\`\`\`
+
+**反查失败的情况**：asset_code 不在 KV 里（如 workspace 调试台直接 \`\`generate_image\`\` 出
+的临时图）→ \`\`name_refs\`\` 为空，工具不会前置别名行；你只能用 \`\`@图片N\`\` 显式索引。
+
 ## 平台参数限制（硬约束）
 
 | 参数 | 范围 | 备注 |

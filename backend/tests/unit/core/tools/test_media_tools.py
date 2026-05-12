@@ -121,6 +121,7 @@ async def test_generate_image_default_model_is_pro(monkeypatch):
 
     result = await generate_image(
         prompt="一个少年站在悬崖边",
+        name="test-asset",
         aspect_ratio="9:16",
         image_size="2K",
         memory_harness=_FakeMemoryHarness(domain_id=1),
@@ -157,6 +158,7 @@ async def test_generate_image_explicit_flash_model(monkeypatch):
 
     result = await generate_image(
         prompt="quick sketch",
+        name="test-asset",
         model="gemini-3.1-flash-image-preview",
         memory_harness=_FakeMemoryHarness(),
     )
@@ -180,7 +182,7 @@ async def test_generate_image_unknown_model_returns_tool_error(monkeypatch):
 
     from app.core.tools.media_tools import generate_image
 
-    result = await generate_image(prompt="x", model="dall-e-3")
+    result = await generate_image(name="test-asset", prompt="x", model="dall-e-3")
     assert result.get("ok") is False
     assert result["error_code"] == "IMAGE_MODEL_NOT_AVAILABLE"
 
@@ -199,7 +201,7 @@ async def test_generate_image_tool_error_when_gen_fails(monkeypatch):
 
     from app.core.tools.media_tools import generate_image
 
-    result = await generate_image(prompt="bad prompt", memory_harness=_FakeMemoryHarness())
+    result = await generate_image(name="test-asset", prompt="bad prompt", memory_harness=_FakeMemoryHarness())
     assert result.get("ok") is False
     assert result["error_code"] == "IMAGE_GEN_FAILED"
     assert "RAI blocked" in result["message"]
@@ -214,7 +216,7 @@ async def test_generate_image_handles_gen_exception(monkeypatch):
 
     from app.core.tools.media_tools import generate_image
 
-    result = await generate_image(prompt="anything", memory_harness=_FakeMemoryHarness())
+    result = await generate_image(name="test-asset", prompt="anything", memory_harness=_FakeMemoryHarness())
     assert result.get("ok") is False
     assert result["error_code"] == "IMAGE_GEN_EXCEPTION"
     assert "network down" in result["message"]
@@ -233,7 +235,7 @@ async def test_generate_image_handles_oss_failure(monkeypatch):
 
     from app.core.tools.media_tools import generate_image
 
-    result = await generate_image(prompt="x", memory_harness=_FakeMemoryHarness())
+    result = await generate_image(name="test-asset", prompt="x", memory_harness=_FakeMemoryHarness())
     assert result.get("ok") is False
     assert result["error_code"] == "OSS_UPLOAD_FAILED"
 
@@ -243,7 +245,7 @@ async def test_generate_image_missing_project_id(monkeypatch):
     """没传 memory_harness → 无法解析 project_id，应早早返错。"""
     from app.core.tools.media_tools import generate_image
 
-    result = await generate_image(prompt="x")
+    result = await generate_image(name="test-asset", prompt="x")
     assert result.get("ok") is False
     assert result["error_code"] == "PROJECT_ID_MISSING"
 
@@ -277,6 +279,7 @@ async def test_generate_image_i2i_mode(monkeypatch):
 
     result = await generate_image(
         prompt="angry close-up",
+        name="test-asset",
         asset_codes=["char-test-3view"],
         memory_harness=_FakeMemoryHarness(domain_id=7),
     )
@@ -303,6 +306,7 @@ async def test_generate_image_i2i_all_refs_missing(monkeypatch):
 
     result = await generate_image(
         prompt="x",
+        name="test-asset",
         asset_codes=["nonexistent-1", "nonexistent-2"],
         memory_harness=_FakeMemoryHarness(),
     )
@@ -370,6 +374,7 @@ async def test_generate_video_success_with_asset_codes(monkeypatch):
 
     result = await generate_video(
         prompt="角色冲入云海，参考图 1 服装、参考图 2 场景",
+        name="test-asset",
         asset_codes=["img-aaa", "img-bbb"],
         duration=8,
         aspect_ratio="9:16",
@@ -389,6 +394,13 @@ async def test_generate_video_success_with_asset_codes(monkeypatch):
     assert result["aspect_ratio"] == "9:16"
     assert result["generate_audio"] is False
     assert result["reference_codes"] == ["img-aaa", "img-bbb"]
+    # @图片N 映射按 asset_codes 顺序 1-indexed
+    assert result["image_refs"] == {
+        "@图片1": "img-aaa",
+        "@图片2": "img-bbb",
+    }
+    # _FakeMemoryHarness 没装 provider → 反查不到 KV 名 → name_refs 为空
+    assert result["name_refs"] == {}
 
     # 入参透传校验
     assert captured_i2v["prompt"].startswith("角色冲入云海")
@@ -401,6 +413,116 @@ async def test_generate_video_success_with_asset_codes(monkeypatch):
     assert captured_wait["oss_directory"] == "supervisor/videos"
 
 
+def _patch_asset_names_lookup(monkeypatch, *, code_to_name: dict):
+    """绕过 assets.name DB 查询：直接 mock _lookup_asset_names_by_code 返预设映射。"""
+    async def _fake_lookup(*, project_id, codes):
+        return {code: code_to_name[code] for code in codes if code in code_to_name}
+    monkeypatch.setattr(
+        "app.core.tools.media_tools._lookup_asset_names_by_code",
+        _fake_lookup,
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_video_prepends_name_aliases_from_asset_name(monkeypatch):
+    """assets.name 里能反查到名字时，prompt 头部自动注入 ``名=@图片N`` 别名行。"""
+    captured_i2v: dict = {}
+
+    async def _fake_i2v(**kwargs):
+        captured_i2v.update(kwargs)
+        return _FakeVideoTask(id="seed-named", status="processing", video_url=None)
+
+    async def _fake_wait(task_id, *args, **kwargs):
+        return _FakeVideoTask(
+            id=task_id, status="completed",
+            video_url="https://oss/v.mp4", video_duration=5.0,
+        )
+
+    monkeypatch.setattr("app.utils.seedance.seedance_client.image_to_video", _fake_i2v)
+    monkeypatch.setattr(
+        "app.utils.seedance.seedance_client.wait_for_completion", _fake_wait,
+    )
+    _patch_video_asset_lookup(monkeypatch, urls=["https://oss/r1.png", "https://oss/r2.png"])
+    _patch_video_asset_save(monkeypatch, code="vid-named", asset_id=77)
+    # img-xy.name = "萧炎"; img-yl.name = "云岚宗广场"
+    _patch_asset_names_lookup(monkeypatch, code_to_name={"img-xy": "萧炎", "img-yl": "云岚宗广场"})
+
+    from app.core.tools.media_tools import generate_video
+
+    result = await generate_video(
+        prompt="角色冲入云海，镜头缓推",
+        name="test-asset",
+        asset_codes=["img-xy", "img-yl"],
+        memory_harness=_FakeMemoryHarness(),
+    )
+
+    assert result["success"] is True
+    assert result["name_refs"] == {"萧炎": "@图片1", "云岚宗广场": "@图片2"}
+    # prompt 头部已被前置别名行
+    assert captured_i2v["prompt"].startswith("素材引用：萧炎=@图片1，云岚宗广场=@图片2\n\n")
+    assert "角色冲入云海" in captured_i2v["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_generate_video_no_alias_when_assets_have_no_name(monkeypatch):
+    """asset 没填 name → name_refs 为空，prompt 不前置别名行。"""
+    captured_i2v: dict = {}
+
+    async def _fake_i2v(**kwargs):
+        captured_i2v.update(kwargs)
+        return _FakeVideoTask(id="x", status="processing", video_url=None)
+
+    async def _fake_wait(task_id, *args, **kwargs):
+        return _FakeVideoTask(
+            id=task_id, status="completed",
+            video_url="https://oss/v.mp4", video_duration=5.0,
+        )
+
+    monkeypatch.setattr("app.utils.seedance.seedance_client.image_to_video", _fake_i2v)
+    monkeypatch.setattr(
+        "app.utils.seedance.seedance_client.wait_for_completion", _fake_wait,
+    )
+    _patch_video_asset_lookup(monkeypatch, urls=["https://oss/r.png"])
+    _patch_video_asset_save(monkeypatch, code="vid-z", asset_id=1)
+    _patch_asset_names_lookup(monkeypatch, code_to_name={})  # 啥 name 都没有
+
+    from app.core.tools.media_tools import generate_video
+
+    result = await generate_video(
+        prompt="缓推镜头",
+        name="test-asset",
+        asset_codes=["img-anon"],
+        memory_harness=_FakeMemoryHarness(),
+    )
+    assert result["success"] is True
+    assert result["name_refs"] == {}
+    # prompt 原文，没前置素材引用行
+    assert captured_i2v["prompt"] == "缓推镜头"
+
+
+@pytest.mark.asyncio
+async def test_generate_video_rejects_out_of_range_image_ref(monkeypatch):
+    """prompt 引用 @图片3 但只传了 2 张参考图 → fail-fast，不打 Seedance。"""
+    async def _no_i2v(**kwargs):
+        raise AssertionError("越界引用不应触达 seedance")
+
+    monkeypatch.setattr("app.utils.seedance.seedance_client.image_to_video", _no_i2v)
+    _patch_video_asset_lookup(monkeypatch, urls=["https://oss/r1.png", "https://oss/r2.png"])
+
+    from app.core.tools.media_tools import generate_video
+
+    result = await generate_video(
+        prompt="@图片1 与 @图片3 互动",
+        name="test-asset",
+        asset_codes=["img-a", "img-b"],
+        memory_harness=_FakeMemoryHarness(),
+    )
+    assert result.get("ok") is False
+    assert result["error_code"] == "VIDEO_PROMPT_REF_OUT_OF_RANGE"
+    assert result["context"]["out_of_range"] == [3]
+    assert result["context"]["ref_count"] == 2
+
+
 # --------------------------------------------------------------------- #
 # generate_video 校验路径
 # --------------------------------------------------------------------- #
@@ -410,7 +532,7 @@ async def test_generate_video_success_with_asset_codes(monkeypatch):
 async def test_generate_video_missing_project_id_returns_error():
     from app.core.tools.media_tools import generate_video
 
-    result = await generate_video(prompt="x", asset_codes=["img-aaa"])  # 没 memory_harness
+    result = await generate_video(name="test-asset", prompt="x", asset_codes=["img-aaa"])  # 没 memory_harness
     assert result.get("ok") is False
     assert result["error_code"] == "PROJECT_ID_MISSING"
 
@@ -427,6 +549,7 @@ async def test_generate_video_missing_asset_codes_returns_error(monkeypatch):
 
     result = await generate_video(
         prompt="x",
+        name="test-asset",
         asset_codes=None,
         memory_harness=_FakeMemoryHarness(),
     )
@@ -447,6 +570,7 @@ async def test_generate_video_reference_assets_not_found(monkeypatch):
 
     result = await generate_video(
         prompt="x",
+        name="test-asset",
         asset_codes=["img-nope"],
         memory_harness=_FakeMemoryHarness(),
     )
@@ -471,6 +595,7 @@ async def test_generate_video_returns_error_on_submit_exception(monkeypatch):
 
     result = await generate_video(
         prompt="x",
+        name="test-asset",
         asset_codes=["img-aaa"],
         memory_harness=_FakeMemoryHarness(),
     )
@@ -491,6 +616,7 @@ async def test_generate_video_returns_error_on_params_invalid(monkeypatch):
 
     result = await generate_video(
         prompt="x",
+        name="test-asset",
         asset_codes=["img-aaa"],
         duration=20,
         memory_harness=_FakeMemoryHarness(),
@@ -517,6 +643,7 @@ async def test_generate_video_returns_error_when_seedance_fails(monkeypatch):
 
     result = await generate_video(
         prompt="x",
+        name="test-asset",
         asset_codes=["img-aaa"],
         memory_harness=_FakeMemoryHarness(),
     )
@@ -543,6 +670,7 @@ async def test_generate_video_propagates_seedance_internal_timeout(monkeypatch):
 
     result = await generate_video(
         prompt="x",
+        name="test-asset",
         asset_codes=["img-aaa"],
         memory_harness=_FakeMemoryHarness(),
     )
@@ -572,6 +700,7 @@ async def test_generate_video_outer_timeout_kills_hung_subtask(monkeypatch):
 
     result = await generate_video(
         prompt="x",
+        name="test-asset",
         asset_codes=["img-aaa"],
         memory_harness=_FakeMemoryHarness(),
     )

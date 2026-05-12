@@ -34,10 +34,23 @@ Evolink（Kling AI）视频生成工具。
         image_urls=["https://oss.example.com/style_ref.png"],
     )
 
-    # 轮询任务状态
-    result = await evolink_client.get_task(task.id)
+    # GPT-Image-2 图像生成（文生图 / 图生图统一）
+    img_task = await evolink_client.image_generation(
+        prompt="一只穿宇航服的猫漂浮在太空中",
+        resolution="2K",
+        quality="high",
+        n=2,
+    )
+
+    # 轮询任务状态（image / video 共用同一个 wait_for_completion）
+    result = await evolink_client.wait_for_completion(
+        task.id,
+        upload_to_oss=True,
+        oss_directory="workspace/videos",
+        oss_filename_prefix="shot-001",
+    )
     if result.status == "completed":
-        print(result.video_url)
+        print(result.results)   # 全部产物 URL（image: N 张 / video: 通常 1 个）
 """
 
 import asyncio
@@ -57,6 +70,14 @@ logger = logging.getLogger(__name__)
 
 TEXT_TO_VIDEO_MODEL = "kling-o3-text-to-video"
 IMAGE_TO_VIDEO_MODEL = "kling-o3-image-to-video"
+GPT_IMAGE_2_MODEL = "gpt-image-2"
+
+# GPT-Image-2 允许的枚举值（来自官方 doc；服务端最终校验，提前 raise 让上层错误更清晰）
+_GPT_IMAGE_RESOLUTIONS = {"1K", "2K", "4K"}
+_GPT_IMAGE_QUALITIES = {"low", "medium", "high"}
+_GPT_IMAGE_MAX_PROMPT_LEN = 32000
+_GPT_IMAGE_MAX_N = 10
+_GPT_IMAGE_MAX_REF_IMAGES = 16
 
 
 class MultiShotPrompt(BaseModel):
@@ -81,19 +102,55 @@ class ModelParams(BaseModel):
 class TaskInfo(BaseModel):
     can_cancel: Optional[bool] = None
     estimated_time: Optional[float] = None   # 预计剩余秒数
+    # video 任务在 task_info 里返回 video_duration；image 任务没有
+    video_duration: Optional[float] = None
 
 
-class VideoTask(BaseModel):
-    """任务创建或查询的返回结果。"""
+class TaskUsage(BaseModel):
+    """Evolink 任务计费信息（创建任务时返回，image / video 共用形态）。"""
+    billing_rule: Optional[str] = None       # per_call / per_token / per_second
+    credits_reserved: Optional[float] = None
+    user_group: Optional[str] = None
+
+
+class EvolinkTask(BaseModel):
+    """Evolink 任务对象（image / video 共用）。
+
+    Evolink 网关把图像与视频任务形态完全对齐，``type`` 字段是唯一区分：
+    ``"image"`` 时 ``results`` 是 N 张图片 URL（长度 = 入参 n）；
+    ``"video"`` 时 ``results`` 通常 1 个视频 URL。
+    所有 URL **24 小时失效**，要存就 ``upload_to_oss=True`` 转 OSS 永久链接。
+
+    历史代码里有 ``VideoTask`` / ``ImageTask`` 两个名字 → 现在都是本类的别名。
+    """
     id: str = Field(..., description="任务 ID")
     status: str = Field(..., description="pending / processing / completed / failed")
     progress: int = Field(0, description="进度 0-100")
     model: Optional[str] = None
     created: Optional[int] = None
-    video_duration: Optional[float] = None   # 视频总时长（秒），顶层字段
+    type: Optional[str] = Field(None, description='"image" 或 "video"，网关自动设置')
+    object: Optional[str] = Field(None, description='"image.generation.task" / "video.generation.task"')
     task_info: Optional[TaskInfo] = None
-    video_url: Optional[str] = None          # 生成完成后的视频链接（24 小时有效）
-    results: list[str] = Field(default_factory=list, description="视频 URL 列表（completed 后有值）")
+    usage: Optional[TaskUsage] = None
+    results: list[str] = Field(default_factory=list, description="产物 URL 列表（completed 后有值，24h 失效）")
+
+    # 向下兼容字段：仅 video 任务顶层会带 video_duration（Kling 风格响应）；
+    # video_url / image_url 是 results[0] 的便捷别名，让现有调用方少改。
+    video_duration: Optional[float] = None
+    video_url: Optional[str] = None
+    image_url: Optional[str] = None
+
+    @property
+    def url(self) -> Optional[str]:
+        """统一便捷访问 ``results[0]``。type=image/video 都返同样语义的第一个产物 URL。"""
+        return self.results[0] if self.results else None
+
+
+# 向下兼容别名：上游 import VideoTask / ImageTask 的地方继续可用
+VideoTask = EvolinkTask
+ImageTask = EvolinkTask
+# 旧 ImageUsage 别名（生成图像时返回的 usage 块原叫这个，现已合并到 TaskUsage）
+ImageUsage = TaskUsage
 
 
 # ---------------------------------------------------------------------------
@@ -243,30 +300,49 @@ class EvolinkClient:
         raise RuntimeError(msg)
 
     @staticmethod
-    def _parse_task(data: dict) -> VideoTask:
-        """从响应 JSON 解析 VideoTask。
+    def _parse_task(data: dict) -> EvolinkTask:
+        """从响应 JSON 解析 ``EvolinkTask``（image / video 共用）。
 
-        实际响应结构：
-          - results: [url, ...]   视频链接数组
-          - video_duration:       视频时长，顶层字段
-          - task_info:            { can_cancel, estimated_time }
+        Evolink 网关把两种任务形态对齐，只看 ``type`` 字段区分：
+          - results: [url, ...]   产物 URL 列表（image n=多张 / video 通常 1 张）
+          - type:                 "image" / "video"
+          - task_info:            { can_cancel, estimated_time, video_duration? }
+          - usage:                { billing_rule, credits_reserved, user_group }
+          - video_duration:       仅 Kling 视频任务顶层附带（其它 None）
         """
         task_info_raw = data.get("task_info") or {}
-        task_info = TaskInfo(**{k: v for k, v in task_info_raw.items() if k in TaskInfo.model_fields}) if task_info_raw else None
+        task_info = (
+            TaskInfo(**{k: v for k, v in task_info_raw.items() if k in TaskInfo.model_fields})
+            if task_info_raw
+            else None
+        )
+
+        usage_raw = data.get("usage") or {}
+        usage = (
+            TaskUsage(**{k: v for k, v in usage_raw.items() if k in TaskUsage.model_fields})
+            if usage_raw
+            else None
+        )
 
         results: list[str] = data.get("results") or []
-        video_url = results[0] if results else None
+        first_url = results[0] if results else None
+        task_type = data.get("type")  # "image" / "video" / None
 
-        return VideoTask(
+        return EvolinkTask(
             id=data["id"],
             status=data.get("status", "pending"),
             progress=data.get("progress", 0),
             model=data.get("model"),
             created=data.get("created"),
-            video_duration=data.get("video_duration"),
+            type=task_type,
+            object=data.get("object"),
             task_info=task_info,
-            video_url=video_url,
+            usage=usage,
             results=results,
+            video_duration=data.get("video_duration"),
+            # 按 type 填便捷字段：让现有 `task.video_url` / `task.image_url` 调用方继续可用
+            video_url=first_url if task_type == "video" else None,
+            image_url=first_url if task_type == "image" else None,
         )
 
     # -----------------------------------------------------------------------
@@ -380,21 +456,120 @@ class EvolinkClient:
         }
         return await self._post_generation(payload)
 
-    async def get_task(self, task_id: str) -> VideoTask:
-        """查询视频生成任务状态。
+    async def get_task(self, task_id: str) -> EvolinkTask:
+        """查询任务状态（image / video 共用）。
 
         Args:
-            task_id: text_to_video / image_to_video 返回的任务 ID。
+            task_id: ``image_generation`` / ``text_to_video`` / ``image_to_video`` 返回的任务 ID。
 
         Returns:
-            VideoTask，status 为 completed 时 video_url 有值（24 小时有效）。
+            ``EvolinkTask``，status 为 completed 时 ``results`` 有值（URL 24 小时有效）。
 
         Note:
-            Evolink 统一任务查询端点: GET /v1/tasks/{task_id}
+            Evolink 网关统一任务查询端点: ``GET /v1/tasks/{task_id}``，
+            image / video 任务形态对齐，仅 ``type`` 字段区分。
         """
         response = await self._request("GET", f"/v1/tasks/{task_id}")
         self._raise_for_status(response)
         return self._parse_task(response.json())
+
+    # -----------------------------------------------------------------------
+    # GPT-Image-2 图像生成（同样走 Evolink 网关 + 异步 task 轮询）
+    # -----------------------------------------------------------------------
+
+    async def image_generation(
+        self,
+        *,
+        prompt: str,
+        image_urls: Optional[list[str]] = None,
+        size: Optional[str] = None,
+        resolution: str = "1K",
+        quality: str = "medium",
+        n: int = 1,
+        callback_url: Optional[str] = None,
+    ) -> EvolinkTask:
+        """GPT-Image-2 图像生成（文生图 / 图生图 / 编辑统一接口）。
+
+        ``image_urls`` 不传 → 纯 text-to-image；传 1-16 张 → 走 image-to-image
+        / 编辑（具体语义由 prompt 决定，如 "Add a cute cat next to her"）。
+
+        Args:
+            prompt:        画面描述或编辑指令（≤32000 字符；中英文都行）。
+            image_urls:    参考图 URL 列表（0-16 张；.jpeg/.jpg/.png/.webp；≤50MB/张）。
+                           可传则走 image-to-image / 编辑；不传则纯文生图。
+            size:          画幅，支持比例（"1:1" / "16:9"）或显式像素（"1024x1024"）。
+                           ``None`` / ``"auto"`` 让模型自决；显式像素时 ``resolution`` 忽略。
+            resolution:    分辨率档位 ``"1K"`` / ``"2K"`` / ``"4K"``，默认 ``"1K"``。
+            quality:       渲染质量 ``"low"`` / ``"medium"``（默认）/ ``"high"``。
+                           更高耗费更多 credit。
+            n:             生成张数，1-10，默认 1。
+            callback_url:  HTTPS 回调地址（可选）。
+
+        Returns:
+            初始 ``EvolinkTask``（status=pending, type="image"），用 ``wait_for_completion``
+            拿成品 URL。
+
+        Note:
+            生成的图片 URL 24 小时失效，需及时下载或 ``upload_to_oss=True`` 转永久 URL。
+        """
+        self._validate_image_generation(
+            prompt=prompt,
+            image_urls=image_urls,
+            resolution=resolution,
+            quality=quality,
+            n=n,
+        )
+
+        payload: dict = {
+            "model": GPT_IMAGE_2_MODEL,
+            "prompt": prompt,
+            "resolution": resolution,
+            "quality": quality,
+            "n": n,
+        }
+        if size:
+            payload["size"] = size
+        if image_urls:
+            payload["image_urls"] = list(image_urls)
+        if callback_url:
+            payload["callback_url"] = callback_url
+
+        import json as _json
+        logger.info("Evolink GPT-Image-2 请求 payload: %s", _json.dumps(payload, ensure_ascii=False, indent=2))
+
+        response = await self._request("POST", "/v1/images/generations", json=payload)
+        self._raise_for_status(response)
+        return self._parse_task(response.json())
+
+    @staticmethod
+    def _validate_image_generation(
+        *,
+        prompt: str,
+        image_urls: Optional[list[str]],
+        resolution: str,
+        quality: str,
+        n: int,
+    ) -> None:
+        if not prompt or not prompt.strip():
+            raise ValueError("prompt 不能为空")
+        if len(prompt) > _GPT_IMAGE_MAX_PROMPT_LEN:
+            raise ValueError(
+                f"prompt 超过 {_GPT_IMAGE_MAX_PROMPT_LEN} 字符上限（当前 {len(prompt)}）"
+            )
+        if image_urls is not None and len(image_urls) > _GPT_IMAGE_MAX_REF_IMAGES:
+            raise ValueError(
+                f"image_urls 最多 {_GPT_IMAGE_MAX_REF_IMAGES} 张（当前 {len(image_urls)}）"
+            )
+        if not (1 <= n <= _GPT_IMAGE_MAX_N):
+            raise ValueError(f"n 必须在 1-{_GPT_IMAGE_MAX_N}（当前 {n}）")
+        if resolution not in _GPT_IMAGE_RESOLUTIONS:
+            raise ValueError(
+                f"resolution 必须是 {sorted(_GPT_IMAGE_RESOLUTIONS)} 之一（当前 {resolution!r}）"
+            )
+        if quality not in _GPT_IMAGE_QUALITIES:
+            raise ValueError(
+                f"quality 必须是 {sorted(_GPT_IMAGE_QUALITIES)} 之一（当前 {quality!r}）"
+            )
 
     async def wait_for_completion(
         self,
@@ -403,24 +578,45 @@ class EvolinkClient:
         *,
         upload_to_oss: bool = False,
         oss_directory: Optional[str] = None,
-        oss_filename: Optional[str] = None,
-    ) -> VideoTask:
-        """轮询任务直到完成或失败（无超时）。
+        oss_filename_prefix: Optional[str] = None,
+        max_wait_seconds: Optional[float] = None,
+    ) -> EvolinkTask:
+        """轮询任务直到完成 / 失败 / 超过 ``max_wait_seconds``（image / video 共用）。
+
+        Evolink 网关把图像与视频任务对齐到同一接口 ``/v1/tasks/{id}``，仅 ``type``
+        区分。本方法对两种任务都适用——OSS 上传时 ``task.results`` 里全部 URL 一起转。
 
         Args:
-            task_id:       要等待的任务 ID。
-            poll_interval: 每次轮询间隔（秒），默认 5 秒。
-            upload_to_oss: 是否自动下载视频并上传到 OSS（获取永久 URL）。
-            oss_directory: OSS 目标目录，如 "videos/shots"。
-            oss_filename: OSS 文件名，如 "shot_001.mp4"。
+            task_id:             ``image_generation`` / ``text_to_video`` / ``image_to_video``
+                                 返回的任务 ID。
+            poll_interval:       每次轮询间隔（秒），默认 5。图像通常 10-60s，视频更长。
+            upload_to_oss:       完成后是否把所有 ``results`` 下载并上传 OSS 转永久 URL。
+            oss_directory:       OSS 目标目录，如 ``"workspace/images"`` / ``"supervisor/videos"``。
+            oss_filename_prefix: OSS 文件名前缀。
+                                 - 视频 / 单图（n=1）：用前缀作为文件名，扩展名按 ``type`` 自动推断
+                                   （image→.png, video→.mp4）。
+                                 - 多图（n>1）：每张在尾部加 ``-1`` / ``-2`` 后缀。
+                                 ``None`` 时由 OSS 客户端按 URL 自动命名。
+            max_wait_seconds:    最长等待时长（秒）。``None``（默认）= 不超时（视频常用）；
+                                 显式传值时超时抛 ``TimeoutError``。
 
         Returns:
-            完成的 VideoTask。如果 upload_to_oss=True，video_url 为永久 URL。
+            完成的 ``EvolinkTask``。``upload_to_oss=True`` 时 ``results`` 全部为永久 URL；
+            ``video_url`` / ``image_url`` 便捷字段也同步更新。
 
         Raises:
-            RuntimeError: 任务以 failed 状态结束。
+            RuntimeError:  任务以 failed 状态结束。
+            TimeoutError:  ``max_wait_seconds`` 设了值且超过仍未完成。
         """
+        loop = asyncio.get_event_loop()
+        deadline = (loop.time() + max_wait_seconds) if max_wait_seconds is not None else None
+
         while True:
+            if deadline is not None and loop.time() >= deadline:
+                raise TimeoutError(
+                    f"Evolink 任务 {task_id} 超过 {max_wait_seconds:.0f}s 未完成"
+                )
+
             try:
                 task = await self.get_task(task_id)
             except ConnectionError as exc:
@@ -432,33 +628,66 @@ class EvolinkClient:
                 continue
 
             logger.debug(
-                "Evolink 任务 %s 状态: %s  进度: %s%%",
-                task_id, task.status, task.progress,
+                "Evolink 任务 %s (type=%s) 状态: %s  进度: %s%%",
+                task_id, task.type, task.status, task.progress,
             )
+
             if task.status == "completed":
-                if upload_to_oss and task.video_url:
-                    from app.utils.oss import oss_client
-                    permanent_url = oss_client.download_and_upload(
-                        task.video_url,
+                if upload_to_oss and task.results:
+                    permanent_urls = await self._upload_results_to_oss(
+                        task=task,
                         directory=oss_directory,
-                        filename=oss_filename,
+                        filename_prefix=oss_filename_prefix,
                     )
-                    logger.info("视频已上传到 OSS：%s", permanent_url)
-                    task = VideoTask(
-                        id=task.id,
-                        status=task.status,
-                        progress=task.progress,
-                        model=task.model,
-                        created=task.created,
-                        video_duration=task.video_duration,
-                        task_info=task.task_info,
-                        video_url=permanent_url,
-                        results=[permanent_url],
-                    )
+                    task = task.model_copy(update={
+                        "results": permanent_urls,
+                        "image_url": permanent_urls[0] if task.type == "image" else None,
+                        "video_url": permanent_urls[0] if task.type == "video" else None,
+                    })
                 return task
+
             if task.status == "failed":
                 raise RuntimeError(f"Evolink 任务 {task_id} 失败")
+
             await asyncio.sleep(poll_interval)
+
+    @staticmethod
+    async def _upload_results_to_oss(
+        *,
+        task: EvolinkTask,
+        directory: Optional[str],
+        filename_prefix: Optional[str],
+    ) -> list[str]:
+        """把 ``task.results`` 全部下载并上传 OSS，返回永久 URL 列表。
+
+        命名规则（仅当 ``filename_prefix`` 给出时）：
+        - 单 URL：``{prefix}.{ext}``
+        - 多 URL：``{prefix}-1.{ext}`` / ``{prefix}-2.{ext}`` ...
+        扩展名按 ``task.type`` 推断：image → png，video → mp4。
+        """
+        from app.utils.oss import oss_client
+
+        ext = "png" if task.type == "image" else "mp4"
+        permanent_urls: list[str] = []
+        n = len(task.results)
+
+        for idx, url in enumerate(task.results, start=1):
+            filename = None
+            if filename_prefix:
+                suffix = f"-{idx}" if n > 1 else ""
+                filename = f"{filename_prefix}{suffix}.{ext}"
+            permanent = oss_client.download_and_upload(
+                url,
+                directory=directory,
+                filename=filename,
+            )
+            permanent_urls.append(permanent)
+
+        logger.info(
+            "Evolink 任务 %s 已上传 %d 个产物到 OSS：%s",
+            task.id, len(permanent_urls), permanent_urls,
+        )
+        return permanent_urls
 
 
 # 全局单例，直接 import 使用

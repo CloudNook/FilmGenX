@@ -22,7 +22,7 @@ import {
 import { projectsApi } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -794,36 +794,41 @@ export default function WorkspacePage({
               <div className="max-w-3xl mx-auto">
                 <div className="flex items-end gap-3">
                   <div className="flex-1 bg-secondary rounded-2xl border border-border focus-within:border-primary/50 transition-colors">
-                    <div className="flex items-center gap-2 px-4 py-3">
-                      <Input
-                        value={inputValue}
-                        onChange={(e) => setInputValue(e.target.value)}
-                        onKeyDown={(e) => {
-                          // IME（如中文输入法）组词期间回车是"确认候选词"，不应触发发送。
-                          if (
-                            e.key === 'Enter' &&
-                            !e.shiftKey &&
-                            !e.nativeEvent.isComposing &&
-                            e.keyCode !== 229
-                          ) {
-                            e.preventDefault();
-                            handleSendMessage();
-                          }
-                        }}
-                        placeholder={
-                          selectedWsId
-                            ? '描述你的创作需求...'
-                            : '请先选择或创建一个工作台'
+                    {/*
+                      shadcn Textarea 自带 ``field-sizing-content``（现代 CSS：Chrome 123+ / Safari TP /
+                      Edge 已支持），高度自动跟随内容增长，无需 JS。这里只设上下限：
+                      ``min-h-[44px]`` 单行高度，``max-h-48`` 上限后内部滚动避免把对话区挤掉。
+                      ``resize-none`` 禁掉手动拖动；``shadow-none`` / ``border-0`` 让它融入外层圆角容器。
+                    */}
+                    <Textarea
+                      value={inputValue}
+                      onChange={(e) => setInputValue(e.target.value)}
+                      onKeyDown={(e) => {
+                        // Enter 发送；Shift+Enter 换行；IME 组词期间回车不触发发送。
+                        if (
+                          e.key === 'Enter' &&
+                          !e.shiftKey &&
+                          !e.nativeEvent.isComposing &&
+                          e.keyCode !== 229
+                        ) {
+                          e.preventDefault();
+                          handleSendMessage();
                         }
-                        disabled={!selectedWsId || isStreaming}
-                        className="flex-1 border-0 bg-transparent focus-visible:ring-0 px-0"
-                      />
-                    </div>
+                      }}
+                      placeholder={
+                        selectedWsId
+                          ? '描述你的创作需求...（Shift+Enter 换行，Enter 发送）'
+                          : '请先选择或创建一个工作台'
+                      }
+                      disabled={!selectedWsId || isStreaming}
+                      rows={1}
+                      className="min-h-[44px] max-h-48 resize-none border-0 bg-transparent px-4 py-3 shadow-none focus-visible:ring-0 focus-visible:border-0 leading-relaxed"
+                    />
                   </div>
                   <Button
                     onClick={handleSendMessage}
                     disabled={!inputValue.trim() || isStreaming || !selectedWsId}
-                    className="h-12 w-12 rounded-full bg-primary text-primary-foreground hover:bg-primary/90"
+                    className="h-12 w-12 rounded-full bg-primary text-primary-foreground hover:bg-primary/90 shrink-0"
                   >
                     {isStreaming ? (
                       <Loader2 className="h-5 w-5 animate-spin" />

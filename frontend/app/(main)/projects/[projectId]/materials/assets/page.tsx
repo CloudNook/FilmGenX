@@ -99,14 +99,20 @@ export default function AssetsPage({
     loadData();
   }, [loadData]);
 
+  // 卡片 / 列表展示用的标题：优先 name（人话标签），兜底 asset_code（技术 ID）
+  const displayLabel = (asset: AssetResponse): string =>
+    asset.name?.trim() || asset.asset_code;
+
   // Filter assets
   const filteredAssets = assets.filter((asset) => {
     const matchesType = typeFilter === 'all' || asset.asset_type === typeFilter;
     const matchesSource = sourceFilter === 'all' || asset.source === sourceFilter;
+    const q = searchQuery.toLowerCase();
     const matchesSearch =
-      !searchQuery ||
-      asset.asset_code.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (asset.description?.toLowerCase().includes(searchQuery.toLowerCase()) ?? false);
+      !q ||
+      asset.asset_code.toLowerCase().includes(q) ||
+      (asset.name?.toLowerCase().includes(q) ?? false) ||
+      (asset.description?.toLowerCase().includes(q) ?? false);
     return matchesType && matchesSource && matchesSearch;
   });
 
@@ -365,7 +371,7 @@ export default function AssetsPage({
                     {asset.asset_type === 'image' || asset.asset_type === 'reference' ? (
                       <img
                         src={asset.file_url}
-                        alt={asset.asset_code}
+                        alt={displayLabel(asset)}
                         className="w-full h-full object-cover transition-transform group-hover:scale-105"
                       />
                     ) : asset.asset_type === 'video' ? (
@@ -427,9 +433,18 @@ export default function AssetsPage({
                     </div>
                   </div>
                   <CardContent className="p-3">
-                    <p className="text-sm font-medium text-foreground truncate" title={asset.asset_code}>
-                      {asset.asset_code}
+                    {/* 主标题用 name（人话），副标题用 asset_code（技术 ID）；hover title 双显 */}
+                    <p
+                      className="text-sm font-medium text-foreground truncate"
+                      title={`${displayLabel(asset)}\n${asset.asset_code}`}
+                    >
+                      {displayLabel(asset)}
                     </p>
+                    {asset.name && (
+                      <p className="text-[10px] text-muted-foreground/70 truncate font-mono">
+                        {asset.asset_code}
+                      </p>
+                    )}
                     <div className="flex items-center justify-between mt-1">
                       <Badge variant="outline" className="text-xs">
                         {getAssetTypeLabel(asset.asset_type)}
@@ -505,8 +520,13 @@ export default function AssetsPage({
                           </td>
                           <td className="p-3">
                             <p className="text-sm font-medium text-foreground">
-                              {asset.asset_code}
+                              {displayLabel(asset)}
                             </p>
+                            {asset.name && (
+                              <p className="text-[10px] text-muted-foreground/70 font-mono">
+                                {asset.asset_code}
+                              </p>
+                            )}
                           </td>
                           <td className="p-3">
                             <Badge variant="outline">{getAssetTypeLabel(asset.asset_type)}</Badge>
@@ -583,7 +603,7 @@ export default function AssetsPage({
                   <div className="aspect-video relative bg-secondary/30 rounded-lg overflow-hidden">
                     <img
                       src={selectedAsset.file_url}
-                      alt={selectedAsset.asset_code}
+                      alt={displayLabel(selectedAsset)}
                       className="w-full h-full object-contain"
                     />
                   </div>
@@ -618,7 +638,11 @@ export default function AssetsPage({
                 <div className="grid grid-cols-2 gap-4 text-sm">
                   <div>
                     <p className="text-muted-foreground">名称</p>
-                    <p className="font-medium">{selectedAsset.asset_code}</p>
+                    <p className="font-medium">{displayLabel(selectedAsset)}</p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground">Asset Code</p>
+                    <p className="font-mono text-xs">{selectedAsset.asset_code}</p>
                   </div>
                   <div>
                     <p className="text-muted-foreground">类型</p>

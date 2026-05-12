@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any, Dict, Optional
 
 from app.core.agent.tool_errors import tool_error
@@ -50,6 +51,9 @@ _SUPPORTED_IMAGE_MODELS = {
         "**Agent 永远只看 asset_code，不看 URL**。出图成功后工具自动把新图保存到 ``assets`` 表并**自动分配 asset_code**（``img-<uuid>``），通过返回值给你。把返回的 code 写进 JSON / 后续 i2i 调用即可。\n\n"
         "Args:\n"
         "  prompt: 中文图像提示词\n"
+        "  name: **必填**——人类可读名字，用于前端卡片标题 + 下游 generate_video 自动桥接 Seedance prompt 别名。\n"
+        "    示例：角色三视图填 '萧炎'；场景图填 '云岚宗广场'；表情变体填 '萧炎-愤怒'；"
+        "测试图至少给个描述性标签如 '夜景街道-测试'。**不能省略**，留空会让前端展示退回到 asset_code（一串 hex）。\n"
         "  asset_codes: 参考图 asset_code 列表，最多 5 个。**传了就走 i2i**\n"
         "  description: 给新 asset 的人话描述（如 '萧炎三视图基础锚'）\n"
         "  tags: 新 asset 的 tags（如 ['character', '萧炎', 'three_view']）\n"
@@ -63,6 +67,7 @@ _SUPPORTED_IMAGE_MODELS = {
 )
 async def generate_image(
     prompt: str,
+    name: str,
     asset_codes: Optional[list[str]] = None,
     description: Optional[str] = None,
     tags: Optional[list[str]] = None,
@@ -195,6 +200,7 @@ async def generate_image(
             generator=model,
             description=description,
             tags=normalized_tags,
+            name=name,
         )
     except Exception as exc:
         logger.exception("[media_tools] 保存 asset 异常")
@@ -214,6 +220,267 @@ async def generate_image(
         "mime_type": result.mime_type,
         "aspect_ratio": aspect_ratio,
         "image_size": image_size,
+    }
+
+
+# ----------------------------------------------------------------------
+# generate_image_evolink —— GPT-Image-2 测试工具
+#
+# 与 generate_image 并行注册，方便 workspace agent A/B 对比：
+#   - generate_image:        Gemini 原生（直接拿 image bytes，同步）
+#   - generate_image_evolink: Evolink GPT-Image-2（异步任务，URL 返回 + 24h 失效）
+#
+# 与 generate_image 的核心差异：
+#   1. 模型：gpt-image-2（vs gemini-3-pro-image-preview / flash）
+#   2. i2i 入参形态：传 URL（vs Gemini 拿 bytes 再喂模型）
+#   3. 支持 n>1：单次出多张图供挑选
+#   4. quality / resolution 显式分档（low/medium/high × 1K/2K/4K）
+# ----------------------------------------------------------------------
+
+_EVOLINK_IMAGE_TIMEOUT_SECONDS = 600.0  # GPT-Image-2 实测有时排队较久，10 分钟兜底
+_EVOLINK_IMAGE_MAX_N = 5  # 工具内部限制：测试场景超过 5 张意义不大且费配额
+
+
+@register_tool(
+    name="generate_image_evolink",
+    description=(
+        "图像生成（Evolink GPT-Image-2，**测试工具**，与 generate_image 并行）。"
+        "**两种模式自动切换**：\n"
+        "  - 图生图（image-to-image）：``asset_codes`` 传 1-16 个已有 asset_code → 工具解析为 URL "
+        "传给 Evolink；提示词里指明编辑意图（如 '把场景改成雨夜，加一把伞'）\n"
+        "  - 文生图（text-to-image）：``asset_codes`` 不传 / 空 → 纯 prompt 出图\n\n"
+        "**Agent 永远只看 asset_code，不看 URL**。出图成功后工具自动把每张新图保存到 ``assets`` 表"
+        "并**自动分配 asset_code**（``img-<uuid>``），通过返回值给你。\n\n"
+        "Args:\n"
+        "  prompt: 中文或英文图像提示词，≤32000 字符\n"
+        "  name: **必填**——人类可读名字（如 '萧炎'、'云岚宗广场'、'夜景街道-测试'）。"
+        "前端用它做卡片标题，下游 generate_video 用它做 Seedance prompt 别名桥接。"
+        "n>1 时所有新 asset 共用同一个 name（每张自动加 -1 / -2 后缀避免重名）。**不能省略**。\n"
+        "  asset_codes: 参考图 asset_code 列表，最多 16 个。**传了就走 i2i**\n"
+        "  description: 给新 asset 的人话描述（n>1 时所有新 asset 共用）\n"
+        "  tags: 新 asset 的 tags\n"
+        "  aspect_ratio: '1:1' / '16:9' / '9:16' / '4:3' / '3:4' 或像素 '1024x1024'，默认 '1:1'\n"
+        "  resolution: '1K'（默认）/ '2K' / '4K'\n"
+        "  quality: 'low' / 'medium'（默认）/ 'high'\n"
+        "  n: 生成张数，1-5，默认 1\n"
+        "Returns:\n"
+        "  {success: True, asset_code, asset_codes, asset_id, asset_ids, url, urls, "
+        "mode: 'text2image'|'image2image', model: 'gpt-image-2', task_id, ...}；"
+        "失败返回 tool_error。\n"
+        "Note: 内部 10 分钟硬超时（Evolink GPT-Image-2 排队情况下偶尔会拖长）。"
+    ),
+)
+async def generate_image_evolink(
+    prompt: str,
+    name: str,
+    asset_codes: Optional[list[str]] = None,
+    description: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    aspect_ratio: str = "1:1",
+    resolution: str = "1K",
+    quality: str = "medium",
+    n: int = 1,
+    *,
+    memory_harness: Optional[Any] = None,
+) -> Dict[str, Any]:
+    project_id = _resolve_project_id(memory_harness)
+    if project_id is None:
+        return tool_error(
+            error_code="PROJECT_ID_MISSING",
+            message="无法解析 project_id —— memory_harness 未挂载或 scope_metadata 缺 domain_id",
+            hint="确保 supervisor / sub-agent 是带 memory 启动的（memory_enabled=True 且 domain_id 已注入）",
+        )
+
+    if not (1 <= n <= _EVOLINK_IMAGE_MAX_N):
+        return tool_error(
+            error_code="N_OUT_OF_RANGE",
+            message=f"n 必须在 1-{_EVOLINK_IMAGE_MAX_N}（当前 {n}）",
+            hint="测试用工具，单次最多 5 张避免烧配额",
+        )
+
+    ref_codes = _normalize_str_list(asset_codes)
+    if ref_codes is _BAD_TYPE_SENTINEL:
+        return tool_error(
+            error_code="ASSET_CODES_BAD_TYPE",
+            message=f"asset_codes 必须是 string 数组，收到 {type(asset_codes).__name__}: {asset_codes!r}",
+            hint="i2i 时传一个 list 即可，如 asset_codes=['img-abc123']",
+        )
+    mode = "image2image" if ref_codes else "text2image"
+    normalized_tags = _normalize_str_list(tags)
+    if normalized_tags is _BAD_TYPE_SENTINEL:
+        normalized_tags = []
+
+    # 1) i2i 解析 asset_code → URL（Evolink 直接消费 URL，不需要拉字节）
+    ref_urls: list[str] = []
+    if mode == "image2image":
+        try:
+            ref_urls, missing_codes = await _resolve_asset_urls_by_code(
+                project_id=project_id, codes=ref_codes
+            )
+        except Exception as exc:
+            logger.exception("[media_tools] evolink: 解析参考 asset URL 异常")
+            return tool_error(
+                error_code="REFERENCE_FETCH_EXCEPTION",
+                message=f"解析参考 asset 异常：{exc}",
+                context={"asset_codes": ref_codes},
+            )
+        if not ref_urls:
+            return tool_error(
+                error_code="REFERENCE_ASSETS_NOT_FOUND",
+                message=f"asset_codes {ref_codes} 在 project_id={project_id} 下都查不到",
+                hint="检查 code 是否正确；或先用 t2i 出基础图（不传 asset_codes）再用其 code",
+                context={"asset_codes": ref_codes, "missing": missing_codes},
+            )
+
+    # 2) 包整个流程在 10 分钟硬上限里
+    try:
+        return await asyncio.wait_for(
+            _run_evolink_image_generation(
+                project_id=project_id,
+                prompt=prompt,
+                ref_urls=ref_urls or None,
+                aspect_ratio=aspect_ratio,
+                resolution=resolution,
+                quality=quality,
+                n=n,
+                mode=mode,
+                ref_codes=ref_codes,
+                description=description,
+                tags=normalized_tags,
+                name=name,
+            ),
+            timeout=_EVOLINK_IMAGE_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        return tool_error(
+            error_code="IMAGE_TOOL_TIMEOUT",
+            message=f"图像生成超过 {_EVOLINK_IMAGE_TIMEOUT_SECONDS:.0f}s 仍未完成",
+            hint="可能 Evolink 排队或 OSS 上传卡住；稍后重试",
+        )
+
+
+async def _run_evolink_image_generation(
+    *,
+    project_id: int,
+    prompt: str,
+    ref_urls: Optional[list[str]],
+    aspect_ratio: str,
+    resolution: str,
+    quality: str,
+    n: int,
+    mode: str,
+    ref_codes: list[str],
+    description: Optional[str],
+    tags: list[str],
+    name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """generate_image_evolink 主流程，拆出来配合 asyncio.wait_for 总超时。"""
+    from app.utils.evolink import evolink_client
+
+    # 1) 提交 Evolink 任务
+    try:
+        task = await evolink_client.image_generation(
+            prompt=prompt,
+            image_urls=ref_urls,
+            size=aspect_ratio,
+            resolution=resolution,
+            quality=quality,
+            n=n,
+        )
+    except ValueError as exc:
+        # 入参越界 / 不合法
+        return tool_error(
+            error_code="IMAGE_PARAMS_INVALID",
+            message=f"Evolink 入参不合法：{exc}",
+            hint="检查 aspect_ratio / resolution / quality / n 是否在允许范围",
+        )
+    except Exception as exc:
+        logger.exception("[media_tools] evolink image_generation 提交异常 mode=%s", mode)
+        return tool_error(
+            error_code="IMAGE_SUBMIT_FAILED",
+            message=f"Evolink 任务提交失败：{exc}",
+            hint="检查 EVOLINK_API_KEY 或稍后重试",
+        )
+
+    # 2) 轮询完成 + OSS 上传（拿永久 URL，Evolink 链接 24h 失效）
+    try:
+        finished = await evolink_client.wait_for_completion(
+            task.id,
+            poll_interval=3.0,
+            upload_to_oss=True,
+            oss_directory=_DEFAULT_IMAGE_DIR,
+        )
+    except TimeoutError as exc:
+        return tool_error(
+            error_code="IMAGE_GEN_TIMEOUT",
+            message=str(exc),
+            hint="Evolink 服务端排队；稍后重试",
+            context={"task_id": task.id},
+        )
+    except Exception as exc:
+        logger.exception("[media_tools] evolink 任务等待异常 task_id=%s", task.id)
+        return tool_error(
+            error_code="IMAGE_GEN_FAILED",
+            message=f"Evolink 任务执行失败：{exc}",
+            hint="检查任务详情或调整 prompt 后重试",
+            context={"task_id": task.id},
+        )
+
+    if finished.status != "completed" or not finished.results:
+        return tool_error(
+            error_code="IMAGE_GEN_FAILED",
+            message=f"Evolink 任务结束但未拿到图片 URL（status={finished.status}）",
+            context={"task_id": finished.id, "status": finished.status},
+        )
+
+    # 3) 落 Asset 表（n 张分别落 + 分配 vid-style img-<uuid> 句柄）
+    saved_codes: list[str] = []
+    saved_ids: list[int] = []
+    try:
+        n_results = len(finished.results)
+        for idx, url in enumerate(finished.results, start=1):
+            # n>1 时给每张 name 加 -1 / -2 后缀避免重名（"萧炎" → "萧炎-1"、"萧炎-2"）
+            row_name: Optional[str] = None
+            if name:
+                row_name = f"{name}-{idx}" if n_results > 1 else name
+            code, asset_id = await _save_image_asset(
+                project_id=project_id,
+                file_url=url,
+                file_format="png",  # GPT-Image-2 默认 PNG
+                file_size_bytes=None,
+                generator="gpt-image-2",
+                description=description,
+                tags=[*tags, f"evolink", f"mode:{mode}"],
+                name=row_name,
+            )
+            saved_codes.append(code)
+            saved_ids.append(asset_id)
+    except Exception as exc:
+        logger.exception("[media_tools] evolink: 保存 asset 异常")
+        return tool_error(
+            error_code="ASSET_SAVE_FAILED",
+            message=f"图已落 OSS 但 Asset 表写入失败：{exc}",
+            hint="基础设施异常；OSS URL 已生成但不会被未来 i2i 引用到",
+            context={"orphan_urls": finished.results, "task_id": finished.id},
+        )
+
+    # 4) 返回，n=1 时 asset_code/asset_id/url 是单值（最常用），同时也给 plural 字段
+    return {
+        "success": True,
+        "asset_code": saved_codes[0],
+        "asset_codes": saved_codes,
+        "asset_id": saved_ids[0],
+        "asset_ids": saved_ids,
+        "url": finished.results[0],
+        "urls": finished.results,
+        "mode": mode,
+        "model": "gpt-image-2",
+        "task_id": finished.id,
+        "aspect_ratio": aspect_ratio,
+        "resolution": resolution,
+        "quality": quality,
+        "n": n,
+        "reference_codes": ref_codes,
     }
 
 
@@ -325,12 +592,17 @@ async def _save_image_asset(
     project_id: int,
     file_url: str,
     file_format: str,
-    file_size_bytes: int,
+    file_size_bytes: Optional[int],
     generator: str,
     description: Optional[str],
     tags: list[str],
+    name: Optional[str] = None,
 ) -> tuple[str, int]:
-    """把生成的图插入 assets 表，自动分配 ``img-<uuid_short>`` 作为 asset_code，返回 (code, id)。"""
+    """把生成的图插入 assets 表，自动分配 ``img-<uuid_short>`` 作为 asset_code，返回 (code, id)。
+
+    ``file_size_bytes`` 可为 ``None``（如走 Evolink 异步任务，只拿到 URL 不拉字节时）。
+    ``name`` 是人类可读的名字（"萧炎"、"云岚宗广场"），前端展示 + Seedance prompt 别名注入会用。
+    """
     from uuid import uuid4
 
     from app.db.session import AsyncSessionFactory
@@ -343,6 +615,7 @@ async def _save_image_asset(
             row = Asset(
                 project_id=project_id,
                 asset_code=code,
+                name=name,
                 asset_type="image",
                 file_url=file_url,
                 file_format=file_format,
@@ -366,23 +639,36 @@ async def _save_image_asset(
         "并写入 ``assets`` 表，自动分配 ``vid-<uuid>`` 作为 asset_code。\n\n"
         "**Agent 永远只看 asset_code，不看 URL**。把返回的 code 写进 JSON / 后续 i2v 调用即可。\n\n"
         "Args:\n"
-        "  prompt:         中文运动 prompt（运镜 + 角色动作 + 节奏；≤500 字符）\n"
+        "  prompt:         中文运动 prompt（运镜 + 角色动作 + 节奏；≤500 字符）。\n"
+        "                  **可在 prompt 里用 Seedance 官方引用语法精确指代参考图**：\n"
+        "                    ``@图片1`` / ``@图片2`` / ... ``@图片9``\n"
+        "                  编号按 ``asset_codes`` 列表顺序，1-indexed。例如\n"
+        "                  ``asset_codes=['img-char', 'img-scene']`` 时，prompt 写\n"
+        "                  ``@图片1 持剑奔向 @图片2 中的悬崖``。\n"
+        "  name:           **必填**——给生成的视频 asset 起个人话名字（如 '萧炎冲入云海·镜头 3'、"
+        "'测试运镜-推拉摇'）。前端用它做卡片标题。**不能省略**。\n"
         "  asset_codes:    参考素材 asset_code 列表（最多 9 个，必填）。**至少要传一项**——\n"
-        "                  Seedance reference-to-video 不支持纯文生视频。prompt 里用\n"
-        "                  '参考图 1' / 'reference image 2' 这种自然语言指代各路素材的用途。\n"
+        "                  Seedance reference-to-video 不支持纯文生视频。\n"
         "  duration:       时长秒，4-15，默认 5\n"
         "  aspect_ratio:   '16:9' / '9:16' / '1:1' / '4:3' / '3:4' / '21:9' / 'adaptive'，默认 '16:9'\n"
         "  generate_audio: 是否生成同步音频，默认 True\n"
-        "  description:    给新视频 asset 的人话描述（如 '萧炎冲入云海·第一幕镜头 3'）\n"
+        "  description:    给新视频 asset 的人话描述（更长一些的说明）\n"
         "  tags:           新 asset 的 tags（如 ['video', 'shot_3', '萧炎']）\n"
         "Returns:\n"
         "  {success: True, asset_code: <自动分配的 vid-xxx>, asset_id, url, task_id, "
-        "duration, aspect_ratio, generate_audio}；失败返回 tool_error。\n"
+        "duration, aspect_ratio, generate_audio, image_refs, name_refs}；失败返回 tool_error。\n"
+        "  ``image_refs`` 是 ``{'@图片1': 'img-xxx', '@图片2': 'img-yyy'}`` 的映射，方便你复核。\n"
+        "  ``name_refs`` 是从 ``assets.name`` 反查到的别名映射，如 ``{'萧炎': '@图片1', '云岚宗广场': '@图片2'}``；\n"
+        "  工具会**自动**在 prompt 头部前置一行 ``素材引用：萧炎=@图片1，云岚宗广场=@图片2``，\n"
+        "  让 Seedance 看到 prompt 正文里的中文名时就知道对应哪张图。\n"
+        "  所以你写 prompt 时可以直接用中文名（如 '萧炎冲向云岚宗广场'），不需要手动嵌 @图片N，\n"
+        "  工具帮你做名字到图片编号的桥接。当然显式 @图片N 也支持（两种可以混用）。\n"
         "Note: Seedance 单条视频通常 20 分钟左右出片，工具内部硬限制 20 分钟超时。"
     ),
 )
 async def generate_video(
     prompt: str,
+    name: str,
     asset_codes: Optional[list[str]] = None,
     duration: int = 5,
     aspect_ratio: str = "16:9",
@@ -456,6 +742,7 @@ async def generate_video(
                 description=description,
                 tags=normalized_tags,
                 ref_codes=ref_codes,
+                name=name,
             ),
             timeout=_VIDEO_TOOL_TIMEOUT_SECONDS,
         )
@@ -479,15 +766,66 @@ async def _run_seedance_image_to_video(
     description: Optional[str],
     tags: list[str],
     ref_codes: list[str],
+    name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """generate_video 主流程的实际执行体。从 ``generate_video`` 拆出来是为了让外层
     用 ``asyncio.wait_for`` 整体加超时；超时分支可以干净地杀掉整个流程而不留
     halfway state。
     """
+    # 0) 计算 @图片N → asset_code 映射（按 image_urls 顺序，1-indexed）
+    #    Seedance 官方约定 prompt 里用 ``@图片1`` / ``@图片2`` ... 来精确引用参考图，
+    #    比如 "@图片1 站在 @图片2 描述的场景中央"。这里：
+    #    - 提前校验 prompt 里所有 @图片N 编号都在 1..len(ref_codes) 之内，越界直接 fail-fast
+    #    - 把映射打日志 + 回传给 agent，方便复核 Seedance 看到的是哪几张图对哪个序号
+    image_refs: Dict[str, str] = {
+        f"@图片{i + 1}": code for i, code in enumerate(ref_codes)
+    }
+    ref_validation_error = _validate_seedance_image_refs(prompt, len(ref_codes))
+    if ref_validation_error is not None:
+        return ref_validation_error
+    if image_refs:
+        logger.info(
+            "[media_tools] seedance image_refs (按 asset_codes 顺序映射): %s",
+            image_refs,
+        )
+
+    # 0.5) 直接从 assets 表反查每个 asset_code 的 ``name`` 字段，用于在 prompt 头部
+    #      注入 "萧炎=@图片1, 云岚宗广场=@图片2" 这样的别名表，让 Seedance 在 prompt
+    #      正文里看到中文名时就知道对应哪张图。``name`` 是 assets 表的人话标签
+    #      （由上游 generate_image / character_ref_agent 等填入），所以这里只是
+    #      普通 SELECT，不再依赖 memory KV 反查。
+    name_refs: Dict[str, str] = {}
+    if ref_codes:
+        try:
+            code_to_name = await _lookup_asset_names_by_code(
+                project_id=project_id, codes=ref_codes
+            )
+        except Exception as exc:  # noqa: BLE001
+            # 反查失败不阻塞主流程——agent 仍可走 @图片N 模式
+            logger.warning(
+                "[media_tools] 反查 asset_code → asset.name 异常（继续，不注入别名表）：%s",
+                exc,
+            )
+            code_to_name = {}
+        for i, code in enumerate(ref_codes):
+            ent_name = code_to_name.get(code)
+            if ent_name:
+                name_refs[ent_name] = f"@图片{i + 1}"
+
+    # 0.6) 把别名表前置到 prompt（仅在反查到至少一个名字时）
+    augmented_prompt = prompt
+    if name_refs:
+        alias_line = "，".join(f"{n}={ref}" for n, ref in name_refs.items())
+        augmented_prompt = f"素材引用：{alias_line}\n\n{prompt}"
+        logger.info(
+            "[media_tools] seedance prompt 前置素材引用别名：%s",
+            alias_line,
+        )
+
     # 1) 提交 Seedance 任务
     try:
         task = await seedance_client.image_to_video(
-            prompt=prompt,
+            prompt=augmented_prompt,
             image_urls=image_urls,
             duration=duration,
             aspect_ratio=aspect_ratio,
@@ -549,6 +887,7 @@ async def _run_seedance_image_to_video(
             generator="seedance-2.0-reference-to-video",
             description=description,
             tags=tags,
+            name=name,
         )
     except Exception as exc:
         logger.exception("[media_tools] 保存视频 asset 异常")
@@ -570,7 +909,86 @@ async def _run_seedance_image_to_video(
         "generate_audio": generate_audio,
         "model": "seedance-2.0-reference-to-video",
         "reference_codes": ref_codes,
+        # 1-indexed 映射：prompt 里 ``@图片N`` 对应哪个 asset_code，方便 agent 自查
+        "image_refs": image_refs,
+        # 反查到的"实体名 → @图片N"映射（character / scene 名），prompt 头部已自动前置
+        "name_refs": name_refs,
     }
+
+
+async def _lookup_asset_names_by_code(
+    *,
+    project_id: int,
+    codes: list[str],
+) -> Dict[str, str]:
+    """从 assets 表反查每个 ``asset_code`` 对应的 ``name`` 字段。
+
+    Returns:
+        ``{asset_code: name}``；``name`` 为 NULL / 空字符串的 code 不进 dict。
+    """
+    from app.db.session import AsyncSessionFactory
+    from app.models.asset import Asset
+    from sqlalchemy import select
+
+    if not codes:
+        return {}
+
+    async with AsyncSessionFactory() as session:
+        stmt = select(Asset.asset_code, Asset.name).where(
+            Asset.project_id == project_id,
+            Asset.asset_code.in_(codes),
+            Asset.is_deleted.is_(False),
+        )
+        rows = (await session.execute(stmt)).all()
+
+    return {row[0]: row[1] for row in rows if row[1]}
+
+
+# Seedance prompt 里 ``@图片N`` 的引用语法校验：N 必须是 1-indexed，且 ≤ len(ref_codes)
+_SEEDANCE_IMAGE_REF_PATTERN = re.compile(r"@图片(\d+)")
+
+
+def _validate_seedance_image_refs(
+    prompt: str,
+    ref_count: int,
+) -> Optional[Dict[str, Any]]:
+    """扫描 prompt 中所有 ``@图片N`` 引用，越界 / 编号为 0 时返回结构化错误。
+
+    Returns:
+        ``None`` 表示通过；命中错误时返回 ``tool_error(...)`` 字典直接给 caller。
+
+    Note:
+        Seedance 官方文档定义的命名是 ``@图片1`` ~ ``@图片9``（按 ``image_urls`` 顺序）。
+        agent 写 ``@图片3`` 但只传了 2 张图 → 提前 fail-fast，错误信息明确告诉它哪个编号
+        越界、应改成什么；比让 Seedance 端 422 信息更可读。
+    """
+    matches = _SEEDANCE_IMAGE_REF_PATTERN.findall(prompt)
+    if not matches:
+        return None
+
+    # 去重保留出现顺序：用 dict 也行
+    seen: list[int] = []
+    for raw in matches:
+        idx = int(raw)
+        if idx not in seen:
+            seen.append(idx)
+
+    bad: list[int] = [idx for idx in seen if idx < 1 or idx > ref_count]
+    if bad:
+        return tool_error(
+            error_code="VIDEO_PROMPT_REF_OUT_OF_RANGE",
+            message=(
+                f"prompt 引用了 @图片{bad}，但当前只传了 {ref_count} 张参考图"
+                f"（合法编号 1-{ref_count}）"
+            ),
+            hint=(
+                f"按 asset_codes 顺序索引：第 1 个 code 对应 @图片1，第 2 个对应 @图片2 ...；"
+                "要引用更多图，先在 asset_codes 里把对应的 code 加进去；"
+                "或者改 prompt 里的 @图片N 编号到合法范围"
+            ),
+            context={"out_of_range": bad, "ref_count": ref_count},
+        )
+    return None
 
 
 async def _resolve_asset_urls_by_code(
@@ -617,8 +1035,12 @@ async def _save_video_asset(
     generator: str,
     description: Optional[str],
     tags: list[str],
+    name: Optional[str] = None,
 ) -> tuple[str, int]:
-    """把生成的视频插入 assets 表，自动分配 ``vid-<uuid_short>`` 为 asset_code。"""
+    """把生成的视频插入 assets 表，自动分配 ``vid-<uuid_short>`` 为 asset_code。
+
+    ``name`` 是人类可读的名字（"萧炎冲入云海·镜头 3"），前端展示用。
+    """
     from uuid import uuid4
 
     from app.db.session import AsyncSessionFactory
@@ -631,6 +1053,7 @@ async def _save_video_asset(
             row = Asset(
                 project_id=project_id,
                 asset_code=code,
+                name=name,
                 asset_type="video",
                 file_url=file_url,
                 file_format="mp4",

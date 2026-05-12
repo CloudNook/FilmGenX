@@ -293,6 +293,7 @@ export interface AssetResponse {
   id: number;
   project_id: number;
   asset_code: string;
+  name: string | null;
   asset_type: string;
   file_url: string;
   file_format: string | null;
