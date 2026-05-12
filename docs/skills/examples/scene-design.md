@@ -68,7 +68,7 @@ time_variants = {
 
 ## mood_keywords（中文短词列表）
 
-中文短词，3-6 个，给下游 frame_prompt 拼镜头描述时复用：
+中文短词，3-6 个，给下游 video_prompt 拼镜头描述时复用：
 
 ```python
 ["废墟感", "压抑", "肃杀", "孤立", "庄严"]
@@ -99,9 +99,9 @@ time_variants = {
 **每个 location 最少 2 张**：
 
 - 1 张主 angle（最具代表性的视角，下游引用最多）
-- 1 张副 angle 或副 time_variant（给 frame_prompt 提供构图选择）
+- 1 张副 angle 或副 time_variant（给 video_prompt 提供构图选择）
 
-最多 3 张。**不要每个 time_variant 都出**——下游 frame_prompt 会按文字提示自己融合时段，参考图给"建筑骨架"就够。
+最多 3 张。**不要每个 time_variant 都出**——下游 video_prompt 会按文字提示自己融合时段，参考图给"建筑骨架"就够。
 
 ## 反例
 

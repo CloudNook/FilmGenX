@@ -11,7 +11,7 @@ Sub-agent 结构化输出 schema（业务层契约）。
 
 链路对齐 ``backend/app/core/supervisor/registry.py`` 的 workflow 定义：
 
-  outline → script → storyboard → visual_style → character_ref → scene_ref → frame_prompt → video_prompt
+  outline → script → storyboard → visual_style → character_ref → scene_ref → video_prompt
 """
 
 # Layer 1：创作层
@@ -26,8 +26,7 @@ from app.schemas.agent_outputs.visual_style import VisualStyleGuide
 from app.schemas.agent_outputs.character_ref import CharacterRefSet
 from app.schemas.agent_outputs.scene_ref import SceneRefSet
 
-# Layer 4：提示词层
-from app.schemas.agent_outputs.frame_prompt import FramePromptSet
+# Layer 4：视频提示词（直接消费 storyboard + character_ref / scene_ref 参考图）
 from app.schemas.agent_outputs.video_prompt import VideoPromptSet
 
 __all__ = [
@@ -37,6 +36,5 @@ __all__ = [
     "VisualStyleGuide",
     "CharacterRefSet",
     "SceneRefSet",
-    "FramePromptSet",
     "VideoPromptSet",
 ]

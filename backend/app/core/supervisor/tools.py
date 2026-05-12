@@ -58,7 +58,7 @@ def _build_workflow_context_block(
 
     sub-agent 们各自跑独立 session，不直接共享 in-memory 历史。如果不主动注入工作流
     状态，下游 sub-agent 只能依赖 supervisor LLM 临场摘录上游产物，漏一处就生不出
-    对应内容（character_ref 漏了角色名 / frame_prompt 漏了风格锚都会塌）。
+    对应内容（character_ref 漏了角色名 / video_prompt 漏了风格锚都会塌）。
 
     所以每次 ``call_sub_agent`` 时把当前 ``WorkflowSnapshot`` 编码成两段贴在 sub_prompt
     末尾：

@@ -163,7 +163,7 @@ KIND_REGISTRY: dict[str, KindSpec] = {
         name="character",
         description=(
             "角色资产：每个出场角色一行；key = canonical 角色名（如 '萧炎'）。"
-            "存外貌 / 性格 / 招式 / 三视图 URL 等，给后续 character_ref / frame_prompt agent 复用。"
+            "存外貌 / 性格 / 招式 / 三视图 URL 等，给后续 character_ref / video_prompt agent 复用。"
         ),
         value_schema=CharacterValue,
         key_kind="open",
@@ -172,7 +172,7 @@ KIND_REGISTRY: dict[str, KindSpec] = {
         name="scene",
         description=(
             "场景资产：每个出场场景一行；key = canonical 场景名（如 '云岚宗广场'）。"
-            "存环境 / 氛围 / 光照 / 参考图 URL，给 scene_ref / frame_prompt agent 复用。"
+            "存环境 / 氛围 / 光照 / 参考图 URL，给 scene_ref / video_prompt agent 复用。"
         ),
         value_schema=SceneValue,
         key_kind="open",

@@ -1,6 +1,6 @@
 ---
 name: visual-style-anchors
-description: Use when establishing the project's overall visual identity from outline + storyboard, defining art genre, color palette, lighting, composition, and per-element art rules so character_ref / scene_ref / frame_prompt all share one consistent visual prior.
+description: Use when establishing the project's overall visual identity from outline + storyboard, defining art genre, color palette, lighting, composition, and per-element art rules so character_ref / scene_ref / video_prompt all share one consistent visual prior.
 target_agents: [visual_style_agent]
 tags: [visual-direction, art-genre, color, lighting, composition]
 author: filmgenx

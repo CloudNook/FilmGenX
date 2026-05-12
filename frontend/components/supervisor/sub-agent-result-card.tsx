@@ -29,14 +29,13 @@ import {
   type JsonSchema,
 } from '@/lib/agent-schemas';
 // 没有专用 renderer 的 sub-agent（visual_style / character_ref / scene_ref /
-// frame_prompt / video_prompt 等）走 schema-aware 通用渲染：用 schema.title 当卡片标题，
+// video_prompt 等）走 schema-aware 通用渲染：用 schema.title 当卡片标题，
 // 内容交给 ToolPayloadView 递归展开。等积累足够 prompt 调通的 fixture 再回头写专用
 // renderer，避免在字段还在调整时重复造样式。
 const GENERIC_AGENT_NAMES = new Set([
   'visual_style_agent',
   'character_ref_agent',
   'scene_ref_agent',
-  'frame_prompt_agent',
   'video_prompt_agent',
 ]);
 
@@ -222,8 +221,8 @@ export function SubAgentResultCard({
           }
           break;
       }
-      // 5 个新 sub-agent（visual_style / character_ref / scene_ref / frame_prompt /
-      // video_prompt）暂未实现专用 renderer，走 schema-aware 通用展示
+      // 4 个新 sub-agent（visual_style / character_ref / scene_ref / video_prompt）
+      // 暂未实现专用 renderer，走 schema-aware 通用展示
       if (
         GENERIC_AGENT_NAMES.has(subAgentName) &&
         parsed &&

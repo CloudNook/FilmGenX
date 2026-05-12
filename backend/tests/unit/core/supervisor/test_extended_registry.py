@@ -2,10 +2,10 @@
 Phase 1 扩展链路装配回归（路径 B）。
 
 钉死：
-- workflow 含 8 个节点 + 正确依赖链
-- registry 含 8 个 sub-agent，5 个新 agent prompt / response_schema / reviewer 装载到位
-- frame_prompt / video_prompt 在 default skill 工具之外额外挂载 media tools
-- 其他 5 个 agent 不挂 media tools
+- workflow 含 7 个节点 + 正确依赖链
+- registry 含 7 个 sub-agent，4 个新 agent prompt / response_schema / reviewer 装载到位
+- character_ref / scene_ref / video_prompt 在 default skill 工具之外额外挂载 media tools
+- 其他 4 个 agent 不挂 media tools
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ EXPECTED_NODES = [
     "visual_style",
     "character_ref",
     "scene_ref",
-    "frame_prompt",
     "video_prompt",
 ]
 
@@ -41,8 +40,7 @@ EXPECTED_DEPENDENCIES = {
     "visual_style": ["storyboard"],
     "character_ref": ["visual_style"],
     "scene_ref": ["character_ref"],
-    "frame_prompt": ["scene_ref"],
-    "video_prompt": ["frame_prompt"],
+    "video_prompt": ["scene_ref"],
 }
 
 SCHEMA_LOCKED_AGENTS = [
@@ -57,7 +55,6 @@ SCHEMA_LOCKED_AGENTS = [
 SCHEMA_FREE_ASSET_AGENTS = [
     "character_ref_agent",
     "scene_ref_agent",
-    "frame_prompt_agent",
     "video_prompt_agent",
 ]
 
@@ -74,7 +71,7 @@ ALL_AGENTS = [
 ]
 
 
-def test_workflow_definitions_contain_eight_nodes_in_order():
+def test_workflow_definitions_contain_seven_nodes_in_order():
     nodes = build_default_workflow_definitions()
     assert [n.key for n in nodes] == EXPECTED_NODES
 
@@ -85,7 +82,7 @@ def test_workflow_definitions_match_expected_dependencies():
         assert nodes[key].depends_on == deps, f"{key} 依赖错位"
 
 
-def test_default_registry_contains_eight_agents():
+def test_default_registry_contains_seven_agents():
     registry = build_default_registry()
     assert registry.agent_names() == ALL_AGENTS
 
@@ -134,12 +131,11 @@ def _tool_names(agent) -> list[str]:
     [
         "character_ref_agent",
         "scene_ref_agent",
-        "frame_prompt_agent",
     ],
 )
 def test_image_producing_agents_have_generate_image(name: str):
-    """character / scene / frame 三个出图角色都需要 generate_image，用于
-    出三视图 / 场景参考图 / 关键镜头草图。"""
+    """character / scene 两个出图角色都需要 generate_image，用于
+    出三视图 / 场景参考图。"""
     agent = build_default_registry().get(name)
     names = _tool_names(agent)
     assert "load_skill" in names

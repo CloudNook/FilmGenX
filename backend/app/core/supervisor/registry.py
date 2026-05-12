@@ -89,12 +89,13 @@ class SupervisorAgentRegistry(BaseModel):
 
 
 def build_default_workflow_definitions() -> list[WorkflowNodeDefinition]:
-    """完整生产链路（plan b）的 8 个节点。
+    """完整生产链路（plan b）的 7 个节点。
 
     Layer 1 创作层：outline → script → storyboard
     Layer 2 视觉锚点：visual_style
     Layer 3 参考图设计：character_ref → scene_ref（顺序跑；并行编排是 Phase 2）
-    Layer 4 提示词层：frame_prompt → video_prompt
+    Layer 4 视频提示词：video_prompt（直接消费 storyboard + character_ref / scene_ref 参考图，
+            走 Seedance reference-to-video，不再有中间"首帧图"节点）
     """
     return [
         # Layer 1
@@ -120,10 +121,7 @@ def build_default_workflow_definitions() -> list[WorkflowNodeDefinition]:
         ),
         # Layer 4
         WorkflowNodeDefinition(
-            key="frame_prompt", label="Frame Prompt", node_type="plan", depends_on=["scene_ref"],
-        ),
-        WorkflowNodeDefinition(
-            key="video_prompt", label="Video Prompt", node_type="plan", depends_on=["frame_prompt"],
+            key="video_prompt", label="Video Prompt", node_type="plan", depends_on=["scene_ref"],
         ),
     ]
 
@@ -155,7 +153,7 @@ def _build_registered_agent(
 
     Args:
         extra_tool_names: 在默认 skill 工具之外，额外挂载到此 sub-agent 的工具名列表。
-            目前用于给 frame_prompt_agent / video_prompt_agent 暴露 media gen 工具。
+            目前用于给 character_ref / scene_ref / video_prompt agent 暴露 media gen 工具。
     """
     return RegisteredAgent(
         model="gemini-3.1-pro-preview",
@@ -178,11 +176,12 @@ def _build_registered_agent(
 
 
 def build_default_registry() -> SupervisorAgentRegistry:
-    """完整生产链路（plan b）的 8 个 sub-agent。
+    """完整生产链路（plan b）的 7 个 sub-agent。
 
     工具分配按"谁产出资产 KV，谁就有出图工具"：
-    - character_ref_agent / scene_ref_agent / frame_prompt_agent 挂 ``generate_image``
-    - video_prompt_agent 挂 ``generate_video``
+    - character_ref_agent / scene_ref_agent 挂 ``generate_image``
+    - video_prompt_agent 挂 ``generate_video``（Seedance reference-to-video，
+      参考图来自 character_ref / scene_ref 的 asset_code）
     - supervisor 不直接挂图像 / 视频工具，要出图就 ``call_sub_agent``
 
     出图后由 agent 调 ``memory_save`` 把 OSS URL 回填到对应 KV
@@ -231,18 +230,12 @@ def build_default_registry() -> SupervisorAgentRegistry:
                 node_keys=["scene_ref"],
                 extra_tool_names=["generate_image"],
             ),
-            # Layer 4 提示词层
-            _build_registered_agent(
-                name="frame_prompt_agent",
-                label="Frame Prompt Agent",
-                description="Produces per-shot first-frame image prompts ready for gemini image gen",
-                node_keys=["frame_prompt"],
-                extra_tool_names=["generate_image"],
-            ),
+            # Layer 4 视频提示词（直接消费 character_ref / scene_ref 的参考图，
+            # 通过 Seedance reference-to-video 出片）
             _build_registered_agent(
                 name="video_prompt_agent",
                 label="Video Prompt Agent",
-                description="Produces per-shot text-to-video prompts ready for Kling",
+                description="Produces per-shot text-to-video prompts ready for Seedance reference-to-video",
                 node_keys=["video_prompt"],
                 extra_tool_names=["generate_video"],
             ),

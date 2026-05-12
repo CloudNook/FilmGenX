@@ -2,8 +2,8 @@
 CharacterRefSet：角色参考图设计（Layer 3）。
 
 由 character_ref_agent 在 visual_style 完成后产出。每个出场角色的图生图提示词
-（基础三视图 + 表情变体 + 服装 + 配件），后续被 frame_prompt_agent 通过 name
-引用作为 IP-Adapter / LoRA 一致性锚点。
+（基础三视图 + 表情变体 + 服装 + 配件），产物 asset_code 后续被 video_prompt_agent
+作为 ``generate_video`` 的参考图（Seedance reference-to-video）。
 """
 
 from __future__ import annotations

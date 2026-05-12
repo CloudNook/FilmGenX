@@ -1615,7 +1615,6 @@ const STRUCTURED_SUB_AGENTS = new Set([
   'visual_style_agent',
   'character_ref_agent',
   'scene_ref_agent',
-  'frame_prompt_agent',
   'video_prompt_agent',
 ]);
 

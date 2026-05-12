@@ -2,7 +2,8 @@
 SceneRefSet：场景参考图设计（Layer 3）。
 
 由 scene_ref_agent 在 character_ref 完成后产出。每个不同地点的环境图生图提示词，
-后续被 frame_prompt_agent 通过 location 引用作为场景背景锚。
+产物 asset_code 后续被 video_prompt_agent 作为 ``generate_video`` 的参考图
+（Seedance reference-to-video）。
 
 按 ``location`` 去重 —— 同一地点（如"陈墨的出租屋"）即使在多场戏出现，也只在
 SceneRefSet 里出现一次；time_variants 字段处理 day / night / rain 等同地点不同

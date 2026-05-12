@@ -2,7 +2,7 @@
 VisualStyleGuide：全片视觉锚点（Layer 2）。
 
 由 visual_style_agent 在 outline + storyboard 完成后产出，下游 character_ref /
-scene_ref / frame_prompt 共享这一份风格先验，保证整片视觉调性统一。
+scene_ref / video_prompt 共享这一份风格先验，保证整片视觉调性统一。
 
 Field 双层标记：
 - ``title``：UI 标签（短，1-6 字）

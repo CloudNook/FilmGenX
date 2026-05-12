@@ -17,7 +17,6 @@ from fastapi import APIRouter, Depends
 from app.api.deps import get_current_user_id
 from app.schemas.agent_outputs import (
     CharacterRefSet,
-    FramePromptSet,
     OutlineOutput,
     SceneRefSet,
     ScriptOutput,
@@ -37,7 +36,6 @@ _SUB_AGENT_OUTPUT_SCHEMAS = {
     "visual_style_agent": VisualStyleGuide,
     "character_ref_agent": CharacterRefSet,
     "scene_ref_agent": SceneRefSet,
-    "frame_prompt_agent": FramePromptSet,
     "video_prompt_agent": VideoPromptSet,
 }
 

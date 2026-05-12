@@ -17,7 +17,7 @@ const QUICK_LINKS = [
   {
     icon: GitBranch,
     label: 'AI Supervisor',
-    description: '8 步生产链路：outline → script → storyboard → visual_style → character_ref → scene_ref → frame_prompt → video_prompt',
+    description: '7 步生产链路：outline → script → storyboard → visual_style → character_ref → scene_ref → video_prompt',
     suffix: 'supervisor',
   },
   {

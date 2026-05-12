@@ -83,7 +83,7 @@ preference / outline / script。UPSERT 语义（同 key 直接覆盖 value）。
 
 **Sub-agent 输出形态分两类**：
 - 纯设计 agent（outline / script / storyboard / visual_style）：返回值是**纯 JSON 字符串**，直接读字段
-- 资产产出 agent（character_ref / scene_ref / frame_prompt / video_prompt）：因为它们要自己调 generate_image / generate_video 干活，没用 response_schema 锁定。它们的返回值是**自由文本 + 一段 ``<output>...</output>`` 包裹的 JSON**——你只需要从 ``<output>`` 标签之间抽出 JSON 来消费。**JSON 里的图片字段是 asset_code 不是 URL**（generate_image 出图后自动落 assets 表分配 code，URL 是工具内部细节）
+- 资产产出 agent（character_ref / scene_ref / video_prompt）：因为它们要自己调 generate_image / generate_video 干活，没用 response_schema 锁定。它们的返回值是**自由文本 + 一段 ``<output>...</output>`` 包裹的 JSON**——你只需要从 ``<output>`` 标签之间抽出 JSON 来消费。**JSON 里的图片字段是 asset_code 不是 URL**（generate_image 出图后自动落 assets 表分配 code，URL 是工具内部细节）
 
 **何时写 KV**：每次 ``call_sub_agent`` 返回后，根据 sub-agent 名称循环调 ``memory_save``：
 
@@ -93,7 +93,7 @@ preference / outline / script。UPSERT 语义（同 key 直接覆盖 value）。
 | ``scene_ref_agent`` ``SceneRefSet`` | 遍历 result.scenes | 每个一次 ``memory_save(kind='scene', key=<location>, value={..., reference_asset_codes: [...]})`` —— 同上，照搬 code |
 | ``visual_style_agent`` ``VisualStyleGuide`` | 拆成 5 个子 style | ``memory_save(kind='style', key='palette' / 'lighting' / 'composition' / 'mood' / 'camera', value={description, keywords})`` × 5 |
 | ``script_agent`` ``ScriptOutput`` | summary / scene_count / total_duration / famous_quotes | ``memory_save(kind='script', key='main', value={...})`` |
-| 其它（outline / storyboard / frame_prompt / video_prompt） | 不写 KV | outline 走 extractor；其它不在 taxonomy |
+| 其它（outline / storyboard / video_prompt） | 不写 KV | outline 走 extractor；其它不在 taxonomy |
 
 ### 2）Vector entry（free-form，语义召回）
 

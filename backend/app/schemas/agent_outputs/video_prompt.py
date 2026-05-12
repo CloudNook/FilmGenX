@@ -1,13 +1,13 @@
 """
 VideoPromptSet：每个 shot 的视频提示词（Layer 4）。
 
-由 video_prompt_agent 在 frame_prompt 完成后产出。**本期只生成文字驱动的视频
-prompt**，不接受参考图字段——等 project-level memory 落地后再加 reference image
-输入（届时 video_prompt 会重新引入 seed_image / end_frame 等字段）。
+由 video_prompt_agent 在 scene_ref 完成后产出。video_prompt_agent 通过
+``character_ref`` / ``scene_ref`` 输出的 asset_code 拿到参考图，再用文字 prompt
+驱动 Seedance reference-to-video 出片——**不再走"先出首帧图再驱动视频"的路径**。
 
 下游：
 - ``motion_description`` + ``duration_seconds`` 喂给 ``generate_video`` 工具
-- ``model_hint`` 是 LLM 给的偏好（kling / seedance），调用方据此决定 generate_video 的 model 入参
+- 参考图通过 asset_code 传入 generate_video 的 asset_codes 参数
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from pydantic import BaseModel, Field
 
 AspectRatio = Literal["16:9", "9:16", "1:1"]
 Quality = Literal["std", "hq"]
-ModelHint = Literal["kling", "seedance"]
 
 
 class VideoPrompt(BaseModel):
@@ -29,7 +28,7 @@ class VideoPrompt(BaseModel):
         ...,
         ge=1,
         title="镜号",
-        description="与 storyboard.shots.shot_number / frame_prompt.frames.shot_number 对齐",
+        description="与 storyboard.shots.shot_number 对齐",
     )
     motion_description: str = Field(
         ...,
@@ -41,7 +40,7 @@ class VideoPrompt(BaseModel):
         ge=2,
         le=10,
         title="时长（秒）",
-        description="镜头时长，Kling 当前限制 5 / 10；快切 1-3s 优先选 5（按整数取最近值）",
+        description="镜头时长；快切 1-3s 优先选 5（按整数取最近值）",
     )
     quality: Quality = Field(
         default="std",
@@ -51,17 +50,12 @@ class VideoPrompt(BaseModel):
     aspect_ratio: AspectRatio = Field(
         ...,
         title="画幅",
-        description="必须与 frame_prompt.aspect_ratio 一致",
+        description="必须与 storyboard 中该 shot 的 aspect_ratio 一致",
     )
     negative_prompt: Optional[str] = Field(
         None,
         title="负面",
         description="本镜负面（如 '不要抖动，不要切镜'）；为空时使用模型默认",
-    )
-    model_hint: ModelHint = Field(
-        default="kling",
-        title="模型偏好",
-        description="推荐用哪个视频模型；调用 generate_video 时作为 model 入参；当前 kling 已就绪，seedance 占位",
     )
 
 
@@ -71,7 +65,7 @@ class VideoPromptSet(BaseModel):
     videos: List[VideoPrompt] = Field(
         ...,
         title="视频提示词列表",
-        description="全片所有 shot 的视频提示词（一一对应 storyboard.shots / frame_prompt.frames）",
+        description="全片所有 shot 的视频提示词（一一对应 storyboard.shots）",
         min_length=1,
     )
 
