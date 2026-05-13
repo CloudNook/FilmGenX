@@ -43,16 +43,21 @@ EXPECTED_DEPENDENCIES = {
     "video_prompt": ["scene_ref"],
 }
 
-SCHEMA_LOCKED_AGENTS = [
+# 全部 7 个 sub-agent 都允许调工具（load_skill + 可选 media gen），所以全部**不挂
+# response_schema**——Gemini 的 structured output 与 function calling 互斥，挂了
+# 工具通道关掉。JSON 输出靠 <output>...</output> 包裹 + supervisor 端 Pydantic 校验。
+SCHEMA_FREE_AGENTS = [
     "outline_agent",
     "script_agent",
     "storyboard_agent",
     "visual_style_agent",
+    "character_ref_agent",
+    "scene_ref_agent",
+    "video_prompt_agent",
 ]
 
-# 资产产出 agent：要调 generate_image / generate_video，所以**不挂 response_schema**，
-# 否则 Gemini 的结构化输出会把 function calling 通道关掉
-SCHEMA_FREE_ASSET_AGENTS = [
+# 出图 / 出视频权限只发给 3 个资产产出 agent。
+MEDIA_PRODUCING_ASSET_AGENTS = [
     "character_ref_agent",
     "scene_ref_agent",
     "video_prompt_agent",
@@ -60,7 +65,7 @@ SCHEMA_FREE_ASSET_AGENTS = [
 
 NEW_AGENTS = [
     "visual_style_agent",
-    *SCHEMA_FREE_ASSET_AGENTS,
+    *MEDIA_PRODUCING_ASSET_AGENTS,
 ]
 
 ALL_AGENTS = [
@@ -103,19 +108,13 @@ def test_new_agent_has_domain_prompt_and_reviewer(name: str):
     assert agent.reviewer.on_exhausted == "accept_last"
 
 
-@pytest.mark.parametrize("name", SCHEMA_LOCKED_AGENTS)
-def test_schema_locked_agent_has_response_schema(name: str):
-    """纯设计 agent 必须挂 response_schema 强约束 JSON 输出。"""
-    registry = build_default_registry()
-    agent = registry.get(name)
-    assert agent.response_schema is not None
-    assert agent.response_schema == SUB_AGENT_RESPONSE_SCHEMA[name]
-    assert "properties" in agent.response_schema
+@pytest.mark.parametrize("name", SCHEMA_FREE_AGENTS)
+def test_all_sub_agents_have_no_response_schema(name: str):
+    """所有 sub-agent 都需要调工具（至少 load_skill），所以全部不挂 response_schema。
 
-
-@pytest.mark.parametrize("name", SCHEMA_FREE_ASSET_AGENTS)
-def test_asset_agent_has_no_response_schema(name: str):
-    """资产产出 agent **不能挂** response_schema，否则 Gemini 关掉 function calling。"""
+    Gemini structured output 与 function calling 互斥；JSON 输出靠
+    <output>...</output> 包裹 + supervisor 端 Pydantic 校验。
+    """
     registry = build_default_registry()
     agent = registry.get(name)
     assert agent.response_schema is None
@@ -153,6 +152,8 @@ def test_video_prompt_agent_has_video_tool():
     assert "load_skill" in names
     assert "load_skill_reference" in names
     assert "generate_video" in names
+    # concat_videos：按 storyboard 顺序拼接多段视频出成片
+    assert "concat_videos" in names
     assert "generate_image" not in names
     assert "generate_video_text_to_video" not in names
     assert "generate_video_image_to_video" not in names

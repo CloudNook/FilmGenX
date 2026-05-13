@@ -2685,11 +2685,21 @@ function SupervisorTimelineEntryCard({
                 {entry.taskDescription}
               </p>
             )}
-            {entry.kind === 'sub_agent_end' && entry.result != null && (
-              <SubAgentResultCard
-                subAgentName={entry.subAgentName}
-                result={entry.result}
-              />
+            {entry.kind === 'sub_agent_end' && (
+              entry.result != null ? (
+                <SubAgentResultCard
+                  subAgentName={entry.subAgentName}
+                  result={entry.result}
+                />
+              ) : (
+                // 诊断兜底：sub-agent 完成了但 supervisor 没传回任何 result——
+                // 通常说明 reviewer 否决 / max loop / 异常中断时 raw_output 没填。
+                // 显示明确提示比"完全空白"更利于排查。
+                <p className="text-xs italic text-amber-700/80">
+                  ⚠️ 未收到结构化结果（result 为空）—— 检查后端 supervisor 日志，
+                  通常是 sub-agent reviewer 未通过 / 达到 max loop / 中途异常。
+                </p>
+              )
             )}
           </AutoCollapseDetails>
         </div>

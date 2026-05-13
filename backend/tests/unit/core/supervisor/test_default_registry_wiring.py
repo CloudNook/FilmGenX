@@ -43,19 +43,18 @@ def test_default_registry_assigns_domain_prompt_to_each_sub_agent():
         assert len(agent.prompt) > 200
 
 
-def test_default_registry_assigns_response_schema_to_each_sub_agent():
-    """每个 sub-agent 必须挂载从 Pydantic 类导出的 JSON Schema。"""
+def test_default_registry_keeps_response_schema_unset_for_each_sub_agent():
+    """所有 sub-agent 都需要调工具，所以 response_schema 必须为 None。
+
+    Gemini structured output 与 function calling 互斥；JSON 输出靠
+    <output>...</output> 包裹 + supervisor 端 Pydantic 校验，而非 schema 强约束。
+    """
     registry = build_default_registry()
     for name in SUB_AGENT_NAMES:
         agent = registry.get(name)
-        assert agent.response_schema is not None
+        assert agent.response_schema is None
         # 与 app.agents 暴露的同源
-        assert agent.response_schema is SUB_AGENT_RESPONSE_SCHEMA[name] or (
-            agent.response_schema == SUB_AGENT_RESPONSE_SCHEMA[name]
-        )
-        # JSON Schema 必备字段
-        assert "properties" in agent.response_schema
-        assert "type" in agent.response_schema
+        assert SUB_AGENT_RESPONSE_SCHEMA[name] is None
 
 
 def test_default_registry_reviewer_uses_domain_prompt():

@@ -140,6 +140,11 @@ class EvolinkTask(BaseModel):
     video_url: Optional[str] = None
     image_url: Optional[str] = None
 
+    # 失败原因。Evolink 在 status=failed 时通常会带 error / error_message / failure_reason
+    # 等字段；我们尽力解析并透传给上层，否则 task.status=failed 时调用方只能看到
+    # "任务失败" 而不知道是审核/尺寸/拉图失败等真实原因。
+    error: Optional[str] = None
+
     @property
     def url(self) -> Optional[str]:
         """统一便捷访问 ``results[0]``。type=image/video 都返同样语义的第一个产物 URL。"""
@@ -328,6 +333,26 @@ class EvolinkClient:
         first_url = results[0] if results else None
         task_type = data.get("type")  # "image" / "video" / None
 
+        # 解析失败原因：不同上游模型字段名不统一，按常见顺序兜底取。
+        # error 可能是字符串，也可能是 {"message": "...", "code": "..."} 这样的对象。
+        error_raw = (
+            data.get("error")
+            or data.get("error_message")
+            or data.get("failure_reason")
+            or data.get("message")
+        )
+        if isinstance(error_raw, dict):
+            error_text = (
+                error_raw.get("message")
+                or error_raw.get("error")
+                or error_raw.get("reason")
+                or str(error_raw)
+            )
+        elif error_raw is not None:
+            error_text = str(error_raw)
+        else:
+            error_text = None
+
         return EvolinkTask(
             id=data["id"],
             status=data.get("status", "pending"),
@@ -343,6 +368,7 @@ class EvolinkClient:
             # 按 type 填便捷字段：让现有 `task.video_url` / `task.image_url` 调用方继续可用
             video_url=first_url if task_type == "video" else None,
             image_url=first_url if task_type == "image" else None,
+            error=error_text,
         )
 
     # -----------------------------------------------------------------------
@@ -647,7 +673,8 @@ class EvolinkClient:
                 return task
 
             if task.status == "failed":
-                raise RuntimeError(f"Evolink 任务 {task_id} 失败")
+                reason = task.error or "(网关未返回具体原因)"
+                raise RuntimeError(f"Evolink 任务 {task_id} 失败: {reason}")
 
             await asyncio.sleep(poll_interval)
 

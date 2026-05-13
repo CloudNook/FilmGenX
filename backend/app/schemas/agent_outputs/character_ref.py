@@ -4,6 +4,13 @@ CharacterRefSet：角色参考图设计（Layer 3）。
 由 character_ref_agent 在 visual_style 完成后产出。每个出场角色的图生图提示词
 （基础三视图 + 表情变体 + 服装 + 配件），产物 asset_code 后续被 video_prompt_agent
 作为 ``generate_video`` 的参考图（Seedance reference-to-video）。
+
+字段与 character_ref_agent 实际产出对齐：
+- ``role`` / ``personality`` / ``key_skills``：从 outline.characters 继承，让 video_prompt
+  挑表情 / 姿态时有依据
+- ``three_view_asset_code``：基础锚（t2i），所有变体 i2i 都以它为参考
+- ``reference_asset_codes``：变体（表情 / 服装 / 战斗姿态）的 asset_code 列表
+- ``accessories`` 是 ``List[str]``（武器 / 首饰 / 道具分项列），便于 prompt weighting
 """
 
 from __future__ import annotations
@@ -14,6 +21,16 @@ from pydantic import BaseModel, Field
 
 
 AspectRatio = Literal["16:9", "9:16", "1:1", "3:4", "4:3"]
+
+# 与 outline.CharacterRole 保持一致
+CharacterRole = Literal[
+    "protagonist",
+    "antagonist",
+    "deuteragonist",
+    "supporting",
+    "foil",
+    "mentor",
+]
 
 
 class ExpressionVariant(BaseModel):
@@ -32,7 +49,7 @@ class ExpressionVariant(BaseModel):
     prompt: str = Field(
         ...,
         title="提示词补充",
-        description="该表情对应的提示词补充（与 base_prompt 配合时差异化的部分）",
+        description="该表情对应的提示词补充（中文表情描述 + 英文 tag），与 base_prompt 配合时差异化的部分",
     )
 
 
@@ -42,50 +59,89 @@ class CharacterRef(BaseModel):
     name: str = Field(
         ...,
         title="角色名",
-        description="与 outline.characters.name 完全对齐",
+        description="与 outline.characters.name 一字不差",
     )
-    version: str = Field(
-        default="v1",
-        title="版本",
-        description="设计版本号，便于角色形象迭代时区分（如 v1 / v2-redesign）",
+    role: CharacterRole = Field(
+        ...,
+        title="定位",
+        description="角色定位（与 outline.characters.role 一致）",
+    )
+    appearance: Optional[str] = Field(
+        None,
+        title="外观综述",
+        description="人话外观综述（含发型 / 五官 / 体型），给 reviewer / 前端阅读用",
+    )
+    personality: Optional[str] = Field(
+        None,
+        title="性格",
+        description="性格综述，下游 video_prompt 据此挑表情变体 / 设计动作姿态",
+    )
+    key_skills: List[str] = Field(
+        default_factory=list,
+        title="核心能力",
+        description="可选——角色的能力 / 标志性动作（如 '黑炎'、'佛怒火莲'）",
     )
     base_prompt: str = Field(
         ...,
         title="基础描述",
-        description="中文基础外观描述（发型 + 发色 + 瞳色 + 体型 + 服装核心），用作所有变体共享 base",
+        description=(
+            "anatomically neutral 基础外观 prompt（英文为主，前 80% 权重词在前）。"
+            "用作所有变体共享的 base。**禁含表情 / 动作 / 视角 / 情绪光照**——那些是变体的工作。"
+        ),
     )
     expressions: List[ExpressionVariant] = Field(
         ...,
-        min_length=3,
+        min_length=1,
         title="表情变体",
-        description="表情变体列表（至少 3 项，主角建议 4-5 项）。每项含表情名 + 提示词补充",
+        description=(
+            "表情变体列表。主角 4-5 项，关键反派 3-4 项，次要配角 1-2 项。"
+            "覆盖 script 中该角色实际出现的情绪范围（angry / determined / sad / surprised / smile 等）。"
+        ),
     )
     clothing_detail: str = Field(
         ...,
         title="服装",
-        description="服装详细描述（材质 / 配色 / 装饰），独立于 base_prompt 让换装更自由",
+        description=(
+            "本次场景的具体服装（材质 / 配色 / 装饰），独立于 base_prompt——"
+            "未来角色换装时只换这里，不动 base。"
+        ),
     )
-    accessories: Optional[str] = Field(
-        None,
+    accessories: List[str] = Field(
+        default_factory=list,
         title="配饰",
-        description="可选配饰（武器 / 首饰 / 道具）",
+        description=(
+            "武器 / 首饰 / 标志道具分项列表。**单独列**——埋在描述里 prompt 一长就被模型遗漏。"
+        ),
     )
     negative_prompt: str = Field(
         ...,
         title="负面",
-        description="角色专属负面提示词（如 'female, child, modern clothing'）",
+        description=(
+            "三层叠加的角色专属负面提示词："
+            "(1) 跨片性别 / 年龄防御（女主含 'male, child'），"
+            "(2) art_genre 挡板（anime 含 'photorealistic'），"
+            "(3) 图像通用挡板（'deformed, extra limbs, text, watermark'）。"
+        ),
     )
-    style_preset: str = Field(
-        ...,
-        title="风格预设",
-        description="配套风格 preset 名（如 'intense / dramatic'），由 visual_style 决定",
+    three_view_asset_code: Optional[str] = Field(
+        None,
+        title="三视图 asset_code",
+        description=(
+            "t2i 出三视图后工具返回的 ``img-xxxxxxxx``。"
+            "所有变体 i2i 都以这个 code 为参考；下游 video_prompt 默认参考图也是它。"
+        ),
+    )
+    reference_asset_codes: List[str] = Field(
+        default_factory=list,
+        title="变体 asset_codes",
+        description="i2i 表情 / 服装 / 战斗姿态变体的 asset_code 列表",
     )
     reference_image_count: int = Field(
         default=2,
         ge=1,
-        le=5,
+        le=8,
         title="参考图数量",
-        description="该角色需生成几张参考图（不同表情 / 角度），范围 1-5",
+        description="该角色总参考图数量（含三视图）；主角 3-5 张，配角 1-2 张",
     )
     aspect_ratio: AspectRatio = Field(
         default="9:16",
@@ -97,11 +153,6 @@ class CharacterRef(BaseModel):
 class CharacterRefSet(BaseModel):
     """全片角色参考图集合 = character_ref_agent 的完整输出。"""
 
-    style_anchor_id: str = Field(
-        ...,
-        title="风格锚 ID",
-        description="引用 visual_style 的 art_genre + character_art_style 摘要，确认本批角色与全片风格一致",
-    )
     characters: List[CharacterRef] = Field(
         ...,
         title="角色列表",

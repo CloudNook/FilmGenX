@@ -827,3 +827,415 @@ async def _save_video_asset(
             new_id = row.id
 
     return code, new_id
+
+
+# ---------------------------------------------------------------------------
+# concat_videos —— 把 Seedance 出的多段视频按顺序拼成一整片
+# ---------------------------------------------------------------------------
+#
+# 设计要点：
+# - Seedance 单段最长 15 秒，60 秒短剧会拆 4-8 段；模型异步出片，**返回顺序不一定** =
+#   storyboard 顺序。只有 agent 能按 time_start 排好序后调用本工具
+# - 用 ffmpeg concat demuxer：默认走 ``-c copy`` 零损失零编码（前提是所有片段编码参数
+#   一致——同 aspect_ratio + Seedance 出的都是 H.264 / AAC，通常满足）
+# - copy 模式失败（编码不一致）时自动 fallback 到 re-encode（``libx264 + aac``）
+# - 校验所有源 asset 同 project / 都是 video / aspect_ratio 一致，避免拼出畸形
+# ---------------------------------------------------------------------------
+
+
+_CONCAT_DEFAULT_DIR = "supervisor/concat"
+_CONCAT_DOWNLOAD_TIMEOUT_SECONDS = 60.0
+_CONCAT_FFMPEG_TIMEOUT_SECONDS = 900.0   # 15 分钟兜底
+
+
+@register_tool(
+    name="concat_videos",
+    description=(
+        "按顺序把多段视频拼成一整片。用于 video_prompt_agent 出完所有分镜（每段 4-15 秒）后，"
+        "把它们组装成最终成片。\n\n"
+        "**为什么需要这个工具**：Seedance 单段最长 15 秒，60 秒短剧会被拆成 4-8 段独立生成；"
+        "模型异步出片，**返回顺序不等于剧情顺序**。只有 agent 按 storyboard.time_start_seconds "
+        "排好序后调用本工具，才能让分段拼回一部连贯的片子。\n\n"
+        "Args:\n"
+        "  asset_codes: **按播放顺序**的视频 asset_code 列表（如 ['vid-shot1', 'vid-shot2', ...]）。\n"
+        "               至少 2 个；列表顺序 = 最终视频里的播放顺序，**agent 自己排序**。\n"
+        "  name:        **必填**——给拼接成品起人话名字（如 '云岚宗短剧·完整 60s' / '第 1 集成片'）。\n"
+        "               前端 asset library 用此做卡片标题。\n"
+        "  description: 给成品 asset 的描述（如 '由 6 个分镜拼接，总时长 60s'）。\n"
+        "  tags:        新 asset 的标签（如 ['final-cut', 'ep1']）。\n\n"
+        "校验：所有源 asset 必须 (1) 存在于本 project、(2) asset_type=='video'、"
+        "(3) aspect_ratio 一致（避免拼接变形）。任一不满足 → 返回 tool_error 不执行。\n\n"
+        "Returns: {success: True, asset_code: <新 vid-xxx>, asset_id, url, "
+        "total_duration_seconds, segment_count, source_codes}；失败返回 tool_error。"
+    ),
+)
+async def concat_videos(
+    asset_codes: list[str],
+    name: str,
+    description: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    *,
+    memory_harness: Optional[Any] = None,
+) -> Dict[str, Any]:
+    project_id = _resolve_project_id(memory_harness)
+    if project_id is None:
+        return tool_error(
+            error_code="PROJECT_ID_MISSING",
+            message="无法解析 project_id —— memory_harness 未挂载或 scope_metadata 缺 domain_id",
+            hint="确保 supervisor / sub-agent 是带 memory 启动的（memory_enabled=True 且 domain_id 已注入）",
+        )
+
+    codes = _normalize_str_list(asset_codes)
+    if codes is _BAD_TYPE_SENTINEL:
+        return tool_error(
+            error_code="ASSET_CODES_BAD_TYPE",
+            message=f"asset_codes 必须是 string 数组，收到 {type(asset_codes).__name__}: {asset_codes!r}",
+            hint="例如 asset_codes=['vid-abc123', 'vid-def456']（按播放顺序排）",
+        )
+    if not codes or len(codes) < 2:
+        return tool_error(
+            error_code="ASSET_CODES_TOO_FEW",
+            message=f"至少需要 2 个视频才能拼接，当前 {len(codes)} 个",
+            hint="如果你只有 1 个分段，直接用那个视频即可，无需拼接",
+        )
+
+    normalized_tags = _normalize_str_list(tags)
+    if normalized_tags is _BAD_TYPE_SENTINEL:
+        normalized_tags = []
+
+    # 1) 按 code 拉 asset 行；保持输入顺序
+    try:
+        sources, missing = await _lookup_video_assets_by_code(
+            project_id=project_id, codes=codes
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[concat_videos] DB 查询异常")
+        return tool_error(
+            error_code="ASSET_LOOKUP_FAILED",
+            message=f"查询 asset_codes 异常：{exc}",
+            context={"asset_codes": codes},
+        )
+    if missing:
+        return tool_error(
+            error_code="ASSET_CODES_NOT_FOUND",
+            message=f"以下 asset_code 在 project_id={project_id} 下查不到：{missing}",
+            hint="检查 code 是否打错；或者它们属于别的 project",
+            context={"asset_codes": codes, "missing": missing},
+        )
+
+    # 2) 校验：都是 video，aspect_ratio 一致
+    non_video = [
+        a.asset_code for a in sources if a.asset_type != "video"
+    ]
+    if non_video:
+        return tool_error(
+            error_code="ASSET_NOT_VIDEO",
+            message=f"以下 asset_code 不是 video 类型：{non_video}",
+            hint="concat_videos 只接受 video 类型的 asset；图片请使用其它工具",
+            context={"non_video": non_video},
+        )
+
+    aspect_ratios = {
+        _extract_aspect_ratio_from_tags(a.tags) for a in sources
+    }
+    aspect_ratios.discard(None)
+    if len(aspect_ratios) > 1:
+        return tool_error(
+            error_code="ASPECT_RATIO_MISMATCH",
+            message=f"参与拼接的视频 aspect_ratio 不一致：{aspect_ratios}",
+            hint="所有分段必须画幅一致；先重新生成不一致的镜头到相同 aspect_ratio",
+            context={
+                "aspect_ratios": sorted(a for a in aspect_ratios if a),
+                "per_code": [
+                    {
+                        "asset_code": a.asset_code,
+                        "aspect_ratio": _extract_aspect_ratio_from_tags(a.tags),
+                    }
+                    for a in sources
+                ],
+            },
+        )
+    final_aspect_ratio = next(iter(aspect_ratios)) if aspect_ratios else "unknown"
+
+    # 3) 下载 + ffmpeg 拼接 + 上传 OSS
+    try:
+        merged_bytes, total_duration = await _concat_video_pipeline(sources)
+    except _ConcatError as exc:
+        return tool_error(
+            error_code=exc.code,
+            message=exc.message,
+            hint=exc.hint,
+            context=exc.context,
+        )
+    except asyncio.TimeoutError:
+        return tool_error(
+            error_code="CONCAT_TIMEOUT",
+            message=f"拼接耗时超过 {_CONCAT_FFMPEG_TIMEOUT_SECONDS:.0f}s 上限",
+            hint="可能视频过长或服务器繁忙；分批拼接 / 减少分段数",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[concat_videos] 拼接管道异常")
+        return tool_error(
+            error_code="CONCAT_FAILED",
+            message=f"拼接过程异常：{exc}",
+            hint="如果是 ffmpeg 报错，通常是源视频编码差异；可以先用 generate_video 重出统一编码",
+        )
+
+    # 4) 上传 OSS
+    try:
+        from app.utils.oss import oss_client
+
+        oss_url = oss_client.upload_bytes(
+            merged_bytes,
+            filename=f"concat.mp4",
+            directory=_CONCAT_DEFAULT_DIR,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[concat_videos] OSS 上传异常")
+        return tool_error(
+            error_code="OSS_UPLOAD_FAILED",
+            message=f"OSS 上传失败：{exc}",
+        )
+
+    # 5) 写 assets 表分配 vid- code
+    final_tags = [
+        *normalized_tags,
+        "concat",
+        f"segments:{len(sources)}",
+    ]
+    try:
+        final_code, asset_id = await _save_video_asset(
+            project_id=project_id,
+            file_url=oss_url,
+            duration_sec=total_duration,
+            aspect_ratio=final_aspect_ratio or "unknown",
+            generator="concat_videos",
+            description=description or f"由 {len(sources)} 个分段拼接而成，总时长 {total_duration:.1f}s",
+            tags=final_tags,
+            name=name,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[concat_videos] 保存 asset 异常")
+        return tool_error(
+            error_code="ASSET_SAVE_FAILED",
+            message=f"产物落 assets 表失败：{exc}",
+            hint="产物已上传 OSS（URL 在 context）但未入库，找运维处理或重试",
+            context={"oss_url": oss_url},
+        )
+
+    return {
+        "success": True,
+        "asset_code": final_code,
+        "asset_id": asset_id,
+        "url": oss_url,
+        "total_duration_seconds": total_duration,
+        "segment_count": len(sources),
+        "aspect_ratio": final_aspect_ratio,
+        "source_codes": codes,
+    }
+
+
+class _ConcatError(Exception):
+    """concat 管道用的结构化异常——直接转成 tool_error 返回。"""
+
+    def __init__(
+        self,
+        *,
+        code: str,
+        message: str,
+        hint: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.hint = hint
+        self.context = context or {}
+
+
+async def _lookup_video_assets_by_code(
+    *, project_id: int, codes: list[str]
+) -> tuple[list, list[str]]:
+    """按 ``asset_code`` 拉 Asset 行；保持输入顺序。返回 ``(assets_in_order, missing)``。"""
+    from app.db.session import AsyncSessionFactory
+    from app.models.asset import Asset
+    from sqlalchemy import select
+
+    async with AsyncSessionFactory() as session:
+        stmt = select(Asset).where(
+            Asset.project_id == project_id,
+            Asset.asset_code.in_(codes),
+            Asset.is_deleted.is_(False),
+        )
+        rows = (await session.execute(stmt)).scalars().all()
+
+    by_code = {row.asset_code: row for row in rows}
+
+    ordered: list = []
+    missing: list[str] = []
+    for code in codes:
+        asset = by_code.get(code)
+        if asset is None:
+            missing.append(code)
+            continue
+        ordered.append(asset)
+
+    return ordered, missing
+
+
+def _extract_aspect_ratio_from_tags(tags: Optional[list[str]]) -> Optional[str]:
+    """从 ``tags`` 里找 ``aspect_ratio:16:9`` 形式的标记。"""
+    if not tags:
+        return None
+    for tag in tags:
+        if isinstance(tag, str) and tag.startswith("aspect_ratio:"):
+            return tag.split(":", 1)[1]
+    return None
+
+
+async def _concat_video_pipeline(sources: list) -> tuple[bytes, float]:
+    """下载 → ffmpeg concat → 返回 ``(merged_bytes, total_duration)``。
+
+    1. 异步下载所有源视频到 tempdir（限并发 4，避免打满网络）
+    2. 写 ffmpeg concat list 文件
+    3. 先尝试 ``-c copy``（零损失零编码，前提是编码参数一致）
+    4. copy 失败 fallback 到 ``-c:v libx264 -c:a aac`` 重编码
+    """
+    import tempfile
+    from pathlib import Path
+
+    import httpx
+
+    # 累加 duration 用于返回值（也是兜底；ffprobe 解析 merged 可能更准但额外开销）
+    total_duration = 0.0
+
+    with tempfile.TemporaryDirectory(prefix="filmgenx_concat_") as tmpdir:
+        tmp_path = Path(tmpdir)
+
+        # 并发下载
+        sem = asyncio.Semaphore(4)
+
+        async def _dl(idx: int, asset) -> Path:
+            async with sem:
+                local = tmp_path / f"seg_{idx:03d}.mp4"
+                try:
+                    async with httpx.AsyncClient(
+                        timeout=_CONCAT_DOWNLOAD_TIMEOUT_SECONDS,
+                        follow_redirects=True,
+                    ) as client:
+                        resp = await client.get(asset.file_url)
+                        resp.raise_for_status()
+                        local.write_bytes(resp.content)
+                except Exception as exc:  # noqa: BLE001
+                    raise _ConcatError(
+                        code="SEGMENT_DOWNLOAD_FAILED",
+                        message=(
+                            f"下载分段 {asset.asset_code} 失败：{exc}"
+                        ),
+                        hint="检查 OSS URL 是否过期 / 网络通畅",
+                        context={"failing_code": asset.asset_code, "url": asset.file_url},
+                    )
+                return local
+
+        local_paths: list[Path] = []
+        for idx, asset in enumerate(sources):
+            local = await _dl(idx, asset)
+            local_paths.append(local)
+            if asset.duration_sec is not None:
+                total_duration += float(asset.duration_sec)
+
+        # 写 concat list
+        list_file = tmp_path / "concat_list.txt"
+        list_file.write_text(
+            "".join(f"file '{p.as_posix()}'\n" for p in local_paths),
+            encoding="utf-8",
+        )
+
+        output_path = tmp_path / "merged.mp4"
+
+        # 先尝试 copy 模式（最快、零损失）
+        copy_ok = await _run_ffmpeg(
+            args=[
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel", "error",
+                "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", str(list_file),
+                "-c", "copy",
+                str(output_path),
+            ],
+        )
+
+        if not copy_ok or not output_path.exists() or output_path.stat().st_size == 0:
+            # fallback：重编码——编码参数差异时唯一可靠路径
+            logger.info(
+                "[concat_videos] -c copy 模式失败或产物为空，fallback 到重编码"
+            )
+            output_path.unlink(missing_ok=True)
+            reencode_ok = await _run_ffmpeg(
+                args=[
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel", "error",
+                    "-y",
+                    "-f", "concat",
+                    "-safe", "0",
+                    "-i", str(list_file),
+                    "-c:v", "libx264",
+                    "-preset", "fast",
+                    "-crf", "20",
+                    "-c:a", "aac",
+                    "-b:a", "192k",
+                    str(output_path),
+                ],
+            )
+            if not reencode_ok or not output_path.exists() or output_path.stat().st_size == 0:
+                raise _ConcatError(
+                    code="FFMPEG_FAILED",
+                    message="ffmpeg 拼接失败（copy 和重编码两种模式都没产出有效文件）",
+                    hint="可能服务器缺 ffmpeg；或源视频编码异常",
+                )
+
+        merged_bytes = output_path.read_bytes()
+        return merged_bytes, total_duration
+
+
+async def _run_ffmpeg(*, args: list[str]) -> bool:
+    """执行 ffmpeg 子进程，超时 / 非零退出码返回 False。"""
+    try:
+        proc = await asyncio.wait_for(
+            asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            ),
+            timeout=10.0,  # 启动子进程的超时（不是运行超时）
+        )
+    except FileNotFoundError:
+        logger.error(
+            "[concat_videos] ffmpeg 二进制未找到——服务器需要安装 ffmpeg"
+        )
+        return False
+    except asyncio.TimeoutError:
+        return False
+
+    try:
+        _, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=_CONCAT_FFMPEG_TIMEOUT_SECONDS
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return False
+
+    if proc.returncode != 0:
+        logger.warning(
+            "[concat_videos] ffmpeg 退出码 %s; stderr=%s",
+            proc.returncode,
+            stderr.decode("utf-8", errors="ignore")[-500:] if stderr else "(empty)",
+        )
+        return False
+
+    return True

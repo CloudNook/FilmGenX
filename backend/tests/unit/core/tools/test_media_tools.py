@@ -640,3 +640,315 @@ async def test_generate_video_outer_timeout_kills_hung_subtask(monkeypatch):
     )
     assert result.get("ok") is False
     assert result["error_code"] == "VIDEO_TOOL_TIMEOUT"
+
+
+# --------------------------------------------------------------------- #
+# concat_videos —— 按顺序拼接多段视频成成片
+# --------------------------------------------------------------------- #
+
+
+class _FakeVideoAsset:
+    """模拟 Asset ORM 行：concat_videos 只读 asset_code / asset_type / file_url /
+    duration_sec / tags。"""
+
+    def __init__(
+        self,
+        *,
+        asset_code: str,
+        file_url: str,
+        duration_sec: float,
+        aspect_ratio: str = "16:9",
+        asset_type: str = "video",
+        tags: list[str] | None = None,
+    ):
+        self.asset_code = asset_code
+        self.file_url = file_url
+        self.duration_sec = duration_sec
+        self.asset_type = asset_type
+        # 仿照 generate_video 实际入库的 tag 结构
+        self.tags = (tags or []) + [f"aspect_ratio:{aspect_ratio}"]
+
+
+def _patch_concat_lookup(
+    monkeypatch,
+    assets_by_code: dict[str, _FakeVideoAsset],
+    *,
+    missing: list[str] | None = None,
+):
+    """patch ``_lookup_video_assets_by_code`` 直接返预设映射，保持输入顺序。"""
+
+    async def _fake_lookup(*, project_id, codes):
+        ordered: list[_FakeVideoAsset] = []
+        not_found: list[str] = list(missing or [])
+        for code in codes:
+            if code in (missing or []):
+                continue
+            asset = assets_by_code.get(code)
+            if asset is None:
+                not_found.append(code)
+                continue
+            ordered.append(asset)
+        return ordered, not_found
+
+    monkeypatch.setattr(
+        "app.core.tools.media_tools._lookup_video_assets_by_code",
+        _fake_lookup,
+    )
+
+
+def _patch_concat_pipeline_success(
+    monkeypatch,
+    *,
+    merged_bytes: bytes = b"\x00\x00\x00\x18ftypmp42fakebytes",
+    total_duration: float = 30.0,
+):
+    """patch ffmpeg 管道：跳过实际下载 / 拼接，直接返预设 bytes + duration。"""
+
+    async def _fake_pipeline(sources):
+        return merged_bytes, total_duration
+
+    monkeypatch.setattr(
+        "app.core.tools.media_tools._concat_video_pipeline",
+        _fake_pipeline,
+    )
+
+
+def _patch_oss_upload_concat(monkeypatch, *, url: str = "https://oss/concat/final.mp4"):
+    """绕过 OSS 实际上传，返预设 URL。"""
+
+    class _FakeOSS:
+        def upload_bytes(self, data, *, filename, directory=None, unique=True):
+            return url
+
+    monkeypatch.setattr("app.utils.oss.oss_client", _FakeOSS())
+
+
+def _patch_video_asset_save(monkeypatch, *, code: str = "vid-final", asset_id: int = 999):
+    """绕过 _save_video_asset DB 写入。"""
+
+    async def _fake_save(**kwargs):
+        return (code, asset_id)
+
+    monkeypatch.setattr(
+        "app.core.tools.media_tools._save_video_asset",
+        _fake_save,
+    )
+
+
+@pytest.mark.asyncio
+async def test_concat_videos_success_orders_by_input(monkeypatch):
+    """成功路径：3 段同 aspect_ratio 视频 → 拼成一段，duration 累加，segment_count=3。"""
+    assets = {
+        "vid-shot1": _FakeVideoAsset(
+            asset_code="vid-shot1", file_url="https://oss/s1.mp4", duration_sec=5
+        ),
+        "vid-shot2": _FakeVideoAsset(
+            asset_code="vid-shot2", file_url="https://oss/s2.mp4", duration_sec=8
+        ),
+        "vid-shot3": _FakeVideoAsset(
+            asset_code="vid-shot3", file_url="https://oss/s3.mp4", duration_sec=7
+        ),
+    }
+    _patch_concat_lookup(monkeypatch, assets)
+    _patch_concat_pipeline_success(monkeypatch, total_duration=20.0)
+    _patch_oss_upload_concat(monkeypatch, url="https://oss/concat/final.mp4")
+    _patch_video_asset_save(monkeypatch, code="vid-finalcut", asset_id=99)
+
+    from app.core.tools.media_tools import concat_videos
+
+    result = await concat_videos(
+        asset_codes=["vid-shot1", "vid-shot2", "vid-shot3"],
+        name="云岚宗短剧·完整 20s",
+        description="3 段拼接测试",
+        tags=["final-cut"],
+        memory_harness=_FakeMemoryHarness(domain_id=1),
+    )
+
+    assert result["success"] is True
+    assert result["asset_code"] == "vid-finalcut"
+    assert result["asset_id"] == 99
+    assert result["url"] == "https://oss/concat/final.mp4"
+    assert result["segment_count"] == 3
+    assert result["total_duration_seconds"] == 20.0
+    assert result["aspect_ratio"] == "16:9"
+    # source_codes 保持输入顺序
+    assert result["source_codes"] == ["vid-shot1", "vid-shot2", "vid-shot3"]
+
+
+@pytest.mark.asyncio
+async def test_concat_videos_missing_project_id_returns_error():
+    from app.core.tools.media_tools import concat_videos
+
+    result = await concat_videos(
+        asset_codes=["vid-a", "vid-b"],
+        name="test",
+        memory_harness=None,
+    )
+    assert result.get("ok") is False
+    assert result["error_code"] == "PROJECT_ID_MISSING"
+
+
+@pytest.mark.asyncio
+async def test_concat_videos_rejects_single_segment(monkeypatch):
+    """只传 1 个 code → 拒：拼接没意义。"""
+    from app.core.tools.media_tools import concat_videos
+
+    result = await concat_videos(
+        asset_codes=["vid-only"],
+        name="test",
+        memory_harness=_FakeMemoryHarness(),
+    )
+    assert result.get("ok") is False
+    assert result["error_code"] == "ASSET_CODES_TOO_FEW"
+
+
+@pytest.mark.asyncio
+async def test_concat_videos_rejects_bad_type(monkeypatch):
+    """asset_codes 是 dict / int 等非 list[str] → 结构化错误。
+    （单 string "vid-a" 会被 normalize 当 1-element list 宽容处理，不算 BAD_TYPE。）"""
+    from app.core.tools.media_tools import concat_videos
+
+    result = await concat_videos(
+        asset_codes={"shot1": "vid-a"},  # type: ignore[arg-type]
+        name="test",
+        memory_harness=_FakeMemoryHarness(),
+    )
+    assert result.get("ok") is False
+    assert result["error_code"] == "ASSET_CODES_BAD_TYPE"
+
+
+@pytest.mark.asyncio
+async def test_concat_videos_missing_code_returns_error(monkeypatch):
+    """asset_code 在 DB 查不到 → 结构化错误，列出 missing。"""
+    assets = {
+        "vid-shot1": _FakeVideoAsset(
+            asset_code="vid-shot1", file_url="https://oss/s1.mp4", duration_sec=5
+        ),
+    }
+    _patch_concat_lookup(monkeypatch, assets, missing=["vid-ghost"])
+
+    from app.core.tools.media_tools import concat_videos
+
+    result = await concat_videos(
+        asset_codes=["vid-shot1", "vid-ghost"],
+        name="test",
+        memory_harness=_FakeMemoryHarness(),
+    )
+    assert result.get("ok") is False
+    assert result["error_code"] == "ASSET_CODES_NOT_FOUND"
+    assert "vid-ghost" in result["context"]["missing"]
+
+
+@pytest.mark.asyncio
+async def test_concat_videos_rejects_non_video_asset(monkeypatch):
+    """asset_type != 'video' → 拒（避免误把图片传进来）。"""
+    assets = {
+        "vid-shot1": _FakeVideoAsset(
+            asset_code="vid-shot1", file_url="https://oss/s1.mp4", duration_sec=5
+        ),
+        "img-shot2": _FakeVideoAsset(
+            asset_code="img-shot2",
+            file_url="https://oss/s2.png",
+            duration_sec=0,
+            asset_type="image",
+        ),
+    }
+    _patch_concat_lookup(monkeypatch, assets)
+
+    from app.core.tools.media_tools import concat_videos
+
+    result = await concat_videos(
+        asset_codes=["vid-shot1", "img-shot2"],
+        name="test",
+        memory_harness=_FakeMemoryHarness(),
+    )
+    assert result.get("ok") is False
+    assert result["error_code"] == "ASSET_NOT_VIDEO"
+    assert "img-shot2" in result["context"]["non_video"]
+
+
+@pytest.mark.asyncio
+async def test_concat_videos_rejects_aspect_ratio_mismatch(monkeypatch):
+    """aspect_ratio 不一致 → 拒，列出每段的 aspect_ratio 供 agent 决定哪段重出。"""
+    assets = {
+        "vid-shot1": _FakeVideoAsset(
+            asset_code="vid-shot1", file_url="https://oss/s1.mp4",
+            duration_sec=5, aspect_ratio="16:9",
+        ),
+        "vid-shot2": _FakeVideoAsset(
+            asset_code="vid-shot2", file_url="https://oss/s2.mp4",
+            duration_sec=5, aspect_ratio="9:16",
+        ),
+    }
+    _patch_concat_lookup(monkeypatch, assets)
+
+    from app.core.tools.media_tools import concat_videos
+
+    result = await concat_videos(
+        asset_codes=["vid-shot1", "vid-shot2"],
+        name="test",
+        memory_harness=_FakeMemoryHarness(),
+    )
+    assert result.get("ok") is False
+    assert result["error_code"] == "ASPECT_RATIO_MISMATCH"
+    assert set(result["context"]["aspect_ratios"]) == {"16:9", "9:16"}
+
+
+@pytest.mark.asyncio
+async def test_concat_videos_ffmpeg_pipeline_failure_reported(monkeypatch):
+    """_concat_video_pipeline 抛 _ConcatError → 结构化错误向上透传。"""
+    assets = {
+        "vid-shot1": _FakeVideoAsset(
+            asset_code="vid-shot1", file_url="https://oss/s1.mp4", duration_sec=5
+        ),
+        "vid-shot2": _FakeVideoAsset(
+            asset_code="vid-shot2", file_url="https://oss/s2.mp4", duration_sec=5
+        ),
+    }
+    _patch_concat_lookup(monkeypatch, assets)
+
+    from app.core.tools.media_tools import _ConcatError
+
+    async def _explode(sources):
+        raise _ConcatError(
+            code="FFMPEG_FAILED",
+            message="ffmpeg 拼接失败",
+            hint="检查二进制",
+        )
+
+    monkeypatch.setattr("app.core.tools.media_tools._concat_video_pipeline", _explode)
+
+    from app.core.tools.media_tools import concat_videos
+
+    result = await concat_videos(
+        asset_codes=["vid-shot1", "vid-shot2"],
+        name="test",
+        memory_harness=_FakeMemoryHarness(),
+    )
+    assert result.get("ok") is False
+    assert result["error_code"] == "FFMPEG_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_concat_videos_preserves_input_order(monkeypatch):
+    """输入顺序 = 输出顺序：source_codes 字段必须反映 agent 传入的播放序。"""
+    assets = {
+        "vid-a": _FakeVideoAsset(asset_code="vid-a", file_url="https://oss/a.mp4", duration_sec=5),
+        "vid-b": _FakeVideoAsset(asset_code="vid-b", file_url="https://oss/b.mp4", duration_sec=5),
+        "vid-c": _FakeVideoAsset(asset_code="vid-c", file_url="https://oss/c.mp4", duration_sec=5),
+    }
+    _patch_concat_lookup(monkeypatch, assets)
+    _patch_concat_pipeline_success(monkeypatch)
+    _patch_oss_upload_concat(monkeypatch)
+    _patch_video_asset_save(monkeypatch)
+
+    from app.core.tools.media_tools import concat_videos
+
+    # 反向输入——验证不被字典序 / 任何 reordering 干扰
+    result = await concat_videos(
+        asset_codes=["vid-c", "vid-a", "vid-b"],
+        name="reverse-order-test",
+        memory_harness=_FakeMemoryHarness(),
+    )
+    assert result["success"] is True
+    assert result["source_codes"] == ["vid-c", "vid-a", "vid-b"]

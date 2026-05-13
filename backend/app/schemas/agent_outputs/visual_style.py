@@ -61,22 +61,28 @@ class LightingStyle(BaseModel):
     key_light: str = Field(
         ...,
         title="主光",
-        description="主光源描述，如 '强烈侧光 / 逆光，强调角色轮廓'",
+        description=(
+            "主光源描述（含色温 K + 方向 + 硬软）。"
+            "如 'hard 5600K key light at 45° camera-left, 1:8 key:fill ratio'"
+        ),
     )
-    fill: str = Field(
+    fill_light: str = Field(
         ...,
         title="补光",
-        description="补光强度与色温，如 '低填充，暗部保留细节'",
+        description="补光强度与色温，如 'low fill, 1:8 ratio, deep shadows in lower half'",
     )
-    practical_sources: str = Field(
+    practical_lights: str = Field(
         ...,
-        title="实感光源",
-        description="场景内自然 / 实体光源描述，如 '斗气发光体作为天然光源'",
+        title="场景灯",
+        description=(
+            "画面里可见的人造光源（灯笼 / 蜡烛 / 屏幕 / 霓虹等），"
+            "含位置 + 颜色。如 'rooftop neon (cyan + magenta), street lamps (warm sodium)'"
+        ),
     )
-    default_time_of_day: str = Field(
+    time_of_day_default: str = Field(
         ...,
         title="基准时段",
-        description="整片基准时段，如 'sunset / golden hour' 或 'night with neon'",
+        description="整片基准时段，如 'golden hour' / 'night, post-rain' / 'blue hour'",
     )
 
 
@@ -86,17 +92,17 @@ class CompositionStyle(BaseModel):
     framing: str = Field(
         ...,
         title="取景",
-        description="取景倾向，如 '动态倾斜构图，强化战斗张力'",
+        description="取景倾向，如 'dynamic framing, extreme dutch angles, aggressive diagonal lines'",
     )
-    depth_strategy: str = Field(
+    depth: str = Field(
         ...,
         title="纵深",
-        description="纵深处理，如 '强调前景 - 中景 - 背景三层'",
+        description="纵深策略，如 'multi-layered depth with flying debris in foreground, motion-blurred background'",
     )
-    rule_of_thirds_strategy: str = Field(
+    rule_of_thirds: str = Field(
         ...,
         title="三分法",
-        description="三分法应用策略，如 '关键帧优先三分法，特写可突破'",
+        description="三分法应用策略，如 'weakly applied, favoring off-center extreme close-ups'",
     )
 
 
@@ -106,17 +112,20 @@ class CharacterArtStyle(BaseModel):
     proportions: str = Field(
         ...,
         title="比例",
-        description="人物比例，如 'anime, slightly stylized, 7-8 头身'",
+        description="人物比例，如 'realistic 7.5-8 head proportion, dynamic anatomy'",
     )
     linework: str = Field(
         ...,
         title="线条",
-        description="线条风格，如 '锐利线条，强调力量感'",
+        description=(
+            "线条风格 / 渲染手法，如 'no 2D outlines, high-end 3D CG render, subsurface scattering on skin'"
+            " 或 'anime cel-shading, clean 2-tone separation'"
+        ),
     )
-    expression_style: str = Field(
+    expression: str = Field(
         ...,
         title="表情",
-        description="表情风格，如 '夸张表情（愤怒 / 决心为主）'",
+        description="表情风格，如 'highly stylized extreme expressions of fury and despair'",
     )
 
 

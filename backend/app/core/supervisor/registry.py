@@ -235,9 +235,10 @@ def build_default_registry() -> SupervisorAgentRegistry:
             _build_registered_agent(
                 name="video_prompt_agent",
                 label="Video Prompt Agent",
-                description="Produces per-shot text-to-video prompts ready for Seedance reference-to-video",
+                description="Produces per-shot text-to-video prompts ready for Seedance reference-to-video, then concatenates all segments into a final cut",
                 node_keys=["video_prompt"],
-                extra_tool_names=["generate_video"],
+                # generate_video 出单段；concat_videos 把多段按 storyboard 顺序拼成成片
+                extra_tool_names=["generate_video", "concat_videos"],
             ),
         ]
     )

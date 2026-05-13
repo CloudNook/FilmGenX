@@ -158,7 +158,15 @@ export function SubAgentResultCard({
   // 未知 sub-agent 名传空字符串，hook 内部找不到 schema 返回 null，不影响兜底分支。
   const schema = useAgentSchema(subAgentName);
 
-  if (rawResult == null) return null;
+  if (rawResult == null) {
+    // 诊断兜底：result 为空时之前直接 return null → 卡片完全空白，用户无法判断
+    // 是渲染 bug 还是数据缺失。换成明确警告。
+    return (
+      <p className="text-xs italic text-amber-700/80">
+        ⚠️ result 为空（subAgentName={subAgentName || '?'})
+      </p>
+    );
+  }
 
   // 兼容：从持久化历史回灌时，tool_end.result 可能是 JSON 字符串（``agent_messages.content``
   // 是 string，``_record_to_history_events`` 直接传给 result）。先尝试 parse 一次让后续
@@ -221,16 +229,16 @@ export function SubAgentResultCard({
           }
           break;
       }
-      // 4 个新 sub-agent（visual_style / character_ref / scene_ref / video_prompt）
-      // 暂未实现专用 renderer，走 schema-aware 通用展示
-      if (
-        GENERIC_AGENT_NAMES.has(subAgentName) &&
-        parsed &&
-        typeof parsed === 'object'
-      ) {
+      // 任何 sub-agent 的 JSON 输出都走 schema-aware 通用展示作为兜底——
+      // 原本只让 visual_style / character_ref / scene_ref / video_prompt 走这条，
+      // 但 outline / script / storyboard 的专用 renderer 检测的字段（title/acts/scenes）
+      // 跟新 prompt 实际输出（summary/key_arcs/scenes）对不上 → 总是 fallback 到 JsonFallback
+      // 显示一坨 raw JSON。现在统一兜底：专用 renderer 不命中时，至少给一个**结构化**
+      // 的 GenericSchemaRenderer，按字段层级展示，比 JsonFallback 强得多。
+      if (parsed && typeof parsed === 'object') {
         return <GenericSchemaRenderer data={parsed} schema={schema} />;
       }
-      // 已成功 parse 为 JSON 但 schema 不对：退回 JSON pretty print
+      // 已成功 parse 但不是对象（数组 / 标量等）：退回 JSON pretty print
       return <JsonFallback value={parsed} />;
     }
     // 不是 JSON：当成纯文本（LLM 偶尔不按 schema 输出）
@@ -254,11 +262,40 @@ interface ToolErrorPayload {
 }
 
 function tryParseJson(text: string): unknown | null {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
+  // schema-free sub-agent（全部 7 个 agent 都走这条路）的 raw_output 形如：
+  //   "本剧大纲设计如下……\n\n<output>\n{...JSON...}\n</output>"
+  // 直接 JSON.parse(text) 会失败——必须先抽 <output> 标签里的 JSON 再 parse。
+  //
+  // 兜底优先级：
+  //   1. <output>...</output> 标签内层（业务约定，最稳）
+  //   2. ```json ... ``` 代码栏（LLM 偶尔漏写标签，但用 markdown code fence）
+  //   3. 整段原文（schema-locked 时代的旧产物兼容）
+  const candidates = [
+    extractOutputTag(text),
+    extractFencedJson(text),
+    text,
+  ].filter((s): s is string => typeof s === 'string' && s.trim().length > 0);
+
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // 继续尝试下一个候选源
+    }
   }
+  return null;
+}
+
+function extractOutputTag(text: string): string | null {
+  // 匹配 <output>...</output>，非贪婪跨行，大小写不敏感
+  const match = text.match(/<output>([\s\S]*?)<\/output>/i);
+  return match ? match[1].trim() : null;
+}
+
+function extractFencedJson(text: string): string | null {
+  // 匹配 ```json ... ``` 或 ``` ... ```（兼容 LLM 偶尔漏 <output> 标签，但用 md code fence）
+  const match = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  return match ? match[1].trim() : null;
 }
 
 function looksLikeOutline(v: unknown): boolean {

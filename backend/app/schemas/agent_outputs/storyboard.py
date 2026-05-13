@@ -94,11 +94,35 @@ class Shot(BaseModel):
         title="画面描述",
         description="画面内容详述，包括人物动作、表情、关键道具、光影色彩",
     )
+    characters_in_shot: List[str] = Field(
+        default_factory=list,
+        title="出场角色",
+        description=(
+            "本镜出场角色名清单（与 outline / script 中的姓名一字不差）。"
+            "下游 video_prompt_agent 按此挑选 character_ref 的参考图变体。"
+        ),
+    )
     duration_seconds: float = Field(
         ...,
         gt=0,
         title="时长",
         description="镜头时长（秒）",
+    )
+    time_start_seconds: float = Field(
+        ...,
+        ge=0,
+        title="起始时间",
+        description=(
+            "本镜在整片中的**绝对起始时间**（秒，从 0 开始）。"
+            "由 storyboard 阶段累加生成：shot[i].time_start = shot[i-1].time_end。"
+            "下游 video_prompt 必须依赖这个字段维持时间连贯性。"
+        ),
+    )
+    time_end_seconds: float = Field(
+        ...,
+        gt=0,
+        title="结束时间",
+        description="本镜在整片中的**绝对结束时间**（秒）= time_start_seconds + duration_seconds",
     )
     audio_notes: Optional[str] = Field(
         None,
@@ -124,6 +148,15 @@ class StoryboardOutput(BaseModel):
         ...,
         title="基于剧本",
         description="对应剧本版本或场景范围说明",
+    )
+    total_duration_seconds: float = Field(
+        ...,
+        gt=0,
+        title="总时长",
+        description=(
+            "全片总时长（秒）= 所有 shot.duration_seconds 之和；"
+            "也等于最后一个 shot 的 time_end_seconds。下游用此校验时间轴累加正确。"
+        ),
     )
     shots: List[Shot] = Field(
         ...,
